@@ -1,0 +1,11 @@
+{
+    "CreatedAt": "2020-09-30T15:13:42Z",
+    "Driver": "local",
+    "Labels": {
+        "com.docker.stack.namespace": "dodo"
+    },
+    "Mountpoint": "/var/lib/docker/volumes/dodo_dodo-workers-rabbitmq-data/_data",
+    "Name": "dodo_dodo-workers-rabbitmq-data",
+    "Options": null,
+    "Scope": "local"
+}

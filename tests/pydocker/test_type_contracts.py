@@ -7,7 +7,7 @@ from pydocker.components.buildx.cli_wrapper import BakeResult
 from pydocker.components.buildx.imagetools.models import Manifest
 from pydocker.components.compose.models import ComposeEvent
 from pydocker.components.system.models import DockerEvent
-from pydocker.components.top import ComposeTopResult, ContainerTopResult, PodTopResult
+from pydocker.components.top import ComposeTopResult, ContainerTopResult
 from pydocker.utils import MappedProcessStream, ProcessStream, stream_stdout_and_stderr
 
 
@@ -36,9 +36,6 @@ def _check_process_contracts(client: DockerClient, raw: bool) -> None:
     assert_type(client.compose.top(), ComposeTopResult)
     assert_type(client.compose.top(["service"], raw=True), str)
     assert_type(client.compose.top([], raw=raw), ComposeTopResult | str)
-    assert_type(client.pod.top("pod", "pid,args"), PodTopResult)
-    assert_type(client.pod.top("pod", raw=True), str)
-    assert_type(client.pod.top("pod", raw=raw), PodTopResult | str)
     assert_type(client.system.events(), MappedProcessStream[DockerEvent])
     assert_type(client.compose.events(), MappedProcessStream[ComposeEvent])
     with stream_stdout_and_stderr(["command"]) as stream:

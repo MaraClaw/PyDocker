@@ -16,19 +16,6 @@ from pydocker.test_utils import get_all_jsons, random_name
 from pydocker.utils import stream_stdout_and_stderr
 
 
-@pytest.mark.parametrize(
-    "ctr_client",
-    [
-        "docker",
-        pytest.param(
-            "podman",
-            marks=pytest.mark.xfail(
-                reason="podman does not return reclaimable disk space information"
-            ),
-        ),
-    ],
-    indirect=True,
-)
 def test_disk_free(ctr_client: DockerClient) -> None:
     ctr_client.pull("busybox")
     ctr_client.pull("busybox:1")
@@ -40,7 +27,6 @@ def test_disk_free(ctr_client: DockerClient) -> None:
     assert images.size > 2000
 
 
-@pytest.mark.parametrize("ctr_client", ["docker", "podman"], indirect=True)
 def test_info(ctr_client: DockerClient) -> None:
     info = ctr_client.system.info()
     assert info.plugins is not None
@@ -110,19 +96,6 @@ def test_parsing_events() -> None:
         assert parsed.time.date() == date(2020, 12, 28)
 
 
-@pytest.mark.parametrize(
-    "ctr_client",
-    [
-        "docker",
-        pytest.param(
-            "podman",
-            marks=pytest.mark.xfail(
-                reason="'podman image list' returns image IDs with 'sha256:' prefix"
-            ),
-        ),
-    ],
-    indirect=True,
-)
 def test_prune_prunes_image(ctr_client: DockerClient) -> None:
     # TODO: Test dangling image
     for container in ctr_client.container.list(filters={"ancestor": "busybox"}):
@@ -151,7 +124,6 @@ def test_prune_prunes_image(ctr_client: DockerClient) -> None:
     assert image not in ctr_client.image.list()
 
 
-@pytest.mark.parametrize("ctr_client", ["docker", "podman"], indirect=True)
 def test_prune_prunes_container(ctr_client: DockerClient) -> None:
     stopped_container = ctr_client.run("hello-world", remove=False, detach=True)
     running_container = ctr_client.run(
@@ -168,7 +140,6 @@ def test_prune_prunes_container(ctr_client: DockerClient) -> None:
     ctr_client.container.remove(running_container, force=True)
 
 
-@pytest.mark.parametrize("ctr_client", ["docker", "podman"], indirect=True)
 def test_prune_prunes_network(ctr_client: DockerClient) -> None:
     network_name = random_name()
     my_net = ctr_client.network.create(network_name)
@@ -177,7 +148,6 @@ def test_prune_prunes_network(ctr_client: DockerClient) -> None:
     assert my_net not in ctr_client.network.list()
 
 
-@pytest.mark.parametrize("ctr_client", ["docker", "podman"], indirect=True)
 def test_prune_prunes_volumes(ctr_client: DockerClient) -> None:
     some_volume = ctr_client.volume.create(driver="local")
     ctr_client.run(

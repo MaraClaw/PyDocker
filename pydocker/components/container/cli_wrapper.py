@@ -23,7 +23,6 @@ from typing_extensions import TypedDict
 
 import pydocker.components.image.cli_wrapper
 import pydocker.components.network.cli_wrapper
-import pydocker.components.pod.cli_wrapper
 import pydocker.components.volume.cli_wrapper
 from pydocker.client_config import (
     ClientConfig,
@@ -76,7 +75,6 @@ type ContainerListFilter = (
     | tuple[Literal["since"], str]
     | tuple[Literal["volume"], str]
     | tuple[Literal["network"], str]
-    | tuple[Literal["pod"], str]
     | tuple[Literal["publish"], str]
     | tuple[Literal["expose"], str]
     | tuple[Literal["health"], Literal["starting", "healthy", "unhealthy", "none"]]
@@ -167,10 +165,6 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         return self._get_inspect_result().image
 
     @property
-    def pod(self) -> str | None:
-        return self._get_inspect_result().pod
-
-    @property
     def resolv_conf_path(self) -> str | None:
         return self._get_inspect_result().resolv_conf_path
 
@@ -250,14 +244,6 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
     @property
     def network_settings(self) -> NetworkSettings | None:
         return self._get_inspect_result().network_settings
-
-    @property
-    def namespace(self) -> str | None:
-        return self._get_inspect_result().namespace
-
-    @property
-    def is_infra(self) -> bool | None:
-        return self._get_inspect_result().is_infra
 
     @override
     def __repr__(self) -> str:
@@ -409,13 +395,6 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         information about the arguments.
         """
         return ContainerCLI(self.client_config).export(self, output)
-
-    def init(self) -> None:
-        """Initialize this container.
-
-        See the [`docker.container.init`](../sub-commands/container.md#init) command.
-        """
-        return ContainerCLI(self.client_config).init(self)
 
     def kill(self, signal: int | str | None = None) -> None:
         """Kill this container
@@ -587,7 +566,6 @@ class RunArgs(TypedDict, total=False, closed=True):
     entrypoint: str | None
     envs: Mapping[str, str]
     env_files: ValidPath | Iterable[ValidPath]
-    env_host: bool
     expose: int | Iterable[int]
     gpus: int | str | None
     groups_add: Iterable[str]
@@ -625,8 +603,6 @@ class RunArgs(TypedDict, total=False, closed=True):
     pid: str | None
     pids_limit: int | None
     platform: str | None
-    pod: pydocker.components.pod.cli_wrapper.ValidPod | None
-    preserve_fds: int | None
     privileged: bool
     publish: Iterable[ValidPortMapping]
     publish_all: bool
@@ -643,10 +619,8 @@ class RunArgs(TypedDict, total=False, closed=True):
     stop_timeout: int | None
     storage_options: Iterable[str]
     sysctl: Mapping[str, str]
-    systemd: bool | Literal["always"] | None
     tmpfs: Iterable[ValidPath]
     tty: bool
-    tz: str | None
     ulimit: Iterable[str]
     user: str | None
     userns: str | None
@@ -799,7 +773,6 @@ class ContainerCLI(DockerCLICaller):
         entrypoint: str | None = None,
         envs: Mapping[str, str] = {},
         env_files: ValidPath | Iterable[ValidPath] = (),
-        env_host: bool = False,
         expose: int | Iterable[int] = (),
         gpus: int | str | None = None,
         groups_add: Iterable[str] = (),
@@ -837,7 +810,6 @@ class ContainerCLI(DockerCLICaller):
         pid: str | None = None,
         pids_limit: int | None = None,
         platform: str | None = None,
-        pod: pydocker.components.pod.cli_wrapper.ValidPod | None = None,
         privileged: bool = False,
         publish: Iterable[ValidPortMapping] = (),
         publish_all: bool = False,
@@ -853,10 +825,8 @@ class ContainerCLI(DockerCLICaller):
         stop_timeout: int | None = None,
         storage_options: Iterable[str] = (),
         sysctl: Mapping[str, str] = {},
-        systemd: bool | Literal["always"] | None = None,
         tmpfs: Iterable[ValidPath] = (),
         tty: bool = False,
-        tz: str | None = None,
         ulimit: Iterable[str] = (),
         user: str | None = None,
         userns: str | None = None,
@@ -945,7 +915,6 @@ class ContainerCLI(DockerCLICaller):
 
         full_cmd.add_args_mapping("--env", envs)
         full_cmd.add_args_iterable_or_single("--env-file", env_files)
-        full_cmd.add_flag("--env-host", env_host)
 
         full_cmd.add_args_iterable_or_single("--expose", expose)
 
@@ -1003,7 +972,6 @@ class ContainerCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--pids-limit", pids_limit)
 
         full_cmd.add_simple_arg("--platform", platform)
-        full_cmd.add_simple_arg("--pod", pod)
         full_cmd.add_flag("--privileged", privileged)
 
         full_cmd.add_args_iterable("-p", (format_port_arg(p) for p in publish))
@@ -1028,10 +996,8 @@ class ContainerCLI(DockerCLICaller):
 
         full_cmd.add_args_iterable("--storage-opt", storage_options)
         full_cmd.add_args_mapping("--sysctl", sysctl)
-        full_cmd.add_simple_arg("--systemd", systemd)
         full_cmd.add_args_iterable("--tmpfs", tmpfs)
         full_cmd.add_flag("--tty", tty)
-        full_cmd.add_simple_arg("--tz", tz)
         full_cmd.add_args_iterable("--ulimit", ulimit)
 
         full_cmd.add_simple_arg("--user", user)
@@ -1079,7 +1045,6 @@ class ContainerCLI(DockerCLICaller):
         *,
         detach: Literal[True],
         stream: bool = False,
-        preserve_fds: int | None = None,
         **kwargs: Unpack[ExecuteArgs],
     ) -> None: ...
 
@@ -1091,7 +1056,6 @@ class ContainerCLI(DockerCLICaller):
         *,
         detach: Literal[False] = False,
         stream: Literal[True],
-        preserve_fds: int | None = None,
         **kwargs: Unpack[ExecuteArgs],
     ) -> ProcessStream: ...
 
@@ -1103,7 +1067,6 @@ class ContainerCLI(DockerCLICaller):
         *,
         detach: Literal[False] = False,
         stream: Literal[False] = False,
-        preserve_fds: int | None = None,
         **kwargs: Unpack[ExecuteArgs],
     ) -> str: ...
 
@@ -1122,7 +1085,6 @@ class ContainerCLI(DockerCLICaller):
         workdir: ValidPath | None = None,
         stream: bool = False,
         detach_keys: str | None = None,
-        preserve_fds: int | None = None,
     ) -> str | ProcessStream | None: ...
 
     def execute(
@@ -1139,7 +1101,6 @@ class ContainerCLI(DockerCLICaller):
         workdir: ValidPath | None = None,
         stream: bool = False,
         detach_keys: str | None = None,
-        preserve_fds: int | None = None,
     ) -> str | ProcessStream | None:
         """Execute a command inside a container
 
@@ -1157,8 +1118,6 @@ class ContainerCLI(DockerCLICaller):
                 Can be combined with `stream=True` to get an
                 `ProcessStream` that allows writing to stdin while
                 iterating over stdout/stderr.
-            preserve_fds: The number of additional file descriptors to pass
-                through to the container. Only supported by podman.
             privileged: Give extended privileges to the container.
             tty: Allocate a pseudo-TTY. Allow the process to access your terminal
                 to write on it.
@@ -1206,7 +1165,6 @@ class ContainerCLI(DockerCLICaller):
             )
 
         full_cmd.add_flag("--interactive", interactive)
-        full_cmd.add_simple_arg("--preserve-fds", preserve_fds)
         full_cmd.add_flag("--privileged", privileged)
         full_cmd.add_flag("--tty", tty)
 
@@ -1216,13 +1174,12 @@ class ContainerCLI(DockerCLICaller):
         full_cmd.append(container)
         full_cmd.extend(command)
 
-        pass_fds = range(3, 3 + preserve_fds) if preserve_fds is not None else ()
         if stream:
             return stream_stdout_and_stderr(
-                full_cmd, pass_fds=pass_fds, pipe_stdin=interactive
+                full_cmd, pipe_stdin=interactive, pass_fds=()
             )
         else:
-            result = run(full_cmd, tty=tty, pass_fds=pass_fds)
+            result = run(full_cmd, tty=tty, pass_fds=())
             if detach:
                 return None
             else:
@@ -1267,36 +1224,6 @@ class ContainerCLI(DockerCLICaller):
             raise NotImplementedError
         else:
             run(full_cmd)
-
-    def init(self, containers: ValidContainer | Iterable[ValidContainer]) -> None:
-        """Initialize one or more containers.
-
-        Note that this is only supported by podman.
-
-        Alias: `docker.init(...)`
-
-        Parameters:
-            containers: One or more containers to kill
-            output: The path of the output tar archive. Returning a generator of bytes
-                is not yet implemented.
-
-        # Raises
-            `pydocker.exceptions.NoSuchContainer` if any of the
-            containers do not exist.
-        """
-        container_list = (
-            [containers]
-            if isinstance(containers, str | Container)
-            else list(containers)
-        )
-        if len(container_list) == 0:
-            # nothing to do
-            return
-
-        full_cmd = Command([*self.docker_cmd, "container", "init"])
-        full_cmd += container_list
-
-        run(full_cmd)
 
     @overload
     def inspect(self, x: ValidContainer, /) -> Container: ...
@@ -1774,7 +1701,6 @@ class ContainerCLI(DockerCLICaller):
         entrypoint: str | None = None,
         envs: Mapping[str, str] = {},
         env_files: ValidPath | Iterable[ValidPath] = (),
-        env_host: bool = False,
         expose: int | Iterable[int] = (),
         gpus: int | str | None = None,
         groups_add: Iterable[str] = (),
@@ -1812,8 +1738,6 @@ class ContainerCLI(DockerCLICaller):
         pid: str | None = None,
         pids_limit: int | None = None,
         platform: str | None = None,
-        pod: pydocker.components.pod.cli_wrapper.ValidPod | None = None,
-        preserve_fds: int | None = None,
         privileged: bool = False,
         publish: Iterable[ValidPortMapping] = (),
         publish_all: bool = False,
@@ -1831,10 +1755,8 @@ class ContainerCLI(DockerCLICaller):
         storage_options: Iterable[str] = (),
         stream: bool = False,
         sysctl: Mapping[str, str] = {},
-        systemd: bool | Literal["always"] | None = None,
         tmpfs: Iterable[ValidPath] = (),
         tty: bool = False,
-        tz: str | None = None,
         ulimit: Iterable[str] = (),
         user: str | None = None,
         userns: str | None = None,
@@ -1940,8 +1862,6 @@ class ContainerCLI(DockerCLICaller):
             envs: Environment variables as a `dict`.
                 For example: `{"OMP_NUM_THREADS": 3}`
             env_files: One or a list of env files.
-            env_host: Use host environment inside the container. Only supported
-                with podman.
             gpus: For this to work, you need the
                 [Nvidia container runtime](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html#install-guide)
                 The value needed is a `str` or `int`. Some examples of valid argument
@@ -1976,9 +1896,6 @@ class ContainerCLI(DockerCLICaller):
             pid: PID namespace to use
             pids_limit: Tune container pids limit (set `-1` for unlimited)
             platform: Set platform if server is multi-platform capable.
-            pod: Create the container in an existing pod (only supported with podman).
-            preserve_fds: The number of additional file descriptors to pass
-                through to the container. Only supported by podman.
             privileged: Give extended privileges to this container.
             publish: Ports to publish, same as the `-p` argument in the Docker CLI.
                 example are `[(8000, 7000) , ("127.0.0.1:3000", 2000)]` or
@@ -1997,13 +1914,8 @@ class ContainerCLI(DockerCLICaller):
                 `"4g"` for example.
             stop_timeout: Signal to stop a container (default "SIGTERM")
             storage_options: Storage driver options for the container
-            systemd: Whether to run in systemd mode. Only known to apply to Podman, see
-                https://docs.podman.io/en/latest/markdown/podman-run.1.html#systemd-true-false-always
             tty: Allocate a pseudo-TTY. Allow the process to access your terminal
                 to write on it.
-            tz: Set timezone in container, or `local` to match the host's timezone.
-                See `/usr/share/zoneinfo/` for valid timezones.
-                Note: This option is only known to apply to Podman containers.
             user: Username or UID (format: `<name|uid>[:<group|gid>]`)
             userns:  User namespace to use
             uts:  UTS namespace to use
@@ -2080,7 +1992,6 @@ class ContainerCLI(DockerCLICaller):
 
         full_cmd.add_args_mapping("--env", envs)
         full_cmd.add_args_iterable_or_single("--env-file", env_files)
-        full_cmd.add_flag("--env-host", env_host)
 
         full_cmd.add_args_iterable_or_single("--expose", expose)
 
@@ -2139,8 +2050,6 @@ class ContainerCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--pids-limit", pids_limit)
 
         full_cmd.add_simple_arg("--platform", platform)
-        full_cmd.add_simple_arg("--pod", pod)
-        full_cmd.add_simple_arg("--preserve-fds", preserve_fds)
         full_cmd.add_flag("--privileged", privileged)
 
         full_cmd.add_args_iterable("-p", (format_port_arg(p) for p in publish))
@@ -2167,10 +2076,8 @@ class ContainerCLI(DockerCLICaller):
 
         full_cmd.add_args_iterable("--storage-opt", storage_options)
         full_cmd.add_args_mapping("--sysctl", sysctl)
-        full_cmd.add_simple_arg("--systemd", systemd)
         full_cmd.add_args_iterable("--tmpfs", tmpfs)
         full_cmd.add_flag("--tty", tty)
-        full_cmd.add_simple_arg("--tz", tz)
         full_cmd.add_args_iterable("--ulimit", ulimit)
 
         full_cmd.add_simple_arg("--user", user)
@@ -2193,13 +2100,12 @@ class ContainerCLI(DockerCLICaller):
                 "It's not possible to stream and detach a container at the same time."
             )
 
-        pass_fds = range(3, 3 + preserve_fds) if preserve_fds is not None else ()
         if detach:
-            return Container(self.client_config, run(full_cmd, pass_fds=pass_fds))
+            return Container(self.client_config, run(full_cmd, pass_fds=()))
         elif stream:
-            return stream_stdout_and_stderr(full_cmd, pass_fds=pass_fds)
+            return stream_stdout_and_stderr(full_cmd, pass_fds=())
         else:
-            return run(full_cmd, tty=tty, capture_stderr=False, pass_fds=pass_fds)
+            return run(full_cmd, tty=tty, capture_stderr=False, pass_fds=())
 
     @overload
     def start(

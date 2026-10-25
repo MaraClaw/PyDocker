@@ -77,16 +77,14 @@ def test_top_leaves_running_then_stop_stops_when_inspecting_live_container(
         docker_client.remove(container, force=True)
 
 
-@pytest.mark.parametrize("ctr_client", ["docker", "podman"], indirect=True)
 def test_version(ctr_client: DockerClient) -> None:
     version_info = ctr_client.version()
     assert version_info.client is not None
     assert version_info.client.version is not None
     assert re.match(r"\d+\.\d+", version_info.client.version)
-    if ctr_client.client_config.client_type == "docker":
-        assert version_info.server is not None
-        assert version_info.server.version is not None
-        assert re.match(r"\d+\.\d+", version_info.server.version)
+    assert version_info.server is not None
+    assert version_info.server.version is not None
+    assert re.match(r"\d+\.\d+", version_info.server.version)
 
 
 def test_login_logout(

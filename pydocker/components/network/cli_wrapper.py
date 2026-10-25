@@ -138,10 +138,6 @@ class Network(ReloadableObjectFromJson[NetworkInspectResult]):
     def config_only(self) -> bool | None:
         return self._get_inspect_result().config_only
 
-    @property
-    def dns_enabled(self) -> bool | None:
-        return self._get_inspect_result().dns_enabled
-
     @override
     def __repr__(self) -> str:
         return f"pydocker.Network(id='{self.id[:12]}', name={self.name})"
@@ -215,7 +211,6 @@ class NetworkCLI(DockerCLICaller):
         self,
         name: str,
         attachable: bool = False,
-        disable_dns: bool = False,
         driver: str | None = None,
         gateway: str | None = None,
         subnet: str | None = None,
@@ -226,14 +221,12 @@ class NetworkCLI(DockerCLICaller):
 
         Parameters:
             name: The name of the network
-            disable_dns: A podman only option to disable the dns plugin
 
         # Returns
             A `pydocker.Network`.
         """
         full_cmd = Command([*self.docker_cmd, "network", "create"])
         full_cmd.add_flag("--attachable", attachable)
-        full_cmd.add_flag("--disable-dns", disable_dns)
         full_cmd.add_simple_arg("--driver", driver)
         full_cmd.add_simple_arg("--gateway", gateway)
         full_cmd.add_simple_arg("--subnet", subnet)

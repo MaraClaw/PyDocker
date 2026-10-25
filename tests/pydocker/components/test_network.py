@@ -63,14 +63,12 @@ def test_load_json(json_file: Path) -> None:
     # we could do more checks here if needed
 
 
-@pytest.mark.parametrize("ctr_client", ["docker", "podman"], indirect=True)
 def test_network_create_remove(ctr_client: DockerClient) -> None:
     my_name = random_name()
     with ctr_client.network.create(my_name) as my_network:
         assert my_network.name == my_name
 
 
-@pytest.mark.parametrize("ctr_client", ["docker", "podman"], indirect=True)
 def test_network_create_with_labels(ctr_client: DockerClient) -> None:
     my_name = random_name()
     labels = {"hello": "world", "meme": "meme-label"}
@@ -81,7 +79,6 @@ def test_network_create_with_labels(ctr_client: DockerClient) -> None:
             assert my_network.labels[key] == value
 
 
-@pytest.mark.parametrize("ctr_client", ["docker", "podman"], indirect=True)
 def test_context_manager(ctr_client: DockerClient) -> None:
     my_net: Network | None = None
     with (
@@ -102,11 +99,6 @@ def test_context_manager(ctr_client: DockerClient) -> None:
     assert my_net not in ctr_client.network.list()
 
 
-@pytest.mark.parametrize(
-    "ctr_client",
-    ["docker", pytest.param("podman", marks=pytest.mark.xfail)],
-    indirect=True,
-)
 def test_network_connect_disconnect(ctr_client: DockerClient) -> None:
     with (
         ctr_client.network.create(random_name()) as my_net,
@@ -118,7 +110,6 @@ def test_network_connect_disconnect(ctr_client: DockerClient) -> None:
         ctr_client.network.disconnect(my_net, my_container)
 
 
-@pytest.mark.parametrize("ctr_client", ["docker", "podman"], indirect=True)
 def test_remove_nothing(ctr_client: DockerClient) -> None:
     all_neworks = set(ctr_client.network.list())
     ctr_client.network.remove([])
@@ -139,7 +130,6 @@ def test_swarm_service_create(docker_client: DockerClient) -> None:
         assert len(my_net.containers) == 2  # 1 container + 1 endpoint
 
 
-@pytest.mark.parametrize("ctr_client", ["docker", "podman"], indirect=True)
 def test_network_exists(ctr_client: DockerClient) -> None:
     network_name = random_name()
     assert not ctr_client.network.exists(network_name)
@@ -153,7 +143,6 @@ def test_network_exists(ctr_client: DockerClient) -> None:
     assert not network.exists()
 
 
-@pytest.mark.parametrize("ctr_client", ["docker", "podman"], indirect=True)
 def test_list_filters(ctr_client: DockerClient) -> None:
     name = random_name()
     with ctr_client.network.create(name) as network:
@@ -198,17 +187,3 @@ def test_correct_ipam_config(docker_client: DockerClient) -> None:
         assert networks[net.name].ipam_config == ContainerEndpointIPAMConfig(
             ipv4_address="172.20.0.5", ipv6_address=None, link_local_ips=None
         )
-
-
-def test_disable_dns(podman_client: DockerClient) -> None:
-    with podman_client.network.create(random_name(), disable_dns=False) as net:
-        assert net.dns_enabled is True
-        assert net.name is not None
-        inspect_result = podman_client.network.inspect(net.name)
-        assert inspect_result.dns_enabled is True
-
-    with podman_client.network.create(random_name(), disable_dns=True) as net:
-        assert net.dns_enabled is False
-        assert net.name is not None
-        inspect_result = podman_client.network.inspect(net.name)
-        assert inspect_result.dns_enabled is False

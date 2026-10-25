@@ -80,7 +80,6 @@ def test_load_json(json_file: Path) -> None:
         assert a.options is None
 
 
-@pytest.mark.parametrize("ctr_client", ["docker", "podman"], indirect=True)
 def test_simple_volume(ctr_client: DockerClient) -> None:
     some_volume = ctr_client.volume.create()
     assert some_volume.exists()
@@ -90,7 +89,6 @@ def test_simple_volume(ctr_client: DockerClient) -> None:
     ctr_client.volume.remove(some_volume)
 
 
-@pytest.mark.parametrize("ctr_client", ["docker", "podman"], indirect=True)
 def test_multiple_volumes(ctr_client: DockerClient) -> None:
     volumes: list[Volume | str] = [ctr_client.volume.create() for _ in range(3)]
 
@@ -103,7 +101,6 @@ def test_multiple_volumes(ctr_client: DockerClient) -> None:
         assert v not in ctr_client.volume.list()
 
 
-@pytest.mark.parametrize("ctr_client", ["docker", "podman"], indirect=True)
 def test_volume_drivers(ctr_client: DockerClient) -> None:
     some_volume = ctr_client.volume.create(
         driver="local",
@@ -118,7 +115,6 @@ def test_volume_drivers(ctr_client: DockerClient) -> None:
     ctr_client.volume.remove(some_volume)
 
 
-@pytest.mark.parametrize("ctr_client", ["docker", "podman"], indirect=True)
 def test_volume_labels(ctr_client: DockerClient) -> None:
     some_volume = ctr_client.volume.create(labels={"dodo": "dada"})
 
@@ -127,7 +123,6 @@ def test_volume_labels(ctr_client: DockerClient) -> None:
     ctr_client.volume.remove(some_volume)
 
 
-@pytest.mark.parametrize("ctr_client", ["docker", "podman"], indirect=True)
 def test_list(ctr_client: DockerClient) -> None:
     volumes = [ctr_client.volume.create() for _ in range(3)]
 
@@ -136,7 +131,6 @@ def test_list(ctr_client: DockerClient) -> None:
         assert v in all_volumes
 
 
-@pytest.mark.parametrize("ctr_client", ["docker", "podman"], indirect=True)
 def test_list_filters(ctr_client: DockerClient) -> None:
     select_label = random_name()
     with (
@@ -148,7 +142,7 @@ def test_list_filters(ctr_client: DockerClient) -> None:
 
 
 def test_list_filters_old_signature(docker_client: DockerClient) -> None:
-    """Check backward compatibility of the DockerClient.pod.list() API."""
+    """Check backward compatibility of the DockerClient.volume.list() API."""
     expected_warning = (
         r"Passing filters as a mapping is deprecated, replace with an iterable "
         r"of tuples instead, as so:\n"
@@ -164,17 +158,6 @@ def test_list_filters_old_signature(docker_client: DockerClient) -> None:
         assert listed_volumes == [vol2]
 
 
-@pytest.mark.parametrize(
-    "ctr_client",
-    [
-        "docker",
-        pytest.param(
-            "podman",
-            marks=pytest.mark.xfail(reason="podman.volume.copy() not supported"),
-        ),
-    ],
-    indirect=True,
-)
 def test_copy_to_volume(ctr_client: DockerClient, tmp_path: Path) -> None:
     some_volume = ctr_client.volume.create()
     ctr_client.run(
@@ -188,17 +171,6 @@ def test_copy_to_volume(ctr_client: DockerClient, tmp_path: Path) -> None:
     assert (tmp_path / "dodo.txt").exists()
 
 
-@pytest.mark.parametrize(
-    "ctr_client",
-    [
-        "docker",
-        pytest.param(
-            "podman",
-            marks=pytest.mark.xfail(reason="podman.volume.copy() not supported"),
-        ),
-    ],
-    indirect=True,
-)
 def test_copy_to_volume_subdirectory(ctr_client: DockerClient, tmp_path: Path) -> None:
     some_volume = ctr_client.volume.create()
     ctr_client.run(
@@ -216,17 +188,6 @@ def test_copy_to_volume_subdirectory(ctr_client: DockerClient, tmp_path: Path) -
     assert (tmp_path / "subdir2/dodo.txt").exists()
 
 
-@pytest.mark.parametrize(
-    "ctr_client",
-    [
-        "docker",
-        pytest.param(
-            "podman",
-            marks=pytest.mark.xfail(reason="podman.volume.copy() not supported"),
-        ),
-    ],
-    indirect=True,
-)
 def test_copy_to_and_from_volume(ctr_client: DockerClient, tmp_path: Path) -> None:
     some_volume = ctr_client.volume.create()
 
@@ -241,17 +202,6 @@ def test_copy_to_and_from_volume(ctr_client: DockerClient, tmp_path: Path) -> No
     assert (tmp_path / "subdir/some_dir/dodo.txt").read_text() == "Hello\nWorld!"
 
 
-@pytest.mark.parametrize(
-    "ctr_client",
-    [
-        "docker",
-        pytest.param(
-            "podman",
-            marks=pytest.mark.xfail(reason="podman.volume.copy() not supported"),
-        ),
-    ],
-    indirect=True,
-)
 def test_volume_cp_from_in_dir(ctr_client: DockerClient, tmp_path: Path) -> None:
     some_volume = ctr_client.volume.create()
     ctr_client.run(
@@ -265,17 +215,6 @@ def test_volume_cp_from_in_dir(ctr_client: DockerClient, tmp_path: Path) -> None
     assert (tmp_path / "dodo.txt").exists()
 
 
-@pytest.mark.parametrize(
-    "ctr_client",
-    [
-        "docker",
-        pytest.param(
-            "podman",
-            marks=pytest.mark.xfail(reason="podman.volume.copy() not supported"),
-        ),
-    ],
-    indirect=True,
-)
 def test_volume_cp_to_in_dir(ctr_client: DockerClient, tmp_path: Path) -> None:
     dodo = tmp_path / "dada" / "dodo.txt"
     dodo.parent.mkdir()
@@ -292,17 +231,6 @@ def test_volume_cp_to_in_dir(ctr_client: DockerClient, tmp_path: Path) -> None:
     assert files == "dodo.txt"
 
 
-@pytest.mark.parametrize(
-    "ctr_client",
-    [
-        "docker",
-        pytest.param(
-            "podman",
-            marks=pytest.mark.xfail(reason="podman.volume.clone() not supported"),
-        ),
-    ],
-    indirect=True,
-)
 def test_clone(ctr_client: DockerClient) -> None:
     some_volume = ctr_client.volume.create()
     ctr_client.run(
@@ -331,38 +259,22 @@ def test_clone(ctr_client: DockerClient) -> None:
 
 
 @pytest.mark.parametrize("method", ["inspect", "remove"])
-@pytest.mark.parametrize("ctr_client", ["docker", "podman"], indirect=True)
 def test_functions_no_such_volume(ctr_client: DockerClient, method: str) -> None:
     with pytest.raises(NoSuchVolume) as e:
         getattr(ctr_client.volume, method)("dodo")
     assert "no such volume" in str(e.value).lower()
 
 
-@pytest.mark.parametrize("ctr_client", ["docker", "podman"], indirect=True)
 def test_volume_does_not_exists(ctr_client: DockerClient) -> None:
     assert not ctr_client.volume.exists("dodo")
 
 
-@pytest.mark.parametrize("ctr_client", ["docker", "podman"], indirect=True)
 def test_volume_exists(ctr_client: DockerClient) -> None:
     with ctr_client.volume.create() as v:
         assert v.exists()
         assert ctr_client.volume.exists(v.name)
 
 
-@pytest.mark.parametrize(
-    "ctr_client",
-    [
-        "docker",
-        pytest.param(
-            "podman",
-            marks=pytest.mark.xfail(
-                reason="'podman volume prune' does not support --all"
-            ),
-        ),
-    ],
-    indirect=True,
-)
 def test_prune(ctr_client: DockerClient) -> None:
     for volume in ctr_client.volume.list(filters={"name": "test-volume"}):
         volume.remove()
@@ -380,7 +292,6 @@ def test_prune(ctr_client: DockerClient) -> None:
     assert volume not in ctr_client.volume.list()
 
 
-@pytest.mark.parametrize("ctr_client", ["docker", "podman"], indirect=True)
 def test_volume_remove_empty_list(ctr_client: DockerClient) -> None:
     with ctr_client.volume.create() as my_volume:
         assert my_volume in ctr_client.volume.list()

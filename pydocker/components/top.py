@@ -22,13 +22,6 @@ class ContainerTopResult(ProcessTable):
 
 
 @dataclass(frozen=True, slots=True)
-class PodTopResult(ProcessTable):
-    """Podman pod process table and the unmodified output returned by run."""
-
-    raw_output: str
-
-
-@dataclass(frozen=True, slots=True)
 class ComposeTopSection(ProcessTable):
     """A Compose container section, or a flat table with attribution columns.
 
@@ -95,17 +88,13 @@ _SCALAR_FIELDS: Final = re.compile(
     r"tty|tt|tname|time|cputime|bsdtime|etime|etimes|stime|start|start_time|"
     r"stat|state|s|nice|ni|pri|priority|rtprio|policy|cls|class|flags|flag|f|"
     r"wchan|nwchan|addr|maj_flt|min_flt|majflt|minflt|%C|%G|%P|%U|%g|%n|%p|%r|"
-    r"%t|%u|%x|%y|%z|hpid|hppid|huser|hgroup|hgroups|groups|capamb|capbnd|"
-    r"capeff|capinh|capprm|seccomp|userns|utsns|ipcns|mntns|netns|pidns|cgroupns|"
-    r"nproc|elapsed|mem|htime"
+    r"%t|%u|%x|%y|%z|userns|utsns|ipcns|mntns|netns|pidns|cgroupns"
 )
 
 
 def parse_table(
     output: str,
     fields: Sequence[str] | None = None,
-    *,
-    text_fields: frozenset[str] = _TEXT_FIELDS,
 ) -> ProcessTable:
     """Parse scalar columns and at most one final free-text field.
 
@@ -128,7 +117,7 @@ def parse_table(
         text_columns = []
         for index, field in enumerate(fields):
             name = field.partition("=")[0]
-            if name in text_fields:
+            if name in _TEXT_FIELDS:
                 text_columns.append(index)
             elif not _SCALAR_FIELDS.fullmatch(name):
                 raise TopParseError(

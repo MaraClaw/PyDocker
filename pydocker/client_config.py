@@ -77,7 +77,7 @@ class ClientConfig:
     compose_project_directory: ValidPath | None = None
     compose_compatibility: bool | None = None
     client_call: list[str] = field(default_factory=lambda: ["docker"])
-    client_type: Literal["docker", "podman", "nerdctl", "unknown"] = "unknown"
+    client_type: Literal["docker", "nerdctl", "unknown"] = "unknown"
     _client_call_with_path: list[Path | str] | None = None
 
     def get_client_call_with_path(self) -> list[Path | str]:

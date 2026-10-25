@@ -75,7 +75,6 @@ nav:
     - docker task: sub-commands/task.md
     - docker trust: sub-commands/trust.md
     - docker volume: sub-commands/volume.md
-    - podman pod: sub-commands/pod.md
   - Objects:
     - Builders: objects/builders.md
     - Configs: objects/configs.md
@@ -84,7 +83,6 @@ nav:
     - Networks: objects/networks.md
     - Nodes: objects/nodes.md
     - Plugins: objects/plugins.md
-    - Pods: objects/pods.md
     - Secrets: objects/secrets.md
     - Services: objects/services.md
     - Stacks: objects/stacks.md

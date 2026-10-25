@@ -428,7 +428,6 @@ class ImageCLI(DockerCLICaller):
                     snapshot.id.startswith(reference)
                     or snapshot.id.removeprefix("sha256:").startswith(reference)
                     or normalized(reference) in normalized_aliases
-                    or "localhost/" + normalized(reference) in normalized_aliases
                 )
             ):
                 raise ParsingError(

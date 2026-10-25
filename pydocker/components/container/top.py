@@ -1,4 +1,4 @@
-"""Docker ps field selection, separate from Compose and Podman grammars."""
+"""Docker ps field selection, separate from the Compose grammar."""
 
 import re
 from collections.abc import Sequence

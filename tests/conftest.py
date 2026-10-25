@@ -4,7 +4,7 @@ import tempfile
 import time
 from collections.abc import Generator
 from pathlib import Path
-from typing import Literal, assert_never
+from typing import assert_never
 
 import pytest
 
@@ -17,12 +17,11 @@ logger = logging.getLogger(__name__)
 # Fixtures
 
 
-def _get_ctr_client(
-    client_type: Literal["docker", "podman"], pytestconfig: pytest.Config
-) -> DockerClient:
-    ctr_exe = pytestconfig.getoption(f"--{client_type}-exe")
+@pytest.fixture(scope="session")
+def docker_client(pytestconfig: pytest.Config) -> DockerClient:
+    ctr_exe = pytestconfig.getoption("--docker-exe")
     assert isinstance(ctr_exe, str)
-    client = DockerClient(client_call=[ctr_exe], client_type=client_type)
+    client = DockerClient(client_call=[ctr_exe])
     try:
         # TODO: Implement 'DockerClient.version' and use that instead.
         subprocess.run(
@@ -47,39 +46,21 @@ def _get_ctr_client(
             case unreachable:
                 assert_never(unreachable)
         logger.warning(
-            "Unable to get %s version with command '%s version': %s",
-            client_type,
+            "Unable to get Docker version with command '%s version': %s",
             ctr_exe,
             reason,
         )
         if pytestconfig.getoption("--no-runtime-skip"):
-            pytest.fail(f"{client_type} unavailable")
+            pytest.fail("docker unavailable")
         else:
-            pytest.skip(f"{client_type} unavailable")
+            pytest.skip("docker unavailable")
 
     return client
 
 
-@pytest.fixture(scope="session")
-def docker_client(pytestconfig: pytest.Config) -> DockerClient:
-    return _get_ctr_client("docker", pytestconfig)
-
-
-@pytest.fixture(scope="session")
-def podman_client(
-    pytestconfig: pytest.Config, request: pytest.FixtureRequest
-) -> DockerClient:
-    return _get_ctr_client("podman", pytestconfig)
-
-
-# This is function-scoped so that all of a testcase's parameterisations run
-# in a row, before running other testcases.
 @pytest.fixture(scope="function")
-def ctr_client(request: pytest.FixtureRequest) -> DockerClient:
-    """Allows to parametrize a test with the container runtime as a string."""
-    client = request.getfixturevalue(f"{request.param}_client")
-    assert isinstance(client, DockerClient)
-    return client
+def ctr_client(docker_client: DockerClient) -> DockerClient:
+    return docker_client
 
 
 @pytest.fixture(scope="function")
@@ -142,14 +123,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     """Pytest hook for adding CLI options."""
 
     pydocker_group = parser.getgroup("pydocker")
-    for name in ("docker", "podman"):
-        pydocker_group.addoption(
-            f"--{name}-exe",
-            metavar="EXE",
-            default=name,
-            help=f"Path to the {name} executable to use in the unit tests."
-            f"Defaults to {name}.",
-        )
+    pydocker_group.addoption(
+        "--docker-exe",
+        metavar="EXE",
+        default="docker",
+        help="Path to the docker executable to use in the unit tests."
+        "Defaults to docker.",
+    )
     pydocker_group.addoption(
         "--no-runtime-skip",
         action="store_true",
@@ -170,12 +150,5 @@ def pytest_collection_modifyitems(
     # Apply marks to testcases.
     for item in items:
         assert isinstance(item, pytest.Function)
-        for runtime in ["docker", "podman"]:
-            if f"{runtime}_client" in item.fixturenames:
-                item.add_marker(runtime)
-            if (
-                hasattr(item, "callspec")
-                and "ctr_client" in item.callspec.params
-                and item.callspec.params["ctr_client"] == runtime
-            ):
-                item.add_marker(runtime)
+        if "docker_client" in item.fixturenames:
+            item.add_marker("docker")

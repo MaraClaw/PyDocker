@@ -29,7 +29,6 @@ from pydocker.exceptions import (
     NoSuchContainer,
     NoSuchImage,
     NoSuchNetwork,
-    NoSuchPod,
     NoSuchService,
     NoSuchVolume,
     NotASwarmManager,
@@ -82,7 +81,6 @@ def to_docker_camel(string: str) -> str:
             "ipam_config": "IPAMConfig",
             "tls_info": "TLSInfo",
             "virtual_ips": "VirtualIPs",
-            "infra_container_id": "InfraContainerID",
             "default_api_version": "DefaultAPIVersion",
             "min_api_version": "MinAPIVersion",
         }
@@ -103,7 +101,7 @@ def get_docker_exception_type(output: bytes | None) -> type[DockerException]:
     if output is None or len(output) == 0:
         return DockerException
     decoded = output.decode().lower()
-    if "no such image" in decoded or "image not known" in decoded:
+    if "no such image" in decoded:
         return NoSuchImage
     if "no such service" in decoded or (
         "service" in decoded and "not found" in decoded
@@ -111,8 +109,6 @@ def get_docker_exception_type(output: bytes | None) -> type[DockerException]:
         return NoSuchService
     if "no such container" in decoded:
         return NoSuchContainer
-    if "no such pod" in decoded:
-        return NoSuchPod
     if "this node is not a swarm manager" in decoded:
         return NotASwarmManager
     if "no such volume" in decoded:

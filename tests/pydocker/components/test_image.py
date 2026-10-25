@@ -76,6 +76,29 @@ def _repo_tags(image: Image) -> list[str]:
     return tags
 
 
+@pytest.mark.parametrize("missing", [False, True], ids=["removed", "already-missing"])
+def test_image_cleanup_forces_removal(missing: bool) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    image = Image(client.client_config, "resource", is_immutable_id=True)
+    response = CompletedProcess(
+        [], 1 if missing else 0, b"", b"No such image: resource" if missing else b""
+    )
+    with patch("subprocess.run", return_value=response) as command, image:
+        pass
+    assert command.call_args.args[0] == [
+        "docker-test",
+        "image",
+        "rm",
+        "--force",
+        "resource",
+    ]
+    assert command.call_count == 1
+    if missing:
+        with patch("subprocess.run", return_value=response), pytest.raises(NoSuchImage):
+            image.remove(force=True)
+
+
 @pytest.mark.parametrize("json_file", get_all_jsons("images"))
 def test_load_json(json_file: Path) -> None:
     json_as_txt = json_file.read_text()

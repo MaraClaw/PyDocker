@@ -5,10 +5,12 @@ import signal
 import sys
 import tempfile
 import time
+import traceback
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from subprocess import CompletedProcess
+from types import TracebackType
 from typing import Literal
 from unittest.mock import Mock, patch
 
@@ -26,6 +28,9 @@ from pydocker.components.container.models import (
 from pydocker.exceptions import (
     DockerException,
     NoSuchContainer,
+    NoSuchImage,
+    NoSuchNetwork,
+    NoSuchVolume,
 )
 from pydocker.test_utils import get_all_jsons, random_name
 
@@ -296,6 +301,216 @@ def test_batch_inspect_container_aliases_and_reload() -> None:
         assert resources[0].path == "after"
         assert command.call_count == 3
         assert command.call_args.args[0][-1] == "a" * 64
+
+
+@pytest.mark.parametrize("component", ["container", "image", "network", "volume"])
+@pytest.mark.parametrize("body_outcome", ["success", "error", "interrupt"])
+@pytest.mark.parametrize(
+    "cleanup_outcome", ["success", "missing", "error", "wrong-missing", "interrupt"]
+)
+def test_resource_cleanup_exception_matrix(
+    component: str, body_outcome: str, cleanup_outcome: str
+) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    resource_type = {
+        "container": pydocker.Container,
+        "image": pydocker.Image,
+        "network": pydocker.Network,
+        "volume": pydocker.Volume,
+    }[component]
+    missing_type = {
+        "container": NoSuchContainer,
+        "image": NoSuchImage,
+        "network": NoSuchNetwork,
+        "volume": NoSuchVolume,
+    }[component]
+    resource = resource_type(client.client_config, "resource", is_immutable_id=True)
+    body_error = {
+        "success": None,
+        "error": ValueError("body"),
+        "interrupt": KeyboardInterrupt("body"),
+    }[body_outcome]
+    cleanup_error = {
+        "success": None,
+        "missing": missing_type(["docker-test", component, "rm", "resource"], 1),
+        "error": DockerException(["docker-test", component, "rm", "resource"], 17),
+        "wrong-missing": (NoSuchVolume if component != "volume" else NoSuchImage)(
+            ["docker-test", component, "rm", "resource"], 1
+        ),
+        "interrupt": KeyboardInterrupt("cleanup"),
+    }[cleanup_outcome]
+    body_tb: TracebackType | None = None
+    cleanup_tb: TracebackType | None = None
+
+    def command_response(
+        command: list[str], **kwargs: object
+    ) -> CompletedProcess[bytes]:
+        nonlocal cleanup_tb
+        if command[2] == "inspect":
+            return CompletedProcess(
+                command,
+                0,
+                b'[{"Id":"resource","HostConfig":{"AutoRemove":false},"State":{"Running":false}}]',
+                b"",
+            )
+        if cleanup_error is not None:
+            try:
+                raise cleanup_error
+            except BaseException as failure:
+                cleanup_tb = failure.__traceback__
+                raise
+        return CompletedProcess(command, 0, b"", b"")
+
+    def use_resource() -> None:
+        nonlocal body_tb
+        with resource:
+            if body_error is not None:
+                try:
+                    raise body_error
+                except BaseException as failure:
+                    body_tb = failure.__traceback__
+                    raise
+
+    with (
+        patch("subprocess.run", side_effect=command_response) as command,
+        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+    ):
+        effective_cleanup = None if cleanup_outcome == "missing" else cleanup_error
+        if body_error is None and effective_cleanup is None:
+            use_resource()
+        else:
+            with pytest.raises(BaseException) as raised:
+                use_resource()
+            if body_error is not None and effective_cleanup is not None:
+                assert isinstance(raised.value, BaseExceptionGroup)
+                assert raised.value.exceptions == (body_error, effective_cleanup)
+                assert body_error.__traceback__ is body_tb
+            else:
+                assert raised.value is (
+                    body_error if body_error is not None else effective_cleanup
+                )
+            if effective_cleanup is not None:
+                assert cleanup_tb is not None
+                assert any(
+                    frame is cleanup_tb.tb_frame
+                    for frame, _ in traceback.walk_tb(effective_cleanup.__traceback__)
+                )
+        remove_command = command.call_args.args[0]
+        operation = "rm" if component in {"container", "image"} else "remove"
+        assert remove_command[:3] == ["docker-test", component, operation]
+        assert remove_command[-1] == "resource"
+
+
+@pytest.mark.parametrize("running", [False, True])
+@pytest.mark.parametrize("auto_remove", [False, True])
+def test_container_cleanup_preserves_stop_and_removal(
+    running: bool, auto_remove: bool
+) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    container = pydocker.Container(
+        client.client_config, "resource", is_immutable_id=True
+    )
+    snapshot = {
+        "Id": "resource",
+        "HostConfig": {"AutoRemove": auto_remove},
+        "State": {"Running": running},
+    }
+    with (
+        patch(
+            "subprocess.run",
+            side_effect=[
+                CompletedProcess([], 0, json.dumps([snapshot]).encode(), b""),
+                CompletedProcess([], 0, b"resource", b""),
+                CompletedProcess([], 0, b"resource", b""),
+            ],
+        ) as command,
+        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+        container,
+    ):
+        pass
+    expected = [["docker-test", "container", "inspect", "resource"]]
+    if running:
+        expected.append(["docker-test", "container", "stop", "resource"])
+    if not auto_remove:
+        expected.append(["docker-test", "container", "rm", "--volumes", "resource"])
+    assert [call.args[0] for call in command.call_args_list] == expected
+
+
+@pytest.mark.parametrize(
+    ("phase", "auto_remove"),
+    [
+        ("inspect", False),
+        ("stop", False),
+        ("rm", False),
+        ("inspect", True),
+        ("stop", True),
+    ],
+)
+@pytest.mark.parametrize("missing", [False, True], ids=["failure", "missing"])
+@pytest.mark.parametrize("body_outcome", ["success", "error", "interrupt"])
+def test_container_cleanup_disappearance_races(
+    phase: str, auto_remove: bool, missing: bool, body_outcome: str
+) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    container = pydocker.Container(
+        client.client_config, "resource", is_immutable_id=True
+    )
+    body_error = {
+        "success": None,
+        "error": ValueError("body"),
+        "interrupt": KeyboardInterrupt("body"),
+    }[body_outcome]
+    snapshot = json.dumps(
+        [
+            {
+                "Id": "resource",
+                "HostConfig": {"AutoRemove": auto_remove},
+                "State": {"Running": True},
+            }
+        ]
+    ).encode()
+
+    def response(command: list[str], **kwargs: object) -> CompletedProcess[bytes]:
+        if command[2] == phase:
+            return CompletedProcess(
+                command,
+                1,
+                b"",
+                b"No such container: resource" if missing else b"permission denied",
+            )
+        return CompletedProcess(command, 0, snapshot, b"")
+
+    def use_resource() -> None:
+        with container:
+            if body_error is not None:
+                raise body_error
+
+    with (
+        patch("subprocess.run", side_effect=response) as command,
+        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+    ):
+        if missing and body_error is None:
+            use_resource()
+        else:
+            with pytest.raises(BaseException) as raised:
+                use_resource()
+            if missing:
+                assert raised.value is body_error
+            elif body_error is None:
+                assert isinstance(raised.value, DockerException)
+                assert raised.value.stderr == "permission denied"
+            else:
+                assert isinstance(raised.value, BaseExceptionGroup)
+                assert raised.value.exceptions[0] is body_error
+                assert isinstance(raised.value.exceptions[1], DockerException)
+        phases = [call.args[0][2] for call in command.call_args_list]
+        assert (
+            phases
+            == ["inspect", "stop", "rm"][: ["inspect", "stop", "rm"].index(phase) + 1]
+        )
 
 
 def build_image(ctr_client: DockerClient, python_code: str) -> Image:

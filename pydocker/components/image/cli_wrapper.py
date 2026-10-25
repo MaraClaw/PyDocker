@@ -73,7 +73,16 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        self.remove(force=True)
+        try:
+            self.remove(force=True)
+        except NoSuchImage:
+            return
+        except BaseException as cleanup_error:
+            if exc_val is None:
+                raise
+            raise BaseExceptionGroup(
+                "Image body and cleanup both failed", [exc_val, cleanup_error]
+            ) from None
 
     @override
     def _fetch_inspect_result_json(self, reference: str) -> dict[str, Any]:

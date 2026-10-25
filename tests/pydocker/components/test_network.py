@@ -8,7 +8,7 @@ import pytest
 from pydocker import DockerClient, Network
 from pydocker.components.container.models import ContainerEndpointIPAMConfig
 from pydocker.components.network.cli_wrapper import NetworkInspectResult
-from pydocker.exceptions import DockerException
+from pydocker.exceptions import DockerException, NoSuchNetwork
 from pydocker.test_utils import get_all_jsons, random_name
 
 
@@ -34,6 +34,26 @@ def test_batch_inspect_network_aliases_and_typed_snapshot() -> None:
             for network in networks
         )
         assert command.call_count == 1
+
+
+@pytest.mark.parametrize("missing", [False, True], ids=["removed", "already-missing"])
+def test_network_cleanup_preserves_removal(missing: bool) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    network = Network(client.client_config, "resource", is_immutable_id=True)
+    response = CompletedProcess(
+        [], 1 if missing else 0, b"", b"network resource not found" if missing else b""
+    )
+    with patch("subprocess.run", return_value=response) as command, network:
+        pass
+    assert command.call_args.args[0] == ["docker-test", "network", "remove", "resource"]
+    assert command.call_count == 1
+    if missing:
+        with (
+            patch("subprocess.run", return_value=response),
+            pytest.raises(NoSuchNetwork),
+        ):
+            network.remove()
 
 
 @pytest.mark.parametrize("json_file", get_all_jsons("networks"))

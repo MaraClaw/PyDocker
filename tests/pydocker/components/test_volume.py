@@ -40,6 +40,26 @@ def test_batch_inspect_volume_names_and_typed_snapshot() -> None:
         assert command.call_count == 1
 
 
+@pytest.mark.parametrize("missing", [False, True], ids=["removed", "already-missing"])
+def test_volume_cleanup_preserves_removal(missing: bool) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    volume = Volume(client.client_config, "resource", is_immutable_id=True)
+    response = CompletedProcess(
+        [], 1 if missing else 0, b"", b"No such volume: resource" if missing else b""
+    )
+    with patch("subprocess.run", return_value=response) as command, volume:
+        pass
+    assert command.call_args.args[0] == ["docker-test", "volume", "remove", "resource"]
+    assert command.call_count == 1
+    if missing:
+        with (
+            patch("subprocess.run", return_value=response),
+            pytest.raises(NoSuchVolume),
+        ):
+            volume.remove()
+
+
 @pytest.mark.parametrize("json_file", get_all_jsons("volumes"))
 def test_load_json(json_file: Path) -> None:
     json_as_txt = json_file.read_text()

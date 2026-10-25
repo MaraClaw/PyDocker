@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-import shutil
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Final

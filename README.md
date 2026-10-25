@@ -204,133 +204,23 @@ with docker.volume.create("random_name") as some_volume:
 
 * 1 to 1 mapping between the CLI interface and the Python API. No need to look in the docs
 what is the name of the function/argument you need.
-* Support for the latest Docker features: 
-[Docker buildx/buildkit](https://github.com/docker/buildx), 
+* Support for the latest Docker features:
+[Docker buildx/buildkit](https://github.com/docker/buildx),
 `docker run --gpu=all ...`
 * Support for Docker stack, services and Swarm (same API as the command line).
 * Progress bars and progressive outputs when pulling, pushing, loading, building...
-* Support for some other CLI commands that are not in [Docker-py](https://docker-py.readthedocs.io/en/stable/): 
+* Support for some other CLI commands that are not in [Docker-py](https://docker-py.readthedocs.io/en/stable/):
 `docker cp`, `docker run --cpus ...` and more.
 * Nice SSH support for remote daemons.
 * Docker object as Python objects: Container, Images, Volumes, Services... and their
 attributes are updated in real-time!
-* Each Docker object can be used as a context manager. When getting out of the 
+* Each Docker object can be used as a context manager. When getting out of the
 context, the Docker object is removed automatically, even if an exception occurs.
 * A fully typed API (ty and IDE-friendly) compatible with `pathlib` and `os.path`
 * All Docker objects and the Docker client are safe to use with multithreading and multiprocessing.
 * Display the commands called and the environment variables used by setting `PYDOCKER_DEBUG=1`.
   The legacy `PYTHON_ON_WHALES_DEBUG` variable is a fallback only when `PYDOCKER_DEBUG` is unset.
   Setting `PYDOCKER_DEBUG=0` or leaving its value explicitly empty disables debug output even if the legacy variable is set.
-
-## Why another project? Why not build on Docker-py?
-
-In a sense this project is built on top of [Docker-py](https://docker-py.readthedocs.io/en/stable/) 
-because the implementation, the organisation and the API is inspired from the project, but the codebases 
-could not be the same.
-
-Two major differences do not permit that:
-
-1) The API is quite different. The aim of pydocker is to provide a 1-to-1
-mapping between the Docker command line and Python, so that users don't even have 
-to open the docs to do write code.
-
-2) While [Docker-py](https://docker-py.readthedocs.io/en/stable/) is a complete re-implementation of the Docker client binary 
-(written in Go), pydocker sits on top of the Docker client binary, which makes
-implementing new features much easier and safer. For example, it's 
-[unlikely that docker-py supports Buildx/buildkit](https://github.com/docker/docker-py/issues/2230#issuecomment-454344497)
-anytime soon because rewriting a large Go codebase in Python is hard work.
-
-
-![](https://github.com/gabrieldemarmiesse/python-on-whales/blob/b09e4b560c7a1428f0d8afa103c2980b89ac467a/img/docker_clients.png)
-
-
-## Should I use Docker-py or pydocker?
-
-Well, it's written in each project's description!
-
-* Docker-py: A Python library for the Docker Engine API
-* pydocker: A Python wrapper for the Docker CLI
-
-
-If you need to talk to the Docker engine directly, you need to do low level operations,
-use docker-py. Some good example would be writing the code to control docker from an IDE, 
-or if the speed of Docker calls is very important. 
-If you don't want to depend on the Docker CLI binary (~50MB), use docker-py.
-
-
-If you wanted to call the docker command line from Python, 
-do high level operations, use pydocker.
-For example if you want to write your CI logic in Python rather than in bash (a very good choice 😉).
-Some commands are only available in pydocker
-too: `docker.buildx.build(...)`, `docker.stack.deploy(...)`...
-
-Use the right tool for the right job 🙂
-
-## Alternatives to Docker: Podman, nerdctl...
-
-Support for Docker-compatible clients like [Podman](https://podman.io/) and [Nerdctl](https://github.com/containerd/nerdctl) was introduced in Python-on-whales version 0.44.0.
-
-You can use an arbitrary binary to execute Docker commands by using the argument `client_call` of `pydocker.DockerClient`.
-Here is an example:
-```python
->>> from pydocker import DockerClient
-
->>> nerdctl = DockerClient(client_call=["nerdctl"])
-
->>> nerdctl.pull("python:3.9")
-docker.io/library/python:3.9:                                                     resolved       |++++++++++++++++++++++++++++++++++++++|
-index-sha256:a83c0aa6471527636d7331c30704d0f88e0ab3331bbc460d4ae2e53bbae64dca:    done           |++++++++++++++++++++++++++++++++++++++|
-manifest-sha256:8ccef93ff3c9e1bb9562d394526cdc6834033a0498073d41baa8b309f4fac20e: done           |++++++++++++++++++++++++++++++++++++++|
-config-sha256:f033692e2c5abe1e0ee34bcca759a3e4432b10b0031174b08d48bcc90d14d68b:   done           |++++++++++++++++++++++++++++++++++++++|
-layer-sha256:9952b1051adaff513c99f86765361450af108b12b0073d0ba40255c4e419b481:    done           |++++++++++++++++++++++++++++++++++++++|
-layer-sha256:c766e27afb21eddf9ab3e4349700ebe697c32a4c6ada6af4f08282277a291a28:    done           |++++++++++++++++++++++++++++++++++++++|
-layer-sha256:1535e3c1181a81ea66d5bacb16564e4da2ba96304506598be39afe9c82b21c5c:    done           |++++++++++++++++++++++++++++++++++++++|
-layer-sha256:6de7cb7bdc8f9b4c4d6539233fe87304aa1a6427c3238183265c9f02d831eddb:    done           |++++++++++++++++++++++++++++++++++++++|
-layer-sha256:967757d5652770cfa81b6cc7577d65e06d336173da116d1fb5b2d349d5d44127:    done           |++++++++++++++++++++++++++++++++++++++|
-layer-sha256:c357e2c68cb3bf1e98dcb3eb6ceb16837253db71535921d6993c594588bffe04:    done           |++++++++++++++++++++++++++++++++++++++|
-layer-sha256:26787c68cf0c92a778db814d327e283fe1da4434a7fea1f0232dae8002e38f33:    done           |++++++++++++++++++++++++++++++++++++++|
-layer-sha256:6aefca2dc61dcbcd268b8a9861e552f9cdb69e57242faec64ac120d2355a9c1a:    done           |++++++++++++++++++++++++++++++++++++++|
-layer-sha256:32a180f5cf85702e7680719c40c39c07972b1176355df5a621de9eb87ad07ce2:    done           |++++++++++++++++++++++++++++++++++++++|
-elapsed: 35.9s                                                                    total:  333.5  (9.3 MiB/s)
-
-pydocker.Image(id='sha256:f033692e2c5ab', tags=['python:3.9'])
-```
-
-You can do something similar with podman:
-
-```python
-from pydocker import DockerClient
-
-podman = DockerClient(client_call=["podman"])
-
-podman.pull("hello-world")
-podman.run("hello-world")
-print(podman.ps())
-...
-```
-
-## Contributing
-
-Any and all PRs are welcome. Use Python 3.14.8 or above and the locked development environment:
-
-```bash
-uv sync --locked
-uv run --locked ruff check .
-uv run --locked ruff format --check .
-uv run --locked ty check
-```
-
-To build the documentation from the repository root:
-
-```bash
-uv run --locked python -m docs.autogen
-cp docs/mkdocs.yml ./
-uv run --locked mkdocs build --config-file mkdocs.yml
-```
-
-Documentation generation runs live Docker and Podman examples, including Swarm and plugin operations.
-Use an isolated development daemon, not a production Docker host.
-
 
 ## What about the license?
 

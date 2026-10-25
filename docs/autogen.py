@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-import shutil
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Final
@@ -94,12 +93,6 @@ def mkdoc_autogen() -> None:
     template_path = PROJECT_ROOT / "docs" / "template"
     destination_path = PROJECT_ROOT / "docs" / "generated_sources"
     md_generate(pages, template_path, destination_path)
-    (destination_path / "img").mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(PROJECT_ROOT / "img/full.png", destination_path / "img/full.png")
-    shutil.copyfile(
-        PROJECT_ROOT / "img" / "docker_clients.png",
-        destination_path / "img" / "docker_clients.png",
-    )
 
     for file in destination_path.rglob("*.md"):
         file.write_text(add_links(file.read_text(encoding="utf-8")), encoding="utf-8")

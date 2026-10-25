@@ -1,0 +1,47 @@
+version: "3.7"
+
+services:
+  my_service:
+    build:
+      context: my_service_build
+    image: some_random_image
+    ports:
+      - "5000:5000"
+    volumes:
+      - /tmp:/tmp
+
+    environment:
+      - DATADOG_HOST=something
+  busybox:
+    image: busybox:latest
+    command: sleep infinity
+  busybox-2-electric-boogaloo:
+    image: busybox:latest
+    depends_on:
+      - alpine
+    command: sleep infinity
+  alpine:
+    image: alpine:latest
+    command: sleep infinity
+    environment:
+      - DD_API_KEY=__your_datadog_api_key_here__
+      - POSTGRES_HOST_AUTH_METHOD=trust
+  dodo:
+    image: busybox:latest
+    entrypoint: /bin/sh
+  profile_test_service:
+    image: busybox:latest
+    command: sleep infinity
+    profiles:
+      - my_test_profile
+  second_profile_test_service:
+    image: busybox:latest
+    command: sleep infinity
+    profiles:
+      - my_test_profile2
+  service_using_env_variables:
+    image: busybox:latest
+    command: sleep infinity
+    environment:
+      - A=${A:-0}
+      - B=${B:-0}

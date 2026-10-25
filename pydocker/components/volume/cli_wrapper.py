@@ -24,6 +24,7 @@ from pydocker.client_config import (
     ClientConfig,
     Command,
     DockerCLICaller,
+    ParsingError,
     ReloadableObjectFromJson,
 )
 from pydocker.components.volume.models import VolumeInspectResult
@@ -174,13 +175,27 @@ class VolumeCLI(DockerCLICaller):
     def inspect(self, x: str) -> Volume: ...
 
     @overload
-    def inspect(self, x: builtins.list[str]) -> builtins.list[Volume]: ...
+    def inspect(self, x: Iterable[str]) -> builtins.list[Volume]: ...
 
-    def inspect(self, x: str | builtins.list[str]) -> Volume | builtins.list[Volume]:
+    def inspect(self, x: str | Iterable[str]) -> Volume | builtins.list[Volume]:
         if isinstance(x, str):
             return Volume(self.client_config, x)
-        else:
-            return [Volume(self.client_config, reference) for reference in x]
+        references = list(x)
+        if not references:
+            return []
+        json_str = run([*self.docker_cmd, "volume", "inspect", *references])
+        parser = Volume(self.client_config, references[0], is_immutable_id=True)
+        snapshots = parser._parse_inspect_results(json_str, references)
+        volumes = []
+        for reference, snapshot in zip(references, snapshots, strict=True):
+            if snapshot.name is None or snapshot.name != reference:
+                raise ParsingError(
+                    f"Volume inspect identity does not match {reference!r}"
+                )
+            volume = Volume(self.client_config, snapshot.name, is_immutable_id=True)
+            volume._set_inspect_result(snapshot)
+            volumes.append(volume)
+        return volumes
 
     def exists(self, x: str) -> bool:
         """Returns `True` if the volume exists. `False` otherwise.

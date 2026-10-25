@@ -1,5 +1,7 @@
 import json
 from pathlib import Path
+from subprocess import CompletedProcess
+from unittest.mock import patch
 
 import pytest
 
@@ -8,6 +10,30 @@ from pydocker.components.container.models import ContainerEndpointIPAMConfig
 from pydocker.components.network.cli_wrapper import NetworkInspectResult
 from pydocker.exceptions import DockerException
 from pydocker.test_utils import get_all_jsons, random_name
+
+
+def test_batch_inspect_network_aliases_and_typed_snapshot() -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    identity = "a" * 64
+    snapshot = {"Id": identity, "Name": "named", "Driver": "bridge"}
+    with (
+        patch(
+            "subprocess.run",
+            return_value=CompletedProcess(
+                [], 0, json.dumps([snapshot] * 3).encode(), b""
+            ),
+        ) as command,
+        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+    ):
+        networks = client.network.inspect(["named", identity, identity[:12]])
+        assert [network.id for network in networks] == [identity] * 3
+        assert all(network.driver == "bridge" for network in networks)
+        assert all(
+            isinstance(network._inspect_result, NetworkInspectResult)
+            for network in networks
+        )
+        assert command.call_count == 1
 
 
 @pytest.mark.parametrize("json_file", get_all_jsons("networks"))

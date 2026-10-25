@@ -29,6 +29,7 @@ from pydocker.client_config import (
     ClientConfig,
     Command,
     DockerCLICaller,
+    ParsingError,
     ReloadableObjectFromJson,
 )
 from pydocker.components.container.models import (
@@ -1311,7 +1312,29 @@ class ContainerCLI(DockerCLICaller):
 
         if isinstance(x, str | Container):
             return Container(self.client_config, str(x))
-        return [Container(self.client_config, str(reference)) for reference in x]
+        references = [str(reference) for reference in x]
+        if not references:
+            return []
+        json_str = run([*self.docker_cmd, "container", "inspect", *references])
+        parser = Container(self.client_config, references[0], is_immutable_id=True)
+        snapshots = parser._parse_inspect_results(json_str, references)
+        containers = []
+        for reference, snapshot in zip(references, snapshots, strict=True):
+            if snapshot.id is None or not (
+                reference
+                and (
+                    snapshot.id.startswith(reference)
+                    or reference.removeprefix("/")
+                    == (snapshot.name or "").removeprefix("/")
+                )
+            ):
+                raise ParsingError(
+                    f"Container inspect identity does not match {reference!r}"
+                )
+            container = Container(self.client_config, snapshot.id, is_immutable_id=True)
+            container._set_inspect_result(snapshot)
+            containers.append(container)
+        return containers
 
     def kill(
         self,

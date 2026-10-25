@@ -2,6 +2,7 @@ import contextlib
 import json
 from collections.abc import Generator
 from pathlib import Path
+from subprocess import CompletedProcess
 from unittest.mock import ANY, MagicMock, Mock, patch
 
 import pytest
@@ -10,6 +11,63 @@ from pydocker import DockerClient, Image, docker
 from pydocker.components.image.models import ImageInspectResult
 from pydocker.exceptions import DockerException, NoSuchImage
 from pydocker.test_utils import get_all_jsons, random_name
+
+
+def test_batch_inspect_image_aliases_and_typed_snapshot() -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    identity = "sha256:" + "a" * 64
+    snapshot = {"Id": identity, "RepoTags": ["sample:latest", "other:v1"], "Size": 42}
+    references = [
+        "sample",
+        "other:v1",
+        "a" * 12,
+        identity,
+        "docker.io/library/sample:latest",
+    ]
+    with (
+        patch(
+            "subprocess.run",
+            return_value=CompletedProcess(
+                [], 0, json.dumps([snapshot] * len(references)).encode(), b""
+            ),
+        ) as command,
+        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+    ):
+        images = client.image.inspect(iter(references))
+        assert [image.id for image in images] == [identity] * len(references)
+        assert all(image.size == 42 for image in images)
+        assert all(
+            isinstance(image._inspect_result, ImageInspectResult) for image in images
+        )
+        assert command.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "sample@sha256:" + "b" * 64,
+        "sample:latest@sha256:" + "b" * 64,
+        "local:v2",
+    ],
+    ids=["repo-digest", "tagged-digest", "podman-local"],
+)
+def test_batch_inspect_image_digest_and_local_aliases(reference: str) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    identity = "sha256:" + "a" * 64
+    snapshot = {
+        "Id": identity,
+        "RepoTags": ["localhost/local:v2"],
+        "RepoDigests": ["docker.io/library/sample@sha256:" + "b" * 64],
+    }
+    with patch(
+        "subprocess.run",
+        return_value=CompletedProcess([], 0, json.dumps([snapshot]).encode(), b""),
+    ) as command:
+        images = client.image.inspect([reference])
+    assert [image.id for image in images] == [identity]
+    assert command.call_count == 1
 
 
 def _repo_tags(image: Image) -> list[str]:

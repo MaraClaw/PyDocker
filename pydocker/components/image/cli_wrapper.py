@@ -27,6 +27,7 @@ from pydocker.client_config import (
     ClientConfig,
     Command,
     DockerCLICaller,
+    ParsingError,
     ReloadableObjectFromJson,
 )
 from pydocker.components.container.cli_wrapper import (
@@ -387,8 +388,47 @@ class ImageCLI(DockerCLICaller):
         """
         if isinstance(x, str):
             return Image(self.client_config, x)
-        else:
-            return [Image(self.client_config, identifier) for identifier in x]
+        references = list(x)
+        if not references:
+            return []
+        json_str = run([*self.docker_cmd, "image", "inspect", *references])
+        parser = Image(self.client_config, references[0], is_immutable_id=True)
+        snapshots = parser._parse_inspect_results(json_str, references)
+
+        def normalized(reference: str) -> str:
+            reference = reference.removeprefix("index.docker.io/").removeprefix(
+                "docker.io/"
+            )
+            reference = reference.removeprefix("library/")
+            if "@" in reference:
+                repository, digest = reference.split("@", 1)
+                if ":" in repository.rsplit("/", 1)[-1]:
+                    repository = repository.rsplit(":", 1)[0]
+                return repository + "@" + digest
+            if ":" not in reference.rsplit("/", 1)[-1]:
+                return reference + ":latest"
+            return reference
+
+        images = []
+        for reference, snapshot in zip(references, snapshots, strict=True):
+            aliases = [*(snapshot.repo_tags or []), *(snapshot.repo_digests or [])]
+            normalized_aliases = {normalized(alias) for alias in aliases}
+            if snapshot.id is None or not (
+                reference
+                and (
+                    snapshot.id.startswith(reference)
+                    or snapshot.id.removeprefix("sha256:").startswith(reference)
+                    or normalized(reference) in normalized_aliases
+                    or "localhost/" + normalized(reference) in normalized_aliases
+                )
+            ):
+                raise ParsingError(
+                    f"Image inspect identity does not match {reference!r}"
+                )
+            image = Image(self.client_config, snapshot.id, is_immutable_id=True)
+            image._set_inspect_result(snapshot)
+            images.append(image)
+        return images
 
     def exists(self, x: str) -> bool:
         """Returns `True` if the image exists. `False` otherwise.

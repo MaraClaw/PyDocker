@@ -19,6 +19,7 @@ from pydocker.client_config import (
     ClientConfig,
     Command,
     DockerCLICaller,
+    ParsingError,
     ReloadableObjectFromJson,
 )
 from pydocker.components.network.models import (
@@ -269,9 +270,9 @@ class NetworkCLI(DockerCLICaller):
     def inspect(self, x: str) -> Network: ...
 
     @overload
-    def inspect(self, x: builtins.list[str]) -> builtins.list[Network]: ...
+    def inspect(self, x: Iterable[str]) -> builtins.list[Network]: ...
 
-    def inspect(self, x: str | builtins.list[str]) -> Network | builtins.list[Network]:
+    def inspect(self, x: str | Iterable[str]) -> Network | builtins.list[Network]:
         """Returns a `pydocker.Network` object from a string (id or network name).
 
         Parameters:
@@ -282,8 +283,25 @@ class NetworkCLI(DockerCLICaller):
         """
         if isinstance(x, str):
             return Network(self.client_config, x)
-        else:
-            return [Network(self.client_config, reference) for reference in x]
+        references = list(x)
+        if not references:
+            return []
+        json_str = run([*self.docker_cmd, "network", "inspect", *references])
+        parser = Network(self.client_config, references[0], is_immutable_id=True)
+        snapshots = parser._parse_inspect_results(json_str, references)
+        networks = []
+        for reference, snapshot in zip(references, snapshots, strict=True):
+            if snapshot.id is None or not (
+                reference
+                and (snapshot.id.startswith(reference) or snapshot.name == reference)
+            ):
+                raise ParsingError(
+                    f"Network inspect identity does not match {reference!r}"
+                )
+            network = Network(self.client_config, snapshot.id, is_immutable_id=True)
+            network._set_inspect_result(snapshot)
+            networks.append(network)
+        return networks
 
     def list(
         self, filters: Iterable[NetworkListFilter] | Mapping[str, Any] = ()

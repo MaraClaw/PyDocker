@@ -5,8 +5,10 @@ import signal
 import sys
 import tempfile
 import time
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from subprocess import CompletedProcess
 from typing import Literal
 from unittest.mock import Mock, patch
 
@@ -15,13 +17,285 @@ from pytest_mock import MockerFixture
 
 import pydocker
 from pydocker import DockerClient, Image, docker
+from pydocker.client_config import ParsingError
 from pydocker.components.container.cli_wrapper import ContainerStats
 from pydocker.components.container.models import (
     ContainerInspectResult,
     ContainerState,
 )
-from pydocker.exceptions import DockerException, NoSuchContainer
+from pydocker.exceptions import (
+    DockerException,
+    NoSuchContainer,
+)
 from pydocker.test_utils import get_all_jsons, random_name
+
+
+@pytest.mark.parametrize("component", ["container", "image", "network", "volume"])
+def test_batch_inspect_hydrates_in_request_order(component: str) -> None:
+    client = DockerClient(host="test-host")
+    client.client_config._client_call_with_path = ["docker-test"]
+    api = {
+        "container": client.container,
+        "image": client.image,
+        "network": client.network,
+        "volume": client.volume,
+    }[component]
+    references = ["second", "first", "second"]
+    snapshots = [{"Id": name, "Name": name} for name in references]
+    response = CompletedProcess([], 0, json.dumps(snapshots).encode(), b"")
+    with (
+        patch("subprocess.run", return_value=response) as command,
+        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+    ):
+        resources = api.inspect(iter(references))
+        assert [str(resource) for resource in resources] == references
+        assert all(
+            resource.client_config is client.client_config for resource in resources
+        )
+        assert all(
+            resource._get_inspect_result() is resource._inspect_result
+            for resource in resources
+        )
+        assert resources[0] is not resources[2]
+        command.assert_called_once()
+        assert command.call_args.args[0] == [
+            "docker-test",
+            "--host",
+            "test-host",
+            component,
+            "inspect",
+            *references,
+        ]
+
+
+@pytest.mark.parametrize("component", ["container", "image", "network", "volume"])
+def test_batch_inspect_empty_avoids_executable_lookup(component: str) -> None:
+    client = DockerClient(client_call=["not-installed"])
+    api = {
+        "container": client.container,
+        "image": client.image,
+        "network": client.network,
+        "volume": client.volume,
+    }[component]
+    with patch("shutil.which", side_effect=AssertionError("executable lookup")):
+        assert api.inspect(iter(())) == []
+
+
+@pytest.mark.parametrize("component", ["container", "image", "network", "volume"])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "invalid json",
+        "{}",
+        "[]",
+        "[{}, {}]",
+        "[null, null]",
+        '[{"Id":"first","Name":"first"}]',
+        '[{"Id":"first","Name":"first"},{"Id":"second","Name":"second"},{}]',
+        '[{"Id":"wrong","Name":"wrong"},{"Id":"second","Name":"second"}]',
+        '[{"Id":"second","Name":"second"},{"Id":"first","Name":"first"}]',
+        '[{"Id":"","Name":""},{"Id":"second","Name":"second"}]',
+        '[{"Id":"first","Name":"first","Created":"invalid"},{"Id":"second","Name":"second"}]',
+    ],
+    ids=[
+        "json",
+        "shape",
+        "empty",
+        "identity",
+        "item-shape",
+        "short",
+        "long",
+        "mismatch",
+        "reordered",
+        "empty-identity",
+        "model",
+    ],
+)
+def test_batch_inspect_rejects_invalid_success(component: str, payload: str) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    api = {
+        "container": client.container,
+        "image": client.image,
+        "network": client.network,
+        "volume": client.volume,
+    }[component]
+    if component == "volume":
+        payload = payload.replace('"Created"', '"CreatedAt"')
+    with (
+        patch(
+            "subprocess.run",
+            return_value=CompletedProcess([], 0, payload.encode(), b""),
+        ),
+        pytest.raises(ParsingError),
+    ):
+        api.inspect(["first", "second"])
+
+
+@pytest.mark.parametrize("component", ["container", "image", "network", "volume"])
+def test_batch_inspect_preserves_partial_command_failure(component: str) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    api = {
+        "container": client.container,
+        "image": client.image,
+        "network": client.network,
+        "volume": client.volume,
+    }[component]
+    output = b'[{"Id":"first","Name":"first"}]'
+    with (
+        patch(
+            "subprocess.run",
+            return_value=CompletedProcess([], 17, output, b"permission denied"),
+        ),
+        pytest.raises(DockerException) as failure,
+    ):
+        api.inspect(["first", "second"])
+    assert failure.value.return_code == 17
+    assert failure.value.stdout == output.decode()
+    assert failure.value.stderr == "permission denied"
+    assert failure.value.docker_command == [
+        "docker-test",
+        component,
+        "inspect",
+        "first",
+        "second",
+    ]
+
+
+@pytest.mark.parametrize("component", ["container", "image", "network", "volume"])
+def test_batch_inspect_preserves_scalar_and_lazy_list_contracts(component: str) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    api = {
+        "container": client.container,
+        "image": client.image,
+        "network": client.network,
+        "volume": client.volume,
+    }[component]
+    resource_type = {
+        "container": pydocker.Container,
+        "image": pydocker.Image,
+        "network": pydocker.Network,
+        "volume": pydocker.Volume,
+    }[component]
+    snapshot = b'[{"Id":"identity","Name":"named"}]'
+    with patch(
+        "subprocess.run", return_value=CompletedProcess([], 0, snapshot, b"")
+    ) as command:
+        resource = api.inspect("named")
+        assert isinstance(resource, resource_type)
+        assert str(resource) == ("named" if component == "volume" else "identity")
+        assert resource.client_config is client.client_config
+        assert resource._inspect_result is not None
+        assert command.call_count == 1
+        command.return_value = CompletedProcess([], 0, b"identity", b"")
+        listed = api.list()
+        assert len(listed) == 1
+        assert str(listed[0]) == "identity"
+        assert listed[0]._inspect_result is None
+        assert command.call_count == 2
+
+
+@pytest.mark.parametrize("component", ["container", "image", "network", "volume"])
+def test_batch_inspect_rejects_inconsistent_repeated_references(component: str) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    api = {
+        "container": client.container,
+        "image": client.image,
+        "network": client.network,
+        "volume": client.volume,
+    }[component]
+    snapshots = [
+        {"Id": "a" * 64, "Name": "named", "RepoTags": ["named:latest"]},
+        {
+            "Id": "b" * 64,
+            "Name": "other" if component == "volume" else "named",
+            "RepoTags": ["named:latest"],
+        },
+    ]
+    with (
+        patch(
+            "subprocess.run",
+            return_value=CompletedProcess([], 0, json.dumps(snapshots).encode(), b""),
+        ),
+        pytest.raises(ParsingError),
+    ):
+        api.inspect(["named", "named"])
+
+
+@pytest.mark.parametrize("component", ["container", "image", "network", "volume"])
+def test_batch_inspect_cache_reload_and_expiration(component: str) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    api = {
+        "container": client.container,
+        "image": client.image,
+        "network": client.network,
+        "volume": client.volume,
+    }[component]
+    snapshot = {"Id": "identity", "Name": "named", "RepoTags": ["named:latest"]}
+    with (
+        patch(
+            "subprocess.run",
+            return_value=CompletedProcess([], 0, json.dumps([snapshot]).encode(), b""),
+        ) as command,
+        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+    ):
+        resource = api.inspect(["named"])[0]
+        initial = resource._get_inspect_result()
+        assert command.call_count == 1
+        resource.reload()
+        refreshed = resource._get_inspect_result()
+        assert refreshed is not initial
+        assert command.call_count == 2
+        resource._last_refreshed_time = datetime.min
+        assert resource._get_inspect_result() is not refreshed
+        assert command.call_count == 3
+        assert command.call_args.args[0] == [
+            "docker-test",
+            component,
+            "inspect",
+            "named" if component == "volume" else "identity",
+        ]
+
+
+def test_batch_inspect_container_aliases_and_reload() -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    snapshot = {"Id": "a" * 64, "Name": "/named", "Path": "before"}
+    existing = pydocker.Container(client.client_config, "a" * 64, is_immutable_id=True)
+
+    def references() -> Iterator[str | pydocker.Container]:
+        yield "named"
+        yield existing
+        yield "a" * 12
+
+    with (
+        patch(
+            "subprocess.run",
+            return_value=CompletedProcess(
+                [], 0, json.dumps([snapshot] * 3).encode(), b""
+            ),
+        ) as command,
+        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+    ):
+        resources = client.container.inspect(references())
+        assert [resource.id for resource in resources] == ["a" * 64] * 3
+        assert [resource.name for resource in resources] == ["named"] * 3
+        assert resources[0].path == "before"
+        assert command.call_count == 1
+        snapshot["Path"] = "after"
+        command.return_value = CompletedProcess(
+            [], 0, json.dumps([snapshot]).encode(), b""
+        )
+        resources[0].reload()
+        assert resources[0].path == "after"
+        resources[0]._last_refreshed_time = datetime.min
+        assert resources[0].path == "after"
+        assert command.call_count == 3
+        assert command.call_args.args[0][-1] == "a" * 64
 
 
 def build_image(ctr_client: DockerClient, python_code: str) -> Image:

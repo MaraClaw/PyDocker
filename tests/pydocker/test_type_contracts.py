@@ -2,9 +2,24 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import assert_type
 
-from pydocker import DockerClient, Image
+from pydocker import Container, DockerClient, Image, Network, Volume
 from pydocker.components.buildx.cli_wrapper import BakeResult
 from pydocker.components.buildx.imagetools.models import Manifest
+
+
+def _check_resource_inspection_contracts(client: DockerClient) -> None:
+    assert_type(client.container.inspect("container"), Container)
+    assert_type(client.container.inspect(["container"]), list[Container])
+    assert_type(client.container.inspect(iter(["container"])), list[Container])
+    assert_type(client.image.inspect("image"), Image)
+    assert_type(client.image.inspect(["image"]), list[Image])
+    assert_type(client.image.inspect(iter(["image"])), list[Image])
+    assert_type(client.network.inspect("network"), Network)
+    assert_type(client.network.inspect(["network"]), list[Network])
+    assert_type(client.network.inspect(iter(["network"])), list[Network])
+    assert_type(client.volume.inspect("volume"), Volume)
+    assert_type(client.volume.inspect(["volume"]), list[Volume])
+    assert_type(client.volume.inspect(iter(["volume"])), list[Volume])
 
 
 def _check_image_return_contracts(

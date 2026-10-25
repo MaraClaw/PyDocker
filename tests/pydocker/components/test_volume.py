@@ -1,6 +1,8 @@
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from subprocess import CompletedProcess
+from unittest.mock import patch
 
 import pytest
 
@@ -8,6 +10,34 @@ from pydocker import DockerClient, Volume
 from pydocker.components.volume.models import VolumeInspectResult
 from pydocker.exceptions import NoSuchVolume
 from pydocker.test_utils import get_all_jsons, random_name
+
+
+def test_batch_inspect_volume_names_and_typed_snapshot() -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    snapshots = [
+        {"Name": name, "Driver": "local", "Mountpoint": f"/data/{name}"}
+        for name in ["second", "first", "second"]
+    ]
+    with (
+        patch(
+            "subprocess.run",
+            return_value=CompletedProcess([], 0, json.dumps(snapshots).encode(), b""),
+        ) as command,
+        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+    ):
+        volumes = client.volume.inspect(["second", "first", "second"])
+        assert [volume.name for volume in volumes] == ["second", "first", "second"]
+        assert [volume.mountpoint for volume in volumes] == [
+            Path("/data/second"),
+            Path("/data/first"),
+            Path("/data/second"),
+        ]
+        assert all(
+            isinstance(volume._inspect_result, VolumeInspectResult)
+            for volume in volumes
+        )
+        assert command.call_count == 1
 
 
 @pytest.mark.parametrize("json_file", get_all_jsons("volumes"))

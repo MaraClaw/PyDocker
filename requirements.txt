@@ -1,0 +1,4 @@
+pydantic>=2.14.1
+typing_extensions
+boto3
+s3transfer

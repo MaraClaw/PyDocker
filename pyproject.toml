@@ -1,0 +1,98 @@
+[build-system]
+requires = ["setuptools>=84.2.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pydocker"
+version = "0.1.0"
+description = "A Docker client for Python, designed to be fun and intuitive!"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.14.8"
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17.2",
+    "ty>=0.0.91",
+    "pytest>=9.1.1",
+    "pytest-mock>=3.17.0",
+    "pytz>=2026.5",
+    "astunparse==1.6.3",
+    "griffe==2.4.1",
+    "markdown==3.11.2",
+    "markupsafe==3.0.4",
+    "mkdocs==1.6.1",
+    "mkdocs-autorefs==1.4.5",
+    "mkdocs-get-deps==0.2.2",
+    "mkdocs-material==9.8.0",
+    "mkdocstrings==1.0.8",
+    "mkdocstrings-python==2.0.10",
+    "pymdown-extensions==12.3",
+]
+
+[project.urls]
+"Source" = "https://github.com/MaraClaw/PyDocker"
+"Documentation" = "https://github.com/MaraClaw/PyDocker"
+"Bug Tracker" = "https://github.com/MaraClaw/PyDocker/issues"
+
+[project.scripts]
+pydocker = "pydocker.command_line_entrypoint:main"
+
+[tool.setuptools.packages.find]
+include = ["pydocker*"]
+exclude = ["tests*", "docs*"]
+
+[tool.setuptools.package-data]
+pydocker = ["py.typed"]
+
+[tool.ruff]
+target-version = "py314"
+extend-exclude = ["docs/site"]
+
+[tool.ruff.lint]
+ignore = [
+  "E501", # Line too long
+]
+select = [
+  "E", # pycodestyle
+  "F", # Pyflakes
+  "W", # pycodestyle
+  "I", # isort
+  "UP", # pyupgrade
+  "B", # flake8-bugbear
+  "SIM", # flake8-simplify
+  "C4", # flake8-comprehensions
+  "PIE", # flake8-pie
+  "RUF", # Ruff-specific rules
+  "ANN", # flake8-annotations
+]
+
+[tool.ty.environment]
+python-version = "3.14"
+
+[tool.ty.rules]
+all = "error"
+
+[tool.ty.terminal]
+error-on-warning = true
+
+[tool.ty.analysis]
+respect-type-ignore-comments = false
+
+[tool.ty.src]
+include = ["pydocker", "tests", "docs"]
+exclude = ["docs/site"]
+
+[tool.pytest.ini_options]
+markers = [
+  "docker: marks tests as needing a docker engine to run",
+  "podman: marks tests as needing a podman engine to run",
+]
+xfail_strict = true
+pythonpath = ["./"]
+testpaths = ["tests"]

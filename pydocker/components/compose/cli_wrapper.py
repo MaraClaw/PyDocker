@@ -17,6 +17,7 @@ from pydocker.components.compose.models import (
     ComposeEvent,
     ComposeProject,
 )
+from pydocker.components.top import ComposeTopResult, parse_compose_top
 from pydocker.utils import (
     MappedProcessStream,
     custom_parse_object_as,
@@ -1091,9 +1092,45 @@ class ComposeCLI(DockerCLICaller):
         else:
             run(full_cmd)
 
-    def top(self) -> None:
-        """Not yet implemented"""
-        raise NotImplementedError
+    @overload
+    def top(
+        self, services: str | list[str] | None = None, *, raw: Literal[False] = False
+    ) -> ComposeTopResult: ...
+
+    @overload
+    def top(
+        self, services: str | list[str] | None = None, *, raw: Literal[True]
+    ) -> str: ...
+
+    @overload
+    def top(
+        self, services: str | list[str] | None = None, *, raw: bool
+    ) -> ComposeTopResult | str: ...
+
+    def top(
+        self, services: str | list[str] | None = None, *, raw: bool = False
+    ) -> ComposeTopResult | str:
+        """List processes using this client's Compose project configuration.
+
+        Parameters:
+            services: Service name(s), or None for all services. An explicit []
+                returns an empty result without resolving or invoking the CLI.
+            raw: Return CLI text without parsing, including unsupported layouts.
+
+        Returns:
+            ComposeTopResult retaining raw_output and ordered sections. Grouped
+            sections retain their container name; flat SERVICE/# tables retain
+            attribution in their original headings and cells, with container=None.
+
+        Raises:
+            TopParseError: A malformed or ambiguous table; use raw=True.
+            DockerException: CLI failures, including unknown services.
+        """
+        if services == []:
+            return "" if raw else ComposeTopResult("", ())
+        selected = [] if services is None else to_list(services)
+        output = run([*self.docker_compose_cmd, "top", *selected])
+        return output if raw else parse_compose_top(output)
 
     def events(
         self,

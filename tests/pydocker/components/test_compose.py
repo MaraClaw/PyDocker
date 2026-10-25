@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import time
@@ -22,9 +23,197 @@ import pydocker
 from pydocker import Container, DockerClient, DockerException
 from pydocker.components.compose.models import ComposeConfig, ComposeEvent
 from pydocker.components.container.models import ContainerState
+from pydocker.components.top import ComposeTopResult, TopParseError
 from pydocker.exceptions import NoSuchImage
-from pydocker.test_utils import get_all_jsons
+from pydocker.test_utils import get_all_jsons, random_name
 from pydocker.utils import PROJECT_ROOT, stream_stdout_and_stderr
+
+
+@patch("pydocker.components.compose.cli_wrapper.run")
+@pytest.mark.parametrize("services", [None, "web", ["web", "worker"]])
+def test_top_uses_project_configuration_when_selecting_services(
+    run_mock: Mock, services: str | list[str] | None
+) -> None:
+    client = DockerClient(
+        client_call=[sys.executable, "engine"],
+        context="remote",
+        compose_files=["first.yml", "second.yml"],
+        compose_profiles=["debug"],
+        compose_env_files=["vars.env"],
+        compose_project_name="owned",
+        compose_project_directory="/project",
+        compose_compatibility=True,
+    )
+    run_mock.return_value = (
+        "SERVICE # PID CMD\nweb 1 7 python  server.py --name two words"
+    )
+
+    result = client.compose.top(services)
+
+    assert isinstance(result, ComposeTopResult)
+    assert result.sections[0].container is None
+    assert result.sections[0].headings == ("SERVICE", "#", "PID", "CMD")
+    assert result.sections[0].rows == (
+        ("web", "1", "7", "python  server.py --name two words"),
+    )
+    selected = (
+        []
+        if services is None
+        else [services]
+        if isinstance(services, str)
+        else services
+    )
+    run_mock.assert_called_once_with(
+        [
+            Path(sys.executable),
+            "engine",
+            "--context",
+            "remote",
+            "compose",
+            "--file",
+            "first.yml",
+            "--file",
+            "second.yml",
+            "--profile",
+            "debug",
+            "--env-file",
+            "vars.env",
+            "--project-name",
+            "owned",
+            "--project-directory",
+            "/project",
+            "--compatibility",
+            "top",
+            *selected,
+        ]
+    )
+
+
+@patch("pydocker.components.compose.cli_wrapper.run")
+def test_top_keeps_sections_separate_when_compose_groups_containers(
+    run_mock: Mock,
+) -> None:
+    client = DockerClient(client_call=[sys.executable])
+    output = "owned-web-1\nUID PID CMD\n---------------------\nroot 7 python  web.py\n\nowned-web-2\nPID USER COMMAND\n8 worker sleep 300\n"
+    run_mock.return_value = output
+
+    result = client.compose.top()
+
+    assert result.raw_output == output
+    assert [
+        (section.container, section.headings, section.rows)
+        for section in result.sections
+    ] == [
+        ("owned-web-1", ("UID", "PID", "CMD"), (("root", "7", "python  web.py"),)),
+        ("owned-web-2", ("PID", "USER", "COMMAND"), (("8", "worker", "sleep 300"),)),
+    ]
+
+
+@pytest.mark.parametrize("raw", [False, True])
+@patch("pydocker.components.compose.cli_wrapper.run")
+def test_top_is_noop_when_service_selection_is_empty(run_mock: Mock, raw: bool) -> None:
+    client = DockerClient(client_call=["nonexistent-executable-for-top-noop"])
+
+    result = client.compose.top([], raw=raw)
+
+    assert result == ("" if raw else ComposeTopResult("", ()))
+    run_mock.assert_not_called()
+
+
+@patch("pydocker.components.compose.cli_wrapper.run")
+@pytest.mark.parametrize("output", ["", "\n\n"])
+def test_top_returns_empty_sections_when_project_has_no_processes(
+    run_mock: Mock, output: str
+) -> None:
+    client = DockerClient(client_call=[sys.executable])
+    run_mock.return_value = output
+
+    result = client.compose.top()
+
+    assert result == ComposeTopResult(output, ())
+
+
+@patch("pydocker.components.compose.cli_wrapper.run")
+@pytest.mark.parametrize(
+    "output",
+    ["owned-web-1", "owned-web-1\nPID CMD\n7", "SERVICE # CMD PID\nweb 1 sleep 300 7"],
+)
+def test_top_rejects_malformed_sections_when_parsing_is_requested(
+    run_mock: Mock, output: str
+) -> None:
+    client = DockerClient(client_call=[sys.executable])
+    run_mock.return_value = output
+
+    with pytest.raises(TopParseError, match="raw=True"):
+        client.compose.top()
+
+
+@patch(
+    "pydocker.components.compose.cli_wrapper.run", return_value="unrecognized layout\n"
+)
+def test_top_exposes_raw_output_when_compose_layout_is_unknown(run_mock: Mock) -> None:
+    client = DockerClient(client_call=[sys.executable])
+
+    result = client.compose.top("web", raw=True)
+
+    assert result == "unrecognized layout\n"
+
+
+@patch("pydocker.utils.subprocess.run")
+@pytest.mark.parametrize("raw", [False, True])
+def test_top_retains_compose_exception_when_service_is_missing(
+    run_mock: Mock, raw: bool
+) -> None:
+    client = DockerClient(client_call=[sys.executable])
+    run_mock.return_value = subprocess.CompletedProcess(
+        [], 1, b"", b"no such service: absent"
+    )
+
+    with pytest.raises(DockerException) as error:
+        client.compose.top("absent", raw=raw)
+
+    assert error.value.stderr == "no such service: absent"
+    assert error.value.docker_command[-2:] == ["top", "absent"]
+
+
+def test_top_preserves_attribution_when_inspecting_owned_live_project(
+    docker_client: DockerClient, tmp_path: Path
+) -> None:
+    compose_file = tmp_path / "top-compose.yml"
+    compose_file.write_text(
+        'services:\n  web:\n    image: python:3.14.8-slim-trixie\n    command: ["sleep", "300"]\n'
+        '  worker:\n    image: python:3.14.8-slim-trixie\n    command: ["sleep", "301"]\n'
+    )
+    project = DockerClient(
+        client_call=docker_client.client_config.client_call,
+        compose_files=[compose_file],
+        compose_project_name=f"top-{random_name()}",
+    )
+    try:
+        project.compose.up(detach=True)
+
+        result = project.compose.top("web")
+
+        assert result.sections
+        assert all(
+            "sleep 301" not in row[-1]
+            for section in result.sections
+            for row in section.rows
+        )
+        assert any(
+            "sleep 300" in row[-1]
+            for section in result.sections
+            for row in section.rows
+        )
+        for section in result.sections:
+            if section.container is None:
+                assert section.headings[:2] == ("SERVICE", "#")
+                assert all(row[0] == "web" for row in section.rows)
+            else:
+                assert "web" in section.container
+    finally:
+        project.compose.down(timeout=0)
+
 
 pytestmark = pytest.mark.skipif(
     not pydocker.docker.compose.is_installed(),

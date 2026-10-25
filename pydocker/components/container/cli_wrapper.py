@@ -41,6 +41,8 @@ from pydocker.components.container.models import (
     Mount,
     NetworkSettings,
 )
+from pydocker.components.container.top import docker_top_fields
+from pydocker.components.top import ContainerTopResult, parse_table
 from pydocker.exceptions import NoSuchContainer
 from pydocker.utils import (
     ProcessStream,
@@ -2378,13 +2380,61 @@ class ContainerCLI(DockerCLICaller):
 
         run(full_cmd)
 
-    def top(self) -> None:
-        """Get the running processes of a container
+    @overload
+    def top(
+        self,
+        container: ValidContainer,
+        ps_args: Sequence[str] = (),
+        *,
+        raw: Literal[False] = False,
+    ) -> ContainerTopResult: ...
 
-        Alias: `docker.top(...)`
+    @overload
+    def top(
+        self,
+        container: ValidContainer,
+        ps_args: Sequence[str] = (),
+        *,
+        raw: Literal[True],
+    ) -> str: ...
 
-        Not yet implemented"""
-        raise NotImplementedError
+    @overload
+    def top(
+        self, container: ValidContainer, ps_args: Sequence[str] = (), *, raw: bool
+    ) -> ContainerTopResult | str: ...
+
+    def top(
+        self,
+        container: ValidContainer,
+        ps_args: Sequence[str] = (),
+        *,
+        raw: bool = False,
+    ) -> ContainerTopResult | str:
+        """Get a container's running processes without changing its state.
+
+        Alias: `docker.top(...)`.
+
+        Parameters:
+            container: Container name, id, or Container object.
+            ps_args: Docker ps option tokens, forwarded after the container.
+                Defaults to the Engine's ps selection (normally -ef).
+            raw: Return the output from the existing CLI execution path as text
+                instead of parsing it. Required for ambiguous field selections.
+
+        Returns:
+            ContainerTopResult with original headings, ordered string rows, and
+            raw_output. Supported selections have scalar fields and optionally
+            one final command/free-text field. No fixed process schema is imposed.
+
+        Raises:
+            TopParseError: Unsupported or malformed parsed layout; use raw=True.
+            NoSuchContainer: The container does not exist.
+        """
+        output = run([*self.docker_cmd, "container", "top", container, *ps_args])
+        if raw:
+            return output
+        table = parse_table(output, docker_top_fields(ps_args))
+        return ContainerTopResult(table.headings, table.rows, output)
 
     def unpause(self, x: ValidContainer | Iterable[ValidContainer], /) -> None:
         """Unpause all processes within one or more containers

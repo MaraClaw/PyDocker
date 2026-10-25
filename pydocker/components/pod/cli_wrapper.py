@@ -3,7 +3,7 @@ from __future__ import annotations
 import builtins
 import json
 import warnings
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timedelta
 from types import TracebackType
 from typing import (
@@ -28,6 +28,7 @@ from pydocker.components.pod.models import (
     PodInfraConfig,
     PodInspectResult,
 )
+from pydocker.components.top import PodTopResult, parse_table
 from pydocker.components.volume.cli_wrapper import VolumeDefinition
 from pydocker.exceptions import NoSuchPod
 from pydocker.utils import (
@@ -761,11 +762,62 @@ class PodCLI(DockerCLICaller):
         full_cmd.extend([str(p) for p in pods])
         run(full_cmd)
 
-    def top(self, pod: ValidPod) -> None:
-        """Get the running processes of a pod
+    @overload
+    def top(
+        self,
+        pod: ValidPod,
+        descriptors: str | Sequence[str] = (),
+        *,
+        raw: Literal[False] = False,
+    ) -> PodTopResult: ...
 
-        Not yet implemented"""
-        raise NotImplementedError
+    @overload
+    def top(
+        self,
+        pod: ValidPod,
+        descriptors: str | Sequence[str] = (),
+        *,
+        raw: Literal[True],
+    ) -> str: ...
+
+    @overload
+    def top(
+        self, pod: ValidPod, descriptors: str | Sequence[str] = (), *, raw: bool
+    ) -> PodTopResult | str: ...
+
+    def top(
+        self, pod: ValidPod, descriptors: str | Sequence[str] = (), *, raw: bool = False
+    ) -> PodTopResult | str:
+        """Get a pod's processes using Podman's positional format descriptors.
+
+        Parameters:
+            pod: Pod name, id, or Pod object.
+            descriptors: Ordered descriptors, separate or comma-separated. These
+                are not Docker ps options. Empty selects Podman's default table.
+            raw: Return CLI text without parsing. Use for nonfinal args/comm or
+                other fields whose whitespace boundaries cannot be determined.
+
+        Returns:
+            PodTopResult with original headings, string rows, and raw_output.
+
+        Raises:
+            TopParseError: Malformed or ambiguous parsed output; use raw=True.
+            NoSuchPod: The pod does not exist.
+        """
+        fields = tuple(
+            field
+            for descriptor in to_list(descriptors)
+            for field in descriptor.split(",")
+        )
+        output = run([*self.docker_cmd, "pod", "top", pod, *fields])
+        if raw:
+            return output
+        table = parse_table(
+            output,
+            fields or None,
+            text_fields=frozenset({"args", "comm", "label", "stime", "%a", "%c"}),
+        )
+        return PodTopResult(table.headings, table.rows, output)
 
     def unpause(self, x: ValidPod | Iterable[ValidPod], /) -> None:
         """Unpauses one or more pods

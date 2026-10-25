@@ -261,7 +261,7 @@ class DockerClient(DockerCLICaller):
         self.stats = self.container.stats
         self.stop = self.container.stop
         self.tag = self.image.tag
-        self.top = self.container.stop
+        self.top = self.container.top
         self.unpause = self.container.unpause
         self.update = self.container.update
         self.wait = self.container.wait

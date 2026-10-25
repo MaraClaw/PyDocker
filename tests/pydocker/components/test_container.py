@@ -2,6 +2,7 @@ import contextlib
 import json
 import os
 import signal
+import subprocess
 import sys
 import tempfile
 import time
@@ -25,6 +26,7 @@ from pydocker.components.container.models import (
     ContainerInspectResult,
     ContainerState,
 )
+from pydocker.components.top import ContainerTopResult, TopParseError
 from pydocker.exceptions import (
     DockerException,
     NoSuchContainer,
@@ -33,6 +35,173 @@ from pydocker.exceptions import (
     NoSuchVolume,
 )
 from pydocker.test_utils import get_all_jsons, random_name
+
+
+@patch("pydocker.components.container.cli_wrapper.run")
+@pytest.mark.parametrize(
+    ("ps_args", "output", "headings", "rows"),
+    [
+        (
+            [],
+            "UID PID PPID C STIME TTY TIME CMD\nroot 7 1 0 12:00 ? 00:00:00 python -c print('two  spaces')",
+            ("UID", "PID", "PPID", "C", "STIME", "TTY", "TIME", "CMD"),
+            (
+                (
+                    "root",
+                    "7",
+                    "1",
+                    "0",
+                    "12:00",
+                    "?",
+                    "00:00:00",
+                    "python -c print('two  spaces')",
+                ),
+            ),
+        ),
+        (
+            ["-eo", "pid,args"],
+            "PID COMMAND\n7 python  worker.py --label two words",
+            ("PID", "COMMAND"),
+            (("7", "python  worker.py --label two words"),),
+        ),
+        (
+            ["--format=pid,args=Invocation"],
+            "PID Invocation\n7 sleep 300",
+            ("PID", "Invocation"),
+            (("7", "sleep 300"),),
+        ),
+        (["-o", "pid", "-o", "ppid"], "PID PPID\n7 1", ("PID", "PPID"), (("7", "1"),)),
+        (["-opid"], "PID", ("PID",), ()),
+        (
+            ["-owchan", "-o", "pid"],
+            "WCHAN PID\ndo_wait 7",
+            ("WCHAN", "PID"),
+            (("do_wait", "7"),),
+        ),
+        (
+            ["-C", "python"],
+            "PID CMD\n7 python worker.py",
+            ("PID", "CMD"),
+            (("7", "python worker.py"),),
+        ),
+        (
+            ["-Cpython"],
+            "PID CMD\n7 python worker.py",
+            ("PID", "CMD"),
+            (("7", "python worker.py"),),
+        ),
+        (
+            ["-o", "args"],
+            "COMMAND\npython -c 'print(1)'",
+            ("COMMAND",),
+            (("python -c 'print(1)'",),),
+        ),
+    ],
+)
+def test_top_preserves_cells_when_docker_selects_columns(
+    run_mock: Mock,
+    ps_args: list[str],
+    output: str,
+    headings: tuple[str, ...],
+    rows: tuple[tuple[str, ...], ...],
+) -> None:
+    client = DockerClient(client_call=[sys.executable, "engine"], host="ssh://host")
+    run_mock.return_value = output
+
+    result = client.container.top("workload", ps_args)
+
+    assert isinstance(result, ContainerTopResult)
+    assert (result.headings, result.rows, result.raw_output) == (headings, rows, output)
+    run_mock.assert_called_once_with(
+        [
+            Path(sys.executable),
+            "engine",
+            "--host",
+            "ssh://host",
+            "container",
+            "top",
+            "workload",
+            *ps_args,
+        ]
+    )
+
+
+@patch("pydocker.components.container.cli_wrapper.run")
+@pytest.mark.parametrize(
+    ("ps_args", "output"),
+    [
+        (["-o", "args=Invocation,pid"], "Invocation PID\nsleep 300 7"),
+        (
+            ["-o", "lstart,pid,args"],
+            "STARTED PID COMMAND\nSun Oct 25 12:00:00 2026 7 sleep 300",
+        ),
+        (["-o", "pid=,args="], "7 sleep 300"),
+        (["-o", "pid,unknown"], "PID OTHER\n7 value"),
+        (["-eOargs=Invocation"], "PID Invocation CMD\n7 sleep 300 sleep 300"),
+        (["-eh"], "7 sleep 300"),
+        ([], "UID PID CMD\nroot 7"),
+        ([], "CMD PID\nsleep 300 7"),
+        ([], "PID PPID\n7 1 extra"),
+        ([], ""),
+    ],
+)
+def test_top_rejects_ambiguous_output_when_parsing_is_requested(
+    run_mock: Mock, ps_args: list[str], output: str
+) -> None:
+    client = DockerClient(client_call=[sys.executable])
+    run_mock.return_value = output
+
+    with pytest.raises(TopParseError, match="raw=True"):
+        client.container.top("workload", ps_args)
+
+
+@patch(
+    "pydocker.components.container.cli_wrapper.run",
+    return_value="Invocation PID\nsleep 300 7\n",
+)
+def test_top_returns_raw_text_when_selection_is_ambiguous(run_mock: Mock) -> None:
+    client = DockerClient(client_call=[sys.executable])
+
+    output = client.container.top("workload", ["-o", "args=Invocation,pid"], raw=True)
+
+    assert output == "Invocation PID\nsleep 300 7\n"
+
+
+@patch("pydocker.utils.subprocess.run")
+@pytest.mark.parametrize("raw", [False, True])
+def test_top_retains_missing_container_exception_when_cli_fails(
+    run_mock: Mock, raw: bool
+) -> None:
+    client = DockerClient(client_call=[sys.executable])
+    run_mock.return_value = subprocess.CompletedProcess(
+        [], 1, b"", b"Error: No such container: absent"
+    )
+
+    with pytest.raises(NoSuchContainer) as error:
+        client.container.top("absent", raw=raw)
+
+    assert error.value.return_code == 1
+    assert error.value.docker_command[-3:] == ["container", "top", "absent"]
+
+
+@pytest.mark.parametrize(
+    "ps_args", [["-eo", "pid,args"], ["-o", "pid,args=Invocation"]]
+)
+def test_top_preserves_custom_command_when_inspecting_live_container(
+    docker_client: DockerClient, ps_args: list[str]
+) -> None:
+    container = docker_client.run(
+        "python:3.14.8-slim-trixie", ["sleep", "300"], detach=True
+    )
+    try:
+        result = docker_client.container.top(container, ps_args)
+
+        assert len(result.headings) == 2
+        assert result.rows
+        assert all(len(row) == 2 for row in result.rows)
+        assert any(row[-1] == "sleep 300" for row in result.rows)
+    finally:
+        docker_client.remove(container, force=True)
 
 
 @pytest.mark.parametrize("component", ["container", "image", "network", "volume"])

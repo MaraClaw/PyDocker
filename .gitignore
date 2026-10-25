@@ -133,3 +133,4 @@ generated_sources/
 docs/README.md
 
 .omo/
+*.DS_Store

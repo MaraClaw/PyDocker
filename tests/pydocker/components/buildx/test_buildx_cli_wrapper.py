@@ -1,18 +1,19 @@
 import json
 import os
+import sys
 import tarfile
 from collections.abc import Generator, Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, assert_never
 from unittest.mock import Mock, patch
 
 import pytest
 
 import pydocker.components.buildx.cli_wrapper
 from pydocker import docker
-from pydocker.exceptions import DockerException
+from pydocker.exceptions import DockerException, NoSuchImage
 from pydocker.test_utils import set_cache_validity_period
-from pydocker.utils import PROJECT_ROOT
+from pydocker.utils import PROJECT_ROOT, stream_stdout_and_stderr
 
 dockerfile_content1 = """
 FROM busybox
@@ -1002,3 +1003,113 @@ def test_list() -> None:
     assert docker.buildx.inspect("default") in builders
     for builder in builders:
         assert builder.driver in ["docker", "docker-container"]
+
+
+@pytest.mark.parametrize("consume", [False, True])
+def test_owned_buildx_logs_cancel_idle_child(consume: bool) -> None:
+    stream = pydocker.components.buildx.cli_wrapper.stream_buildx_logs(
+        [
+            sys.executable,
+            "-c",
+            "import time; print('ready', flush=True); time.sleep(60)",
+        ]
+    )
+    with stream:
+        if consume:
+            assert next(stream) == "ready\n"
+
+        stream.close()
+        stream.close()
+
+        assert list(stream) == []
+        assert stream._stream._process.poll() is not None
+        assert all(not thread.is_alive() for thread in stream._stream._threads)
+
+
+def test_owned_buildx_logs_context_preserves_body_error() -> None:
+    stream = pydocker.components.buildx.cli_wrapper.stream_buildx_logs(
+        [sys.executable, "-c", "import time; time.sleep(60)"]
+    )
+    error = RuntimeError("log consumer failed")
+
+    with pytest.raises(RuntimeError) as raised, stream:
+        raise error
+
+    assert raised.value is error
+    assert stream._stream._process.poll() is not None
+
+
+def test_owned_buildx_logs_eof_preserves_decode_and_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STREAM_ENV", "inherited")
+    stream = pydocker.components.buildx.cli_wrapper.stream_buildx_logs(
+        [
+            sys.executable,
+            "-c",
+            "import os; os.write(1, os.environ['STREAM_ENV'].encode() + b'\\n'); "
+            "os.write(2, b'\\xe2\\x9e\\n')",
+        ],
+        env={"STREAM_ENV": "override"},
+    )
+
+    output = list(stream)
+
+    assert sorted(output) == sorted(["override\n", "\ufffd\n"])
+    assert stream._stream._process.poll() == 0
+
+
+def test_owned_buildx_logs_eof_preserves_failure() -> None:
+    stream = pydocker.components.buildx.cli_wrapper.stream_buildx_logs(
+        [
+            sys.executable,
+            "-c",
+            "import sys; print('progress'); sys.stderr.write('No such image: missing\\n'); sys.exit(9)",
+        ]
+    )
+    output: list[str] = []
+
+    with pytest.raises(NoSuchImage) as raised, stream:
+        output.extend(stream)
+
+    assert "progress\n" in output
+    assert "No such image: missing\n" in output
+    assert raised.value.return_code == 9
+    assert raised.value.stderr == "No such image: missing\n"
+    assert stream._stream._process.poll() == 9
+
+
+@pytest.mark.parametrize("operation", ["build", "bake", "prune"])
+def test_owned_buildx_api_propagates_stream_ownership(
+    operation: Literal["build", "bake", "prune"],
+) -> None:
+    with (
+        stream_stdout_and_stderr(
+            [sys.executable, "-c", "import time; time.sleep(60)"]
+        ) as raw,
+        patch(
+            "pydocker.components.buildx.cli_wrapper.stream_stdout_and_stderr",
+            return_value=raw,
+        ) as start,
+    ):
+        match operation:
+            case "build":
+                mapped = docker.buildx.build(".", stream_logs=True)
+            case "bake":
+                mapped = docker.buildx.bake(
+                    targets=["target"],
+                    variables={"STREAM_ENV": "bake"},
+                    stream_logs=True,
+                )
+                assert start.call_args.kwargs["env"] == {"STREAM_ENV": "bake"}
+                assert start.call_args.args[0][-1] == "target"
+            case "prune":
+                mapped = docker.buildx.prune(stream_logs=True)
+            case unreachable:
+                assert_never(unreachable)
+
+        with mapped:
+            pass
+
+        assert raw._process.poll() is not None
+        assert all(not thread.is_alive() for thread in raw._threads)

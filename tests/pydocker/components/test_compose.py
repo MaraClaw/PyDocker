@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import signal
+import sys
 import tempfile
 import time
 from collections.abc import Iterable
@@ -15,6 +16,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import pytz
+from pydantic import ValidationError
 
 import pydocker
 from pydocker import Container, DockerClient, DockerException
@@ -22,7 +24,7 @@ from pydocker.components.compose.models import ComposeConfig, ComposeEvent
 from pydocker.components.container.models import ContainerState
 from pydocker.exceptions import NoSuchImage
 from pydocker.test_utils import get_all_jsons
-from pydocker.utils import PROJECT_ROOT
+from pydocker.utils import PROJECT_ROOT, stream_stdout_and_stderr
 
 pytestmark = pytest.mark.skipif(
     not pydocker.docker.compose.is_installed(),
@@ -1640,3 +1642,116 @@ def test_compose_build_with_dependencies(tmp_path: Path) -> None:
 
     # just in case leave it all clean
     docker.image.remove([WD_APP_IMAGE, WD_DB_IMAGE], force=True, prune=True)
+
+
+@pytest.mark.parametrize("consume", [False, True])
+def test_owned_compose_events_cancel_idle_child(consume: bool) -> None:
+    with (
+        stream_stdout_and_stderr(
+            [
+                sys.executable,
+                "-c",
+                'print(\'{"type":"container","action":"start","service":"web"}\', flush=True); input()',
+            ],
+            pipe_stdin=True,
+        ) as raw,
+        patch(
+            "pydocker.components.compose.cli_wrapper.stream_stdout_and_stderr",
+            return_value=raw,
+        ) as start,
+    ):
+        stream = docker.compose.events(["web", "worker"])
+        with stream:
+            if consume:
+                event = next(stream)
+                assert isinstance(event, ComposeEvent)
+                assert event.action == "start"
+                assert event.service == "web"
+            stream.close()
+            stream.close()
+
+        assert list(stream) == []
+        assert raw._process.poll() is not None
+        assert all(not thread.is_alive() for thread in raw._threads)
+        assert start.call_args.args[0] == [
+            *docker.compose.docker_compose_cmd,
+            "events",
+            "--json",
+            "web",
+            "worker",
+        ]
+
+
+@pytest.mark.parametrize("payload", ["not-json", '{"time":"invalid"}'])
+def test_owned_compose_events_release_child_on_parse_error(payload: str) -> None:
+    with (
+        stream_stdout_and_stderr(
+            [sys.executable, "-c", f"print({payload!r}, flush=True); input()"],
+            pipe_stdin=True,
+        ) as raw,
+        patch(
+            "pydocker.components.compose.cli_wrapper.stream_stdout_and_stderr",
+            return_value=raw,
+        ),
+    ):
+        stream = docker.compose.events()
+
+        with pytest.raises((json.JSONDecodeError, ValidationError)):
+            next(stream)
+
+        assert raw._process.poll() is not None
+        assert all(not thread.is_alive() for thread in raw._threads)
+        assert list(stream) == []
+
+
+def test_owned_compose_events_preserve_body_error() -> None:
+    with (
+        stream_stdout_and_stderr(
+            [sys.executable, "-c", "input()"], pipe_stdin=True
+        ) as raw,
+        patch(
+            "pydocker.components.compose.cli_wrapper.stream_stdout_and_stderr",
+            return_value=raw,
+        ),
+    ):
+        stream = docker.compose.events()
+        error = RuntimeError("event consumer failed")
+
+        with pytest.raises(RuntimeError) as raised, stream:
+            raise error
+
+        assert raised.value is error
+        assert raw._process.poll() is not None
+
+
+@pytest.mark.parametrize("exit_code", [0, 8])
+def test_owned_compose_events_preserve_eof_and_failure(exit_code: int) -> None:
+    with (
+        stream_stdout_and_stderr(
+            [
+                sys.executable,
+                "-c",
+                'import sys; print(\'{"action":"start","service":"web"}\'); '
+                "sys.stderr.write('No such image: missing\\n'); "
+                f"sys.exit({exit_code})",
+            ]
+        ) as raw,
+        patch(
+            "pydocker.components.compose.cli_wrapper.stream_stdout_and_stderr",
+            return_value=raw,
+        ),
+    ):
+        stream = docker.compose.events()
+        output: list[ComposeEvent] = []
+
+        if exit_code:
+            with pytest.raises(NoSuchImage) as raised:
+                output.extend(stream)
+            assert raised.value.return_code == exit_code
+            assert raised.value.stderr == "No such image: missing\n"
+        else:
+            output.extend(stream)
+
+        assert [event.action for event in output] == ["start"]
+        assert raw._process.poll() == exit_code
+        assert all(not thread.is_alive() for thread in raw._threads)

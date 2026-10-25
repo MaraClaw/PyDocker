@@ -1,6 +1,6 @@
 import datetime
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from types import MappingProxyType
 
 from pydocker.client_config import Command, DockerCLICaller
@@ -10,6 +10,7 @@ from pydocker.components.system.models import (
     SystemInfo,
 )
 from pydocker.utils import (
+    MappedProcessStream,
     format_mapping_for_cli,
     format_time_arg,
     run,
@@ -73,10 +74,12 @@ class SystemCLI(DockerCLICaller):
         since: datetime.datetime | datetime.timedelta | None = None,
         until: datetime.datetime | datetime.timedelta | None = None,
         filters: Mapping[str, str] = MappingProxyType({}),
-    ) -> Iterator[DockerEvent]:
+    ) -> MappedProcessStream[DockerEvent]:
         """Return docker events information up to the current point in time.
 
         If `until` is not specified, then the iterator returned is infinite.
+        Use the stream as a context manager or call `close()` when stopping
+        early. A bare loop break does not release the local CLI process.
         For example
 
         ```python
@@ -84,11 +87,10 @@ class SystemCLI(DockerCLICaller):
         from datetime import datetime, timedelta
 
 
-        for event in docker.system.events():
-            print("new event!")
-            print(event)
-            # this will never end, that's ok if you want to monitor something
-            # for a long time. You can also use 'break' in the for loop if needed.
+        with docker.system.events() as events:
+            for event in events:
+                print("new event!")
+                print(event)
 
         for event in docker.system.events(until=datetime.now() - timedelta(seconds=30)):
             print("some past event")
@@ -110,7 +112,7 @@ class SystemCLI(DockerCLICaller):
             filters: See the [Docker documentation page about filtering
                 ](https://docs.docker.com/engine/reference/commandline/events/#filtering).
         # Returns
-            A iterator which will yield DockerEvent objects from stdout/stderr
+            A closeable iterator yielding DockerEvent objects from stdout.
 
         [reference page for
         system events](https://docs.docker.com/engine/api/v1.40/#operation/SystemEvents)
@@ -129,10 +131,15 @@ class SystemCLI(DockerCLICaller):
         full_cmd.add_args_iterable_or_single(
             "--filter", format_mapping_for_cli(filters)
         )
-        iterator = stream_stdout_and_stderr(full_cmd)
-        for stream_origin, stream_content in iterator:
-            if stream_origin == "stdout":
-                yield DockerEvent(**json.loads(stream_content))
+        stream = stream_stdout_and_stderr(full_cmd)
+        return MappedProcessStream(
+            stream,
+            (
+                DockerEvent(**json.loads(content))
+                for origin, content in stream
+                if origin == "stdout"
+            ),
+        )
 
     def info(self) -> SystemInfo:
         """Returns diverse information about the Docker client and daemon.

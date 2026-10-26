@@ -18,7 +18,7 @@ dependencies = { file = ["requirements.txt"] }
 [dependency-groups]
 dev = [
     "ruff>=0.17.2",
-    "ty>=0.0.91",
+    "ty>=0.0.92",
     "pytest>=9.1.1",
     "pytest-mock>=3.17.0",
     "pytz>=2026.5",

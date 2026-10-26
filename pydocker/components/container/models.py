@@ -4,7 +4,7 @@ from typing import Annotated, Any
 
 import pydantic
 
-from pydocker.utils import DockerCamelModel
+from pywhales.utils import DockerCamelModel
 
 
 class ContainerHealthcheckResult(DockerCamelModel):

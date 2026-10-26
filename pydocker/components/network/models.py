@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydocker.utils import DockerCamelModel
+from pywhales.utils import DockerCamelModel
 
 
 class NetworkIPAM(DockerCamelModel):

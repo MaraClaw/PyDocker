@@ -12,13 +12,13 @@ from unittest.mock import ANY, MagicMock, Mock, patch
 
 import pytest
 
-from pydocker import DockerClient, Image, docker
-from pydocker.client_config import Command
-from pydocker.components.image.models import ImageInspectResult
-from pydocker.components.image.streams import MultiImageStream
-from pydocker.exceptions import DockerException, NoSuchImage
-from pydocker.test_utils import get_all_jsons, random_name
-from pydocker.utils import MappedProcessStream, ProcessStream, stream_stdout_and_stderr
+from pywhales import DockerClient, Image, docker
+from pywhales.client_config import Command
+from pywhales.components.image.models import ImageInspectResult
+from pywhales.components.image.streams import MultiImageStream
+from pywhales.exceptions import DockerException, NoSuchImage
+from pywhales.test_utils import get_all_jsons, random_name
+from pywhales.utils import MappedProcessStream, ProcessStream, stream_stdout_and_stderr
 
 
 def _assert_image_process_released(stream: ProcessStream) -> None:
@@ -99,7 +99,7 @@ def image_commands() -> Generator[_ImageCommands]:
         )
         stack.enter_context(
             patch(
-                "pydocker.components.image.cli_wrapper.stream_stdout_and_stderr",
+                "pywhales.components.image.cli_wrapper.stream_stdout_and_stderr",
                 side_effect=commands.start,
             )
         )
@@ -422,7 +422,7 @@ def test_multiple_image_stream_child_startup_failure_closes_sibling(
         return start(command)
 
     with patch(
-        "pydocker.components.image.cli_wrapper.stream_stdout_and_stderr",
+        "pywhales.components.image.cli_wrapper.stream_stdout_and_stderr",
         side_effect=start_or_fail,
     ):
         try:
@@ -457,7 +457,7 @@ def test_multiple_image_stream_executor_startup_failure_releases_resources(
         return submit(executor, callback, name)
 
     target = (
-        patch("pydocker.components.image.streams.ThreadPoolExecutor", side_effect=error)
+        patch("pywhales.components.image.streams.ThreadPoolExecutor", side_effect=error)
         if phase == "constructor"
         else patch.object(
             ThreadPoolExecutor, "submit", autospec=True, side_effect=submit_or_fail
@@ -543,7 +543,7 @@ def test_nonstream_image_operations_keep_eager_results_and_deduplication(
         else image_commands.client.image.push
     )
     with patch(
-        "pydocker.components.image.cli_wrapper.run",
+        "pywhales.components.image.cli_wrapper.run",
         return_value=b'[{"Id": "sha256:test"}]',
     ) as run:
         result = method(names)
@@ -570,7 +570,7 @@ def test_multiple_image_stream_has_lazy_owned_lifecycle(
     with (
         patch.object(client.image, "inspect", return_value=[]),
         patch(
-            "pydocker.components.image.cli_wrapper.stream_stdout_and_stderr"
+            "pywhales.components.image.cli_wrapper.stream_stdout_and_stderr"
         ) as start,
     ):
         method = client.image.pull if operation == "pull" else client.image.push
@@ -597,7 +597,7 @@ def test_single_image_stream_owns_idle_child(
         child,
         patch.object(client.image, "inspect", return_value=[]),
         patch(
-            "pydocker.components.image.cli_wrapper.stream_stdout_and_stderr",
+            "pywhales.components.image.cli_wrapper.stream_stdout_and_stderr",
             return_value=child,
         ),
     ):
@@ -626,7 +626,7 @@ def test_single_image_stream_context_preserves_body_error(
         ) as child,
         patch.object(client.image, "inspect", return_value=[]),
         patch(
-            "pydocker.components.image.cli_wrapper.stream_stdout_and_stderr",
+            "pywhales.components.image.cli_wrapper.stream_stdout_and_stderr",
             return_value=child,
         ),
     ):
@@ -660,7 +660,7 @@ def test_single_image_stream_exhaustion_keeps_bytes_and_command_failure(
         ) as child,
         patch.object(client.image, "inspect", return_value=[]),
         patch(
-            "pydocker.components.image.cli_wrapper.stream_stdout_and_stderr",
+            "pywhales.components.image.cli_wrapper.stream_stdout_and_stderr",
             return_value=child,
         ),
     ):
@@ -707,7 +707,7 @@ def test_batch_inspect_image_aliases_and_typed_snapshot() -> None:
                 [], 0, json.dumps([snapshot] * len(references)).encode(), b""
             ),
         ) as command,
-        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+        patch("pywhales.client_config.CACHE_VALIDITY_PERIOD", 3600),
     ):
         images = client.image.inspect(iter(references))
         assert [image.id for image in images] == [identity] * len(references)
@@ -923,7 +923,7 @@ def test_pull_duplicate_images(ctr_client: DockerClient) -> None:
         ctr_client.image.remove("busybox:1", force=True)
     images = ["busybox:1", "busybox:1", "busybox:1"]
     with (
-        patch("pydocker.components.image.cli_wrapper.Image") as image,
+        patch("pywhales.components.image.cli_wrapper.Image") as image,
         patch.object(ctr_client.image, "_pull_single_tag") as pull_single_tag,
         patch.object(ctr_client.image, "_pull_multiple_tags") as pull_multiple_tags,
     ):
@@ -1144,7 +1144,7 @@ def test_exists(ctr_client: DockerClient) -> None:
     assert not ctr_client.image.exists("dudurghurozgiozpfezjigfoeioengizeonig")
 
 
-@patch("pydocker.components.image.cli_wrapper.ContainerCLI")
+@patch("pywhales.components.image.cli_wrapper.ContainerCLI")
 def test_copy_from_default_pull(container_mock: Mock) -> None:
     container_cli_mock = MagicMock()
     container_mock.return_value = container_cli_mock
@@ -1158,7 +1158,7 @@ def test_copy_from_default_pull(container_mock: Mock) -> None:
     container_cli_mock.create.assert_called_with(test_image_name, pull="missing")
 
 
-@patch("pydocker.components.image.cli_wrapper.ContainerCLI")
+@patch("pywhales.components.image.cli_wrapper.ContainerCLI")
 def test_copy_from_pull(container_mock: Mock) -> None:
     container_cli_mock = MagicMock()
     container_mock.return_value = container_cli_mock
@@ -1176,7 +1176,7 @@ def test_copy_from_pull(container_mock: Mock) -> None:
     container_cli_mock.create.assert_called_with(test_image_name, pull=test_pull_flag)
 
 
-@patch("pydocker.components.image.cli_wrapper.ContainerCLI")
+@patch("pywhales.components.image.cli_wrapper.ContainerCLI")
 def test_copy_to_default_pull(container_mock: Mock) -> None:
     container_cli_mock = MagicMock()
     container_mock.return_value = container_cli_mock
@@ -1190,7 +1190,7 @@ def test_copy_to_default_pull(container_mock: Mock) -> None:
     container_cli_mock.create.assert_called_with(test_image_name, pull="missing")
 
 
-@patch("pydocker.components.image.cli_wrapper.ContainerCLI")
+@patch("pywhales.components.image.cli_wrapper.ContainerCLI")
 def test_copy_to_pull(container_mock: Mock) -> None:
     container_cli_mock = MagicMock()
     container_mock.return_value = container_cli_mock

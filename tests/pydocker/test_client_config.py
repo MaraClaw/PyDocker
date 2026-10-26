@@ -9,9 +9,9 @@ from unittest.mock import patch
 import pytest
 from pytest_mock import MockerFixture
 
-from pydocker import Config, DockerClient, Node, Secret, Service, docker
-from pydocker.client_config import ClientConfig, ParsingError
-from pydocker.utils import PROJECT_ROOT
+from pywhales import Config, DockerClient, Node, Secret, Service, docker
+from pywhales.client_config import ClientConfig, ParsingError
+from pywhales.utils import PROJECT_ROOT
 
 
 @pytest.mark.parametrize("component", ["service", "node", "config", "secret"])
@@ -37,7 +37,7 @@ def test_swarm_batch_reload_retains_originating_configuration(
             "subprocess.run",
             return_value=CompletedProcess([], 0, json.dumps([snapshot]).encode(), b""),
         ) as command,
-        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+        patch("pywhales.client_config.CACHE_VALIDITY_PERIOD", 3600),
     ):
         resource = api.inspect(["named"])[0]
         assert resource.spec is not None
@@ -185,7 +185,7 @@ def test_swarm_inspect_uses_docker_identity_precedence(
             "subprocess.run",
             return_value=CompletedProcess([], 0, json.dumps(payload).encode(), b""),
         ) as command,
-        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+        patch("pywhales.client_config.CACHE_VALIDITY_PERIOD", 3600),
     ):
         resources = api.inspect(references) if batch else [api.inspect(reference)]
 
@@ -228,14 +228,14 @@ fake_json_message = {
 
 def test_pretty_exception_message_and_report(mocker: MockerFixture) -> None:
     mocker.patch(
-        "pydocker.components.volume.cli_wrapper.Volume._fetch_inspect_result_json",
+        "pywhales.components.volume.cli_wrapper.Volume._fetch_inspect_result_json",
         lambda x, y: fake_json_message,
     )
     with pytest.raises(ParsingError) as err:
         docker.volume.inspect("random_volume")
     error_message = str(err.value)
 
-    assert "This is a bug with pydocker itself" in error_message
+    assert "This is a bug with pywhales itself" in error_message
 
     # we get the path of the json file with the dump of the response.
     for word in error_message.split():
@@ -300,7 +300,7 @@ def test_compose_env_files_and_env_file() -> None:
 @contextmanager
 def _create_temp_env_files() -> Generator[tuple[Path, Path]]:
     """Creates two temporary env files and yields their paths. The files are deleted after the context manager is exited."""
-    path = PROJECT_ROOT / "tests/pydocker/components"
+    path = PROJECT_ROOT / "tests/pywhales/components"
     env_file_1 = path / "example1.env"
     with env_file_1.open("w") as f:
         f.write("A=1\n")
@@ -328,7 +328,7 @@ def test_run_compose_command_with_env_file() -> None:
         * The order of the env files should matter
     """
     with _create_temp_env_files() as (env_file_1, env_file_2):
-        COMPOSE_FILE = PROJECT_ROOT / "tests/pydocker/components/dummy_compose.yml"
+        COMPOSE_FILE = PROJECT_ROOT / "tests/pywhales/components/dummy_compose.yml"
         SERVICE = "service_using_env_variables"
 
         # Test with no env-file to check the default values, should be `0`, as is default in the service definition.

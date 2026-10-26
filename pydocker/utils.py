@@ -24,7 +24,7 @@ from typing import (
 
 import pydantic
 
-from pydocker.exceptions import (
+from pywhales.exceptions import (
     DockerException,
     NoSuchContainer,
     NoSuchImage,

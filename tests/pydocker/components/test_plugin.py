@@ -3,9 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from pydocker import DockerClient
-from pydocker.components.plugin.models import PluginInspectResult
-from pydocker.test_utils import get_all_jsons
+from pywhales import DockerClient
+from pywhales.components.plugin.models import PluginInspectResult
+from pywhales.test_utils import get_all_jsons
 
 test_plugin_name = "vieux/sshfs:latest"
 

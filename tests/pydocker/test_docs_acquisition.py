@@ -7,8 +7,8 @@ import pytest
 from pytest_mock import MockerFixture
 
 from docs import docs_utils
-from pydocker.components.system.models import SystemInfo
-from pydocker.exceptions import DockerException
+from pywhales.components.system.models import SystemInfo
+from pywhales.exceptions import DockerException
 
 DEMOS: Final[dict[str, Callable[[], str]]] = {
     "networks": docs_utils.generate_code_demo_networks,
@@ -85,7 +85,7 @@ def test_live_demo_does_not_remove_reused_named_resources_when_name_exists(
     kind = "builder" if demo == "builders" else demo[:-1]
     api = daemon.buildx if demo == "builders" else getattr(daemon, kind)
     resource = getattr(daemon, f"example_{kind}")
-    resource.name = f"pydocker-docs-{identifier.hex}"
+    resource.name = f"pywhales-docs-{identifier.hex}"
     api.list.return_value = [resource]
 
     DEMOS[demo]()

@@ -1,4 +1,4 @@
-from pydocker.utils import DockerCamelModel
+from pywhales.utils import DockerCamelModel
 
 
 class PluginMount(DockerCamelModel):

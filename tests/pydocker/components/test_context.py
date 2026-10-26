@@ -3,9 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from pydocker import DockerClient
-from pydocker.components.context.models import ContextInspectResult
-from pydocker.test_utils import get_all_jsons
+from pywhales import DockerClient
+from pywhales.components.context.models import ContextInspectResult
+from pywhales.test_utils import get_all_jsons
 
 
 @pytest.mark.parametrize("json_file", get_all_jsons("contexts"))
@@ -18,7 +18,7 @@ def test_load_json(json_file: Path) -> None:
 def test_create_context(docker_client: DockerClient) -> None:
     testname = "testpow"
     host = "ssh://test@test.domain"
-    description = "PyDocker testing context"
+    description = "PyWhales testing context"
 
     all_contexts_before = set(docker_client.context.list())
     with docker_client.context.create(

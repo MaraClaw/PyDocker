@@ -290,8 +290,8 @@ class ReloadableObjectFromJson[InspectResultT, ReferenceT: str | None = str](
 
             raise ParsingError(
                 f"There was an error parsing the json response from the Docker daemon. \n"
-                f"This is a bug with pydocker itself. Please head to \n"
-                f"https://github.com/MaraClaw/PyDocker/issues \n"
+                f"This is a bug with pywhales itself. Please head to \n"
+                f"https://github.com/MaraClaw/PyWhales/issues \n"
                 f"and open an issue. You should copy this error message and \n"
                 f"the json response from the Docker daemon. The json response was put \n"
                 f"in {json_response_file} because it's a bit too big to be printed \n"

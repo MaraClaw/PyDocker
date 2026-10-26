@@ -9,9 +9,9 @@ import pytest
 from pydantic import ValidationError
 
 from docs import docs_utils
-from pydocker import DockerClient
-from pydocker.client_config import ClientConfig, ParsingError
-from pydocker.exceptions import DockerException
+from pywhales import DockerClient
+from pywhales.client_config import ClientConfig, ParsingError
+from pywhales.exceptions import DockerException
 
 type Demo = Literal["containers", "builders", "images", "plugins"]
 
@@ -22,7 +22,7 @@ DEMOS: Final[dict[Demo, Callable[[], str]]] = {
     "plugins": docs_utils.generate_code_demo_plugins,
 }
 IDENTIFIER: Final = UUID(int=0)
-RESOURCE_NAME: Final = f"pydocker-docs-{IDENTIFIER.hex}"
+RESOURCE_NAME: Final = f"pywhales-docs-{IDENTIFIER.hex}"
 PLUGIN_NAME: Final = "mochoa/s3fs-volume-plugin"
 
 

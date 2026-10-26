@@ -2,9 +2,9 @@ from datetime import timedelta
 
 import pytest
 
-from pydocker import DockerClient
-from pydocker.components.system.models import SwarmSpec
-from pydocker.exceptions import NotASwarmManager
+from pywhales import DockerClient
+from pywhales.components.system.models import SwarmSpec
+from pywhales.exceptions import NotASwarmManager
 
 
 def get_cluster_spec(docker_client: DockerClient) -> SwarmSpec:

@@ -5,7 +5,7 @@ from typing import Annotated
 
 from pydantic import Field
 
-from pydocker.utils import DockerCamelModel
+from pywhales.utils import DockerCamelModel
 
 
 class BuilderNode(DockerCamelModel):

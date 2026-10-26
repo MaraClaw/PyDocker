@@ -14,21 +14,21 @@ from typing import (
     override,
 )
 
-import pydocker.components.container.cli_wrapper
-from pydocker.client_config import (
+import pywhales.components.container.cli_wrapper
+from pywhales.client_config import (
     ClientConfig,
     Command,
     DockerCLICaller,
     ParsingError,
     ReloadableObjectFromJson,
 )
-from pydocker.components.network.models import (
+from pywhales.components.network.models import (
     NetworkContainer,
     NetworkInspectResult,
     NetworkIPAM,
 )
-from pydocker.exceptions import NoSuchNetwork
-from pydocker.utils import format_mapping_for_cli, run, to_list
+from pywhales.exceptions import NoSuchNetwork
+from pywhales.utils import format_mapping_for_cli, run, to_list
 
 type NetworkListFilter = (
     tuple[Literal["driver"], str]
@@ -140,7 +140,7 @@ class Network(ReloadableObjectFromJson[NetworkInspectResult]):
 
     @override
     def __repr__(self) -> str:
-        return f"pydocker.Network(id='{self.id[:12]}', name={self.name})"
+        return f"pywhales.Network(id='{self.id[:12]}', name={self.name})"
 
     def exists(self) -> bool:
         """Returns `True` if the network exists and `False` if it doesn't exist.
@@ -156,7 +156,7 @@ class Network(ReloadableObjectFromJson[NetworkInspectResult]):
         make sure the network is deleted even if an exception is raised.
 
         ```python
-        from pydocker import docker
+        from pywhales import docker
 
         with docker.network.create("some_name") as my_net:
             docker.run(
@@ -180,12 +180,12 @@ class NetworkCLI(DockerCLICaller):
     def connect(
         self,
         network: ValidNetwork,
-        container: pydocker.components.container.cli_wrapper.ValidContainer,
+        container: pywhales.components.container.cli_wrapper.ValidContainer,
         alias: str | None = None,
         driver_options: Sequence[str] = (),
         ip: str | None = None,
         ip6: str | None = None,
-        links: Sequence[pydocker.components.container.cli_wrapper.ValidContainer] = (),
+        links: Sequence[pywhales.components.container.cli_wrapper.ValidContainer] = (),
     ) -> None:
         """Connect a container to a network
 
@@ -223,7 +223,7 @@ class NetworkCLI(DockerCLICaller):
             name: The name of the network
 
         # Returns
-            A `pydocker.Network`.
+            A `pywhales.Network`.
         """
         full_cmd = Command([*self.docker_cmd, "network", "create"])
         full_cmd.add_flag("--attachable", attachable)
@@ -238,7 +238,7 @@ class NetworkCLI(DockerCLICaller):
     def disconnect(
         self,
         network: ValidNetwork,
-        container: pydocker.components.container.cli_wrapper.ValidContainer,
+        container: pywhales.components.container.cli_wrapper.ValidContainer,
         force: bool = False,
     ) -> None:
         """Disconnect a container from a network
@@ -275,13 +275,13 @@ class NetworkCLI(DockerCLICaller):
     def inspect(self, x: Iterable[str]) -> builtins.list[Network]: ...
 
     def inspect(self, x: str | Iterable[str]) -> Network | builtins.list[Network]:
-        """Returns a `pydocker.Network` object from a string (id or network name).
+        """Returns a `pywhales.Network` object from a string (id or network name).
 
         Parameters:
             x: One id or network name or a list of ids or network names.
 
         # Returns
-            One or a list of `pydocker.Network`.
+            One or a list of `pywhales.Network`.
         """
         if isinstance(x, str):
             return Network(self.client_config, x)
@@ -314,7 +314,7 @@ class NetworkCLI(DockerCLICaller):
             filters: Filters to apply when listing networks.
 
         # Returns
-            List of `pydocker.Network`.
+            List of `pywhales.Network`.
         """
         filter_items = filters.items() if isinstance(filters, Mapping) else filters
         if isinstance(filters, Mapping):

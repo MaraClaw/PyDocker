@@ -8,12 +8,12 @@ from unittest.mock import patch
 
 import pytest
 
-from pydocker import DockerClient, Service
-from pydocker.client_config import ParsingError
-from pydocker.components.service.models import ServiceInspectResult
-from pydocker.exceptions import DockerException, NoSuchService, NotASwarmManager
-from pydocker.test_utils import get_all_jsons, random_name
-from pydocker.utils import stream_stdout_and_stderr
+from pywhales import DockerClient, Service
+from pywhales.client_config import ParsingError
+from pywhales.components.service.models import ServiceInspectResult
+from pywhales.exceptions import DockerException, NoSuchService, NotASwarmManager
+from pywhales.test_utils import get_all_jsons, random_name
+from pywhales.utils import stream_stdout_and_stderr
 
 
 def test_batch_inspect_matches_service_references_and_hydrates_cache() -> None:
@@ -27,7 +27,7 @@ def test_batch_inspect_matches_service_references_and_hydrates_cache() -> None:
         patch(
             "subprocess.run", return_value=CompletedProcess([], 0, response, b"")
         ) as command,
-        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+        patch("pywhales.client_config.CACHE_VALIDITY_PERIOD", 3600),
     ):
         resources = client.service.inspect(references)
         assert [resource.id for resource in resources] == [
@@ -157,7 +157,7 @@ def test_eager_service_logs_release_process_when_decoding_fails() -> None:
         with (
             patch.object(client.service, "inspect"),
             patch(
-                "pydocker.components.service.cli_wrapper.stream_stdout_and_stderr",
+                "pywhales.components.service.cli_wrapper.stream_stdout_and_stderr",
                 return_value=stream,
             ),
             pytest.raises(UnicodeDecodeError),
@@ -181,7 +181,7 @@ def test_streaming_service_logs_transfer_process_ownership() -> None:
         with (
             patch.object(client.service, "inspect"),
             patch(
-                "pydocker.components.service.cli_wrapper.stream_stdout_and_stderr",
+                "pywhales.components.service.cli_wrapper.stream_stdout_and_stderr",
                 return_value=stream,
             ),
         ):
@@ -200,7 +200,7 @@ def test_eager_service_logs_preserve_text_result() -> None:
         ) as stream,
         patch.object(client.service, "inspect"),
         patch(
-            "pydocker.components.service.cli_wrapper.stream_stdout_and_stderr",
+            "pywhales.components.service.cli_wrapper.stream_stdout_and_stderr",
             return_value=stream,
         ),
     ):

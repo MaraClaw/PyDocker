@@ -2,11 +2,11 @@
 
 ## Notes about the transition between the legacy builder and buildx
 
-Users are encouraged to use buildx in pydocker through the
+Users are encouraged to use buildx in pywhales through the
 [`docker.build()`](buildx.md#build) function.
 
 Buildx is the next gen Docker builder and a transition is underway to make
-the `docker build` shell command use buildx. pydocker follows its upstream project's
+the `docker build` shell command use buildx. pywhales follows its upstream project's
 choice: `docker.build()` will always use buildx.
 
 The legacy builder is still available by calling [`docker.legacy_build()`](image.md#legacy_build), but note that

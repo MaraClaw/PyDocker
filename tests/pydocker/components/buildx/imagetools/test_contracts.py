@@ -1,8 +1,8 @@
 import pytest
 
-import pydocker.components.buildx.imagetools.cli_wrapper as imagetools
-from pydocker import DockerClient
-from pydocker.client_config import Command
+import pywhales.components.buildx.imagetools.cli_wrapper as imagetools
+from pywhales import DockerClient
+from pywhales.client_config import Command
 
 
 def test_create_accepts_default_collections(monkeypatch: pytest.MonkeyPatch) -> None:

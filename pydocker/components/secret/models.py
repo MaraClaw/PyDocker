@@ -3,7 +3,7 @@ from typing import Any
 
 from pydantic import Field
 
-from pydocker.utils import DockerCamelModel
+from pywhales.utils import DockerCamelModel
 
 
 class SecretSpec(DockerCamelModel):

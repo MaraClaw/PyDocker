@@ -19,30 +19,30 @@ from typing import (
     override,
 )
 
-import pydocker.components.buildx.cli_wrapper
-from pydocker.client_config import (
+import pywhales.components.buildx.cli_wrapper
+from pywhales.client_config import (
     ClientConfig,
     Command,
     DockerCLICaller,
     ParsingError,
     ReloadableObjectFromJson,
 )
-from pydocker.components.container.cli_wrapper import (
+from pywhales.components.container.cli_wrapper import (
     ContainerCLI,
     ContainerConfig,
 )
-from pydocker.components.image.models import (
+from pywhales.components.image.models import (
     ImageGraphDriver,
     ImageInspectResult,
     ImageRootFS,
 )
-from pydocker.components.image.streams import (
+from pywhales.components.image.streams import (
     EmptyImageStream,
     ImageStream,
     MultiImageStream,
 )
-from pydocker.exceptions import DockerException, NoSuchImage
-from pydocker.utils import (
+from pywhales.exceptions import DockerException, NoSuchImage
+from pywhales.utils import (
     MappedProcessStream,
     ValidPath,
     run,
@@ -187,12 +187,12 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
 
     @override
     def __repr__(self) -> str:
-        return f"pydocker.Image(id='{self.id[:20]}', tags={self.repo_tags})"
+        return f"pywhales.Image(id='{self.id[:20]}', tags={self.repo_tags})"
 
     def remove(self, force: bool = False, prune: bool = True) -> None:
         """Remove this Docker image.
 
-        See the [`docker.image.remove`](../sub-commands/image.md#pydocker.components.image.cli_wrapper.ImageCLI.remove) command for
+        See the [`docker.image.remove`](../sub-commands/image.md#pywhales.components.image.cli_wrapper.ImageCLI.remove) command for
         information about the arguments.
         """
         ImageCLI(self.client_config).remove(self, force, prune)
@@ -209,7 +209,7 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
     def save(self, output: ValidPath | None = None) -> Iterator[bytes] | None:
         """Saves this Docker image in a tar.
 
-        See the [`docker.image.save`](../sub-commands/image.md#pydocker.components.image.cli_wrapper.ImageCLI.save) command for
+        See the [`docker.image.save`](../sub-commands/image.md#pywhales.components.image.cli_wrapper.ImageCLI.save) command for
         information about the arguments.
         """
         return ImageCLI(self.client_config).save(self, output)
@@ -217,7 +217,7 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
     def tag(self, new_tag: str) -> None:
         """Add a tag to a Docker image.
 
-        See the [`docker.image.tag`](../sub-commands/image.md#pydocker.components.image.cli_wrapper.ImageCLI.tag) command for
+        See the [`docker.image.tag`](../sub-commands/image.md#pywhales.components.image.cli_wrapper.ImageCLI.tag) command for
         information about the arguments.
         """
         return ImageCLI(self.client_config).tag(self, new_tag)
@@ -255,7 +255,7 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
         """Returns `True` if the docker image exists and `False` if it doesn't exists.
 
         Note that you might have done `docker.image.remove("some_tag")` and the image
-        might still exists because PyDocker references images by id, not by tag.
+        might still exists because PyWhales references images by id, not by tag.
 
          See the `docker.image.exists` command for information about the arguments.
         """
@@ -268,7 +268,7 @@ ValidImage = str | Image
 class ImageCLI(DockerCLICaller):
     def __init__(self, client_config: ClientConfig) -> None:
         super().__init__(client_config)
-        self.build = pydocker.components.buildx.cli_wrapper.BuildxCLI(
+        self.build = pywhales.components.buildx.cli_wrapper.BuildxCLI(
             client_config
         ).build
 
@@ -301,7 +301,7 @@ class ImageCLI(DockerCLICaller):
         * [Proposal: make BuildKit the default builder on Linux](https://github.com/moby/moby/issues/40379)
         * [Deprecated Engine Features: Legacy builder for Linux images](https://github.com/docker/cli/blob/master/docs/deprecated.md#legacy-builder-for-linux-images)
 
-        A `pydocker.Image` is returned, even when using multiple tags.
+        A `pywhales.Image` is returned, even when using multiple tags.
         That is because it will produce a single image with multiple tags.
 
         Parameters:
@@ -321,7 +321,7 @@ class ImageCLI(DockerCLICaller):
             quiet: If you don't want to display the progress bars.
 
         # Returns
-            A `pydocker.Image`
+            A `pywhales.Image`
         """
         # to make it easier to write and read tests, the tests of this function
         # are also grouped with the tests of "docker.build()".
@@ -393,14 +393,14 @@ class ImageCLI(DockerCLICaller):
     def inspect(self, x: Iterable[str]) -> builtins.list[Image]: ...
 
     def inspect(self, x: str | Iterable[str]) -> Image | builtins.list[Image]:
-        """Creates a `pydocker.Image` object.
+        """Creates a `pywhales.Image` object.
 
         # Returns
-            `pydocker.Image`, or `List[pydocker.Image]` if the input
+            `pywhales.Image`, or `List[pywhales.Image]` if the input
             was a list of strings.
 
         # Raises
-            `pydocker.exceptions.NoSuchImage` if one of the images does not exists.
+            `pywhales.exceptions.NoSuchImage` if one of the images does not exists.
 
         """
         if isinstance(x, str):
@@ -450,7 +450,7 @@ class ImageCLI(DockerCLICaller):
         """Returns `True` if the image exists. `False` otherwise.
 
          It's just calling `docker.image.inspect(...)` and verifies that it doesn't throw
-         a `pydocker.exceptions.NoSuchImage`.
+         a `pywhales.exceptions.NoSuchImage`.
 
         # Returns
             A `bool`
@@ -532,7 +532,7 @@ class ImageCLI(DockerCLICaller):
         Note that each image may have multiple tags.
 
         # Returns
-            A `List[pydocker.Image]` object.
+            A `List[pywhales.Image]` object.
         """
         if isinstance(filters, Mapping):
             filter_items = filters.items()
@@ -867,7 +867,7 @@ class ImageCLI(DockerCLICaller):
 
         Parameters:
             x: Tag(s) or repo(s) to push. Can be a string or an iterable of strings.
-                If it's an iterable, PyDocker will push all the images with
+                If it's an iterable, PyWhales will push all the images with
                 multiple threads.
             quiet: Don't print anything.
             stream_logs: If `False` this function returns None. If `True`, this
@@ -881,7 +881,7 @@ class ImageCLI(DockerCLICaller):
         them. Empty input returns `None`.
 
         # Raises
-            `pydocker.exceptions.NoSuchImage` if one of the images does not exist.
+            `pywhales.exceptions.NoSuchImage` if one of the images does not exist.
         """
         if quiet and stream_logs:
             raise ValueError(
@@ -975,12 +975,12 @@ class ImageCLI(DockerCLICaller):
 
         Parameters:
             x: Single image or iterable of Docker images to remove. You can use tags or
-                `pydocker.Image` objects.
+                `pywhales.Image` objects.
             force: Force removal of the image(s).
             prune: Delete untagged parents.
 
         # Raises
-            `pydocker.exceptions.NoSuchImage` if one of the images does not exist.
+            `pywhales.exceptions.NoSuchImage` if one of the images does not exist.
 
         """
         images = to_list(x)
@@ -1032,7 +1032,7 @@ class ImageCLI(DockerCLICaller):
             `Optional[Iterator[bytes]]`. If output is a path, nothing is returned.
 
         # Raises
-            `pydocker.exceptions.NoSuchImage` if one of the images does not exist.
+            `pywhales.exceptions.NoSuchImage` if one of the images does not exist.
 
         # Example
 
@@ -1040,7 +1040,7 @@ class ImageCLI(DockerCLICaller):
         daemon. We assume that the remote machine has an ssh access:
 
         ```python
-        from pydocker import DockerClient
+        from pywhales import DockerClient
 
         local_docker = DockerClient()
         remote_docker = DockerClient(host="ssh://my_user@186.167.32.84")
@@ -1094,7 +1094,7 @@ class ImageCLI(DockerCLICaller):
             new_tag: The tag to add to the Docker image.
 
         # Raises
-            `pydocker.exceptions.NoSuchImage` if the image does not exist.
+            `pywhales.exceptions.NoSuchImage` if the image does not exist.
         """
         full_cmd = Command(
             [

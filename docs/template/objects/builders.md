@@ -4,7 +4,7 @@ The Buildx builders objects.
 
 Don't use the constructor directly. Instead use 
 ```python
-from pydocker import docker
+from pywhales import docker
 
 my_builder = docker.buildx.inspect("my-builder")
 
@@ -15,7 +15,7 @@ my_builder = docker.buildx.create()
 For type hints, use this
 
 ```python
-from pydocker import Builder
+from pywhales import Builder
 ```
 
 ## Attributes
@@ -25,7 +25,7 @@ The attributes are the same as with the command line:
 
 Only a few are available at the moment
 ```
-In [1]: from pydocker import docker
+In [1]: from pywhales import docker
 
 In [2]: my_builder = docker.buildx.create()
 

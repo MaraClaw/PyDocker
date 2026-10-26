@@ -9,11 +9,11 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-import pydocker.components.buildx.cli_wrapper
-from pydocker import docker
-from pydocker.exceptions import DockerException, NoSuchImage
-from pydocker.test_utils import set_cache_validity_period
-from pydocker.utils import PROJECT_ROOT, stream_stdout_and_stderr
+import pywhales.components.buildx.cli_wrapper
+from pywhales import docker
+from pywhales.exceptions import DockerException, NoSuchImage
+from pywhales.test_utils import set_cache_validity_period
+from pywhales.utils import PROJECT_ROOT, stream_stdout_and_stderr
 
 dockerfile_content1 = """
 FROM busybox
@@ -93,7 +93,7 @@ def test_buildx_build_streaming_logs(tmp_path: Path) -> None:
         assert line != ""
 
 
-@patch("pydocker.components.buildx.cli_wrapper.stream_stdout_and_stderr")
+@patch("pywhales.components.buildx.cli_wrapper.stream_stdout_and_stderr")
 @pytest.mark.usefixtures("with_docker_driver")
 def test_buildx_secrets(ssas: Mock, tmp_path: Path) -> None:
     (tmp_path / "Dockerfile").write_text(dockerfile_content1)
@@ -562,7 +562,7 @@ def test_buildx_create_remove_with_platforms() -> None:
     docker.buildx.remove(builder)
 
 
-bake_test_dir = PROJECT_ROOT / "tests/pydocker/components/bake_tests"
+bake_test_dir = PROJECT_ROOT / "tests/pywhales/components/bake_tests"
 bake_file = bake_test_dir / "docker-bake.hcl"
 
 
@@ -798,7 +798,7 @@ def test_bake_metadata_file_option(
         recorded["cmd"] = list(cmd)
         return "{}"
 
-    monkeypatch.setattr(pydocker.components.buildx.cli_wrapper, "run", fake_run)
+    monkeypatch.setattr(pywhales.components.buildx.cli_wrapper, "run", fake_run)
 
     metadata_path = tmp_path / "metadata.json"
 
@@ -825,7 +825,7 @@ def test_bake_without_metadata_file_option(
         recorded["cmd"] = list(cmd)
         return "{}"
 
-    monkeypatch.setattr(pydocker.components.buildx.cli_wrapper, "run", fake_run)
+    monkeypatch.setattr(pywhales.components.buildx.cli_wrapper, "run", fake_run)
 
     docker.buildx.bake(files=[bake_file], print=only_print)
 
@@ -849,7 +849,7 @@ def test_bake_metadata_file_str_path_option(
         recorded["cmd"] = list(cmd)
         return "{}"
 
-    monkeypatch.setattr(pydocker.components.buildx.cli_wrapper, "run", fake_run)
+    monkeypatch.setattr(pywhales.components.buildx.cli_wrapper, "run", fake_run)
 
     metadata_path = tmp_path / "metadata.json"
 
@@ -923,9 +923,9 @@ def test_buildx_build_metadata_file(
         recorded["cmd"] = list(cmd)
         return ""
 
-    monkeypatch.setattr(pydocker.components.buildx.cli_wrapper, "run", fake_run)
+    monkeypatch.setattr(pywhales.components.buildx.cli_wrapper, "run", fake_run)
     monkeypatch.setattr(
-        pydocker.components.buildx.cli_wrapper.BuildxCLI,
+        pywhales.components.buildx.cli_wrapper.BuildxCLI,
         "_build_will_load_image",
         lambda self, builder, push, load, output: False,
     )
@@ -953,9 +953,9 @@ def test_buildx_build_without_metadata_file(
         recorded["cmd"] = list(cmd)
         return ""
 
-    monkeypatch.setattr(pydocker.components.buildx.cli_wrapper, "run", fake_run)
+    monkeypatch.setattr(pywhales.components.buildx.cli_wrapper, "run", fake_run)
     monkeypatch.setattr(
-        pydocker.components.buildx.cli_wrapper.BuildxCLI,
+        pywhales.components.buildx.cli_wrapper.BuildxCLI,
         "_build_will_load_image",
         lambda self, builder, push, load, output: False,
     )
@@ -977,9 +977,9 @@ def test_buildx_build_metadata_file_str_path(
         recorded["cmd"] = list(cmd)
         return ""
 
-    monkeypatch.setattr(pydocker.components.buildx.cli_wrapper, "run", fake_run)
+    monkeypatch.setattr(pywhales.components.buildx.cli_wrapper, "run", fake_run)
     monkeypatch.setattr(
-        pydocker.components.buildx.cli_wrapper.BuildxCLI,
+        pywhales.components.buildx.cli_wrapper.BuildxCLI,
         "_build_will_load_image",
         lambda self, builder, push, load, output: False,
     )
@@ -1007,7 +1007,7 @@ def test_list() -> None:
 
 @pytest.mark.parametrize("consume", [False, True])
 def test_owned_buildx_logs_cancel_idle_child(consume: bool) -> None:
-    stream = pydocker.components.buildx.cli_wrapper.stream_buildx_logs(
+    stream = pywhales.components.buildx.cli_wrapper.stream_buildx_logs(
         [
             sys.executable,
             "-c",
@@ -1027,7 +1027,7 @@ def test_owned_buildx_logs_cancel_idle_child(consume: bool) -> None:
 
 
 def test_owned_buildx_logs_context_preserves_body_error() -> None:
-    stream = pydocker.components.buildx.cli_wrapper.stream_buildx_logs(
+    stream = pywhales.components.buildx.cli_wrapper.stream_buildx_logs(
         [sys.executable, "-c", "import time; time.sleep(60)"]
     )
     error = RuntimeError("log consumer failed")
@@ -1043,7 +1043,7 @@ def test_owned_buildx_logs_eof_preserves_decode_and_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("STREAM_ENV", "inherited")
-    stream = pydocker.components.buildx.cli_wrapper.stream_buildx_logs(
+    stream = pywhales.components.buildx.cli_wrapper.stream_buildx_logs(
         [
             sys.executable,
             "-c",
@@ -1060,7 +1060,7 @@ def test_owned_buildx_logs_eof_preserves_decode_and_environment(
 
 
 def test_owned_buildx_logs_eof_preserves_failure() -> None:
-    stream = pydocker.components.buildx.cli_wrapper.stream_buildx_logs(
+    stream = pywhales.components.buildx.cli_wrapper.stream_buildx_logs(
         [
             sys.executable,
             "-c",
@@ -1088,7 +1088,7 @@ def test_owned_buildx_api_propagates_stream_ownership(
             [sys.executable, "-c", "import time; time.sleep(60)"]
         ) as raw,
         patch(
-            "pydocker.components.buildx.cli_wrapper.stream_stdout_and_stderr",
+            "pywhales.components.buildx.cli_wrapper.stream_stdout_and_stderr",
             return_value=raw,
         ) as start,
     ):

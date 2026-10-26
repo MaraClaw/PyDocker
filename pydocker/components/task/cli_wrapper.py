@@ -5,20 +5,20 @@ import json
 from datetime import datetime
 from typing import Any, override
 
-import pydocker.components.service.cli_wrapper
-from pydocker.client_config import (
+import pywhales.components.service.cli_wrapper
+from pywhales.client_config import (
     ClientConfig,
     DockerCLICaller,
     ReloadableObjectFromJson,
 )
-from pydocker.components.task.models import (
+from pywhales.components.task.models import (
     AssignedGenericResources,
     ObjectVersion,
     TaskInspectResult,
     TaskSpec,
     TaskStatus,
 )
-from pydocker.utils import run
+from pywhales.utils import run
 
 
 class Task(ReloadableObjectFromJson[TaskInspectResult]):
@@ -90,7 +90,7 @@ class Task(ReloadableObjectFromJson[TaskInspectResult]):
 
     @override
     def __repr__(self) -> str:
-        return f"pydocker.Task(id='{self.id[:12]}', name={self.name})"
+        return f"pywhales.Task(id='{self.id[:12]}', name={self.name})"
 
 
 class TaskCLI(DockerCLICaller):
@@ -98,15 +98,15 @@ class TaskCLI(DockerCLICaller):
         """Returns all tasks in the swarm
 
         # Returns
-            `List[pydocker.Task]`
+            `List[pywhales.Task]`
         """
-        service_cli = pydocker.components.service.cli_wrapper.ServiceCLI(
+        service_cli = pywhales.components.service.cli_wrapper.ServiceCLI(
             self.client_config
         )
         return service_cli.ps(service_cli.list())
 
     def inspect(self, x: str | builtins.list[str]) -> Task | builtins.list[Task]:
-        """Returns a `pydocker.Task` object from its ID."""
+        """Returns a `pywhales.Task` object from its ID."""
         if isinstance(x, str):
             return Task(self.client_config, x)
         else:

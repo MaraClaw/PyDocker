@@ -1,8 +1,8 @@
 from datetime import datetime
 from typing import Any
 
-import pydocker.components.container.models
-from pydocker.utils import DockerCamelModel
+import pywhales.components.container.models
+from pywhales.utils import DockerCamelModel
 
 
 class ImageHealthcheck(DockerCamelModel):
@@ -32,10 +32,10 @@ class ImageInspectResult(DockerCamelModel):
     comment: str | None = None
     created: datetime | None = None
     container: str | None = None
-    container_config: pydocker.components.container.models.ContainerConfig | None = None
+    container_config: pywhales.components.container.models.ContainerConfig | None = None
     docker_version: str | None = None
     author: str | None = None
-    config: pydocker.components.container.models.ContainerConfig | None = None
+    config: pywhales.components.container.models.ContainerConfig | None = None
     architecture: str | None = None
     os: str | None = None
     os_version: str | None = None

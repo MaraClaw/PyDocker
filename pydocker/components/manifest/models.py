@@ -1,5 +1,5 @@
-from pydocker.components.buildx.imagetools.models import ImageVariantManifest
-from pydocker.utils import DockerCamelModel
+from pywhales.components.buildx.imagetools.models import ImageVariantManifest
+from pywhales.utils import DockerCamelModel
 
 
 class ManifestListInspectResult(DockerCamelModel):

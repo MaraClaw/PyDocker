@@ -83,7 +83,7 @@ jobs:
           ./scripts/ci-setup.sh
       - name: Run tests
         run: |
-          uv run --locked pytest -vv --no-runtime-skip --durations=10 tests/pydocker/components/${{ matrix.component }}
+          uv run --locked pytest -vv --no-runtime-skip --durations=10 tests/pywhales/components/${{ matrix.component }}
 
   build-linux-test-other:
     runs-on: ubuntu-24.04
@@ -101,7 +101,7 @@ jobs:
           ./scripts/ci-setup.sh
       - name: Run tests
         run: |
-          uv run --locked pytest -vv --no-runtime-skip --durations=10 --ignore=tests/pydocker/components/
+          uv run --locked pytest -vv --no-runtime-skip --durations=10 --ignore=tests/pywhales/components/
 
   build-windows:
     runs-on: windows-latest
@@ -120,4 +120,4 @@ jobs:
           docker run hello-world
       - name: Run single test
         run: |
-          uv run --locked pytest -vv --no-runtime-skip tests/pydocker/components/test_volume.py::test_simple_volume
+          uv run --locked pytest -vv --no-runtime-skip tests/pywhales/components/test_volume.py::test_simple_volume

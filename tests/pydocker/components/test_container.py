@@ -16,27 +16,27 @@ from unittest.mock import Mock, patch
 import pytest
 from pytest_mock import MockerFixture
 
-import pydocker
-from pydocker import DockerClient, Image, docker
-from pydocker.client_config import ParsingError
-from pydocker.components.container.cli_wrapper import ContainerStats
-from pydocker.components.container.models import (
+import pywhales
+from pywhales import DockerClient, Image, docker
+from pywhales.client_config import ParsingError
+from pywhales.components.container.cli_wrapper import ContainerStats
+from pywhales.components.container.models import (
     ContainerInspectResult,
     ContainerState,
 )
-from pydocker.components.top import ContainerTopResult, TopParseError
-from pydocker.exceptions import (
+from pywhales.components.top import ContainerTopResult, TopParseError
+from pywhales.exceptions import (
     DockerException,
     NoSuchContainer,
     NoSuchImage,
     NoSuchNetwork,
     NoSuchVolume,
 )
-from pydocker.test_utils import get_all_jsons, random_name
-from pydocker.utils import stream_stdout_and_stderr
+from pywhales.test_utils import get_all_jsons, random_name
+from pywhales.utils import stream_stdout_and_stderr
 
 
-@patch("pydocker.components.container.cli_wrapper.run")
+@patch("pywhales.components.container.cli_wrapper.run")
 @pytest.mark.parametrize(
     ("ps_args", "output", "headings", "rows"),
     [
@@ -125,7 +125,7 @@ def test_top_preserves_cells_when_docker_selects_columns(
     )
 
 
-@patch("pydocker.components.container.cli_wrapper.run")
+@patch("pywhales.components.container.cli_wrapper.run")
 @pytest.mark.parametrize(
     ("ps_args", "output"),
     [
@@ -155,7 +155,7 @@ def test_top_rejects_ambiguous_output_when_parsing_is_requested(
 
 
 @patch(
-    "pydocker.components.container.cli_wrapper.run",
+    "pywhales.components.container.cli_wrapper.run",
     return_value="Invocation PID\nsleep 300 7\n",
 )
 def test_top_returns_raw_text_when_selection_is_ambiguous(run_mock: Mock) -> None:
@@ -166,7 +166,7 @@ def test_top_returns_raw_text_when_selection_is_ambiguous(run_mock: Mock) -> Non
     assert output == "Invocation PID\nsleep 300 7\n"
 
 
-@patch("pydocker.utils.subprocess.run")
+@patch("pywhales.utils.subprocess.run")
 @pytest.mark.parametrize("raw", [False, True])
 def test_top_retains_missing_container_exception_when_cli_fails(
     run_mock: Mock, raw: bool
@@ -218,7 +218,7 @@ def test_batch_inspect_hydrates_in_request_order(component: str) -> None:
     response = CompletedProcess([], 0, json.dumps(snapshots).encode(), b"")
     with (
         patch("subprocess.run", return_value=response) as command,
-        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+        patch("pywhales.client_config.CACHE_VALIDITY_PERIOD", 3600),
     ):
         resources = api.inspect(iter(references))
         assert [str(resource) for resource in resources] == references
@@ -347,10 +347,10 @@ def test_batch_inspect_preserves_scalar_and_lazy_list_contracts(component: str) 
         "volume": client.volume,
     }[component]
     resource_type = {
-        "container": pydocker.Container,
-        "image": pydocker.Image,
-        "network": pydocker.Network,
-        "volume": pydocker.Volume,
+        "container": pywhales.Container,
+        "image": pywhales.Image,
+        "network": pywhales.Network,
+        "volume": pywhales.Volume,
     }[component]
     snapshot = b'[{"Id":"identity","Name":"named"}]'
     with patch(
@@ -414,7 +414,7 @@ def test_batch_inspect_cache_reload_and_expiration(component: str) -> None:
             "subprocess.run",
             return_value=CompletedProcess([], 0, json.dumps([snapshot]).encode(), b""),
         ) as command,
-        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+        patch("pywhales.client_config.CACHE_VALIDITY_PERIOD", 3600),
     ):
         resource = api.inspect(["named"])[0]
         initial = resource._get_inspect_result()
@@ -438,9 +438,9 @@ def test_batch_inspect_container_aliases_and_reload() -> None:
     client = DockerClient()
     client.client_config._client_call_with_path = ["docker-test"]
     snapshot = {"Id": "a" * 64, "Name": "/named", "Path": "before"}
-    existing = pydocker.Container(client.client_config, "a" * 64, is_immutable_id=True)
+    existing = pywhales.Container(client.client_config, "a" * 64, is_immutable_id=True)
 
-    def references() -> Iterator[str | pydocker.Container]:
+    def references() -> Iterator[str | pywhales.Container]:
         yield "named"
         yield existing
         yield "a" * 12
@@ -452,7 +452,7 @@ def test_batch_inspect_container_aliases_and_reload() -> None:
                 [], 0, json.dumps([snapshot] * 3).encode(), b""
             ),
         ) as command,
-        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+        patch("pywhales.client_config.CACHE_VALIDITY_PERIOD", 3600),
     ):
         resources = client.container.inspect(references())
         assert [resource.id for resource in resources] == ["a" * 64] * 3
@@ -482,10 +482,10 @@ def test_resource_cleanup_exception_matrix(
     client = DockerClient()
     client.client_config._client_call_with_path = ["docker-test"]
     resource_type = {
-        "container": pydocker.Container,
-        "image": pydocker.Image,
-        "network": pydocker.Network,
-        "volume": pydocker.Volume,
+        "container": pywhales.Container,
+        "image": pywhales.Image,
+        "network": pywhales.Network,
+        "volume": pywhales.Volume,
     }[component]
     missing_type = {
         "container": NoSuchContainer,
@@ -542,7 +542,7 @@ def test_resource_cleanup_exception_matrix(
 
     with (
         patch("subprocess.run", side_effect=command_response) as command,
-        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+        patch("pywhales.client_config.CACHE_VALIDITY_PERIOD", 3600),
     ):
         effective_cleanup = None if cleanup_outcome == "missing" else cleanup_error
         if body_error is None and effective_cleanup is None:
@@ -577,7 +577,7 @@ def test_container_cleanup_preserves_stop_and_removal(
 ) -> None:
     client = DockerClient()
     client.client_config._client_call_with_path = ["docker-test"]
-    container = pydocker.Container(
+    container = pywhales.Container(
         client.client_config, "resource", is_immutable_id=True
     )
     snapshot = {
@@ -594,7 +594,7 @@ def test_container_cleanup_preserves_stop_and_removal(
                 CompletedProcess([], 0, b"resource", b""),
             ],
         ) as command,
-        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+        patch("pywhales.client_config.CACHE_VALIDITY_PERIOD", 3600),
         container,
     ):
         pass
@@ -623,7 +623,7 @@ def test_container_cleanup_disappearance_races(
 ) -> None:
     client = DockerClient()
     client.client_config._client_call_with_path = ["docker-test"]
-    container = pydocker.Container(
+    container = pywhales.Container(
         client.client_config, "resource", is_immutable_id=True
     )
     body_error = {
@@ -658,7 +658,7 @@ def test_container_cleanup_disappearance_races(
 
     with (
         patch("subprocess.run", side_effect=response) as command,
-        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+        patch("pywhales.client_config.CACHE_VALIDITY_PERIOD", 3600),
     ):
         if missing and body_error is None:
             use_resource()
@@ -891,7 +891,7 @@ def test_eager_container_logs_release_child_when_decoding_fails(
         ) as raw,
         patch.object(client.container, "inspect"),
         patch(
-            "pydocker.components.container.cli_wrapper.stream_stdout_and_stderr",
+            "pywhales.components.container.cli_wrapper.stream_stdout_and_stderr",
             return_value=raw,
         ) as start,
     ):
@@ -928,7 +928,7 @@ def test_eager_container_logs_preserve_text_when_child_exits(source: str) -> Non
         ) as raw,
         patch.object(client.container, "inspect"),
         patch(
-            "pydocker.components.container.cli_wrapper.stream_stdout_and_stderr",
+            "pywhales.components.container.cli_wrapper.stream_stdout_and_stderr",
             return_value=raw,
         ),
     ):
@@ -958,7 +958,7 @@ def test_streaming_container_logs_retain_caller_ownership(
         ) as raw,
         patch.object(client.container, "inspect"),
         patch(
-            "pydocker.components.container.cli_wrapper.stream_stdout_and_stderr",
+            "pywhales.components.container.cli_wrapper.stream_stdout_and_stderr",
             return_value=raw,
         ) as start,
     ):
@@ -1199,7 +1199,7 @@ def test_context_manager_with_create(ctr_client: DockerClient) -> None:
             "busybox:1", ["sleep", "infinity"], name=container_name
         ) as c,
     ):
-        assert isinstance(c, pydocker.Container)
+        assert isinstance(c, pywhales.Container)
         raise ArithmeticError
 
     assert container_name not in [x.name for x in ctr_client.container.list(all=True)]
@@ -1369,7 +1369,7 @@ def test_stats_container(ctr_client: DockerClient) -> None:
         assert stats[0].container_name == container.name
 
 
-@patch("pydocker.components.container.cli_wrapper.run")
+@patch("pywhales.components.container.cli_wrapper.run")
 def test_stats_cli_default(run_mock: Mock) -> None:
     docker.container.stats()
     run_mock.assert_called_once_with(
@@ -1385,7 +1385,7 @@ def test_stats_cli_default(run_mock: Mock) -> None:
     )
 
 
-@patch("pydocker.components.container.cli_wrapper.run")
+@patch("pywhales.components.container.cli_wrapper.run")
 def test_stats_cli_container(run_mock: Mock) -> None:
     test_containers = ["dummy_container_0", "dummy_container_1"]
     docker.container.stats(containers=test_containers)
@@ -1437,7 +1437,7 @@ def test_kill_nothing(ctr_client: DockerClient) -> None:
         assert set_of_containers == set(ctr_client.ps())
 
 
-@patch("pydocker.components.container.cli_wrapper.run")
+@patch("pywhales.components.container.cli_wrapper.run")
 def test_start_detach_keys(run_mock: Mock) -> None:
     docker.start("ctr_name", detach_keys="a,b")
     run_mock.assert_called_once_with(
@@ -1468,7 +1468,7 @@ def test_exec_env_file(ctr_client: DockerClient, tmp_path: Path) -> None:
     assert result == "dada"
 
 
-@patch("pydocker.components.container.cli_wrapper.run")
+@patch("pywhales.components.container.cli_wrapper.run")
 def test_exec_detach_keys(run_mock: Mock) -> None:
     docker.execute("ctr_name", ["cmd"], detach_keys="a,b")
     run_mock.assert_called_once_with(
@@ -1673,8 +1673,8 @@ def test_run_detached_interactive(ctr_client: DockerClient) -> None:
         c.execute(["true"])
 
 
-@patch("pydocker.components.container.cli_wrapper.ContainerCLI.inspect")
-@patch("pydocker.components.container.cli_wrapper.run")
+@patch("pywhales.components.container.cli_wrapper.ContainerCLI.inspect")
+@patch("pywhales.components.container.cli_wrapper.run")
 def test_attach_default(run_mock: Mock, inspect_mock: Mock) -> None:
     test_container_name = "test_dummy_container"
 
@@ -1692,8 +1692,8 @@ def test_attach_default(run_mock: Mock, inspect_mock: Mock) -> None:
     )
 
 
-@patch("pydocker.components.container.cli_wrapper.ContainerCLI.inspect")
-@patch("pydocker.components.container.cli_wrapper.run")
+@patch("pywhales.components.container.cli_wrapper.ContainerCLI.inspect")
+@patch("pywhales.components.container.cli_wrapper.run")
 def test_attach_detach_keys_argument(run_mock: Mock, inspect_mock: Mock) -> None:
     test_container_name = "test_dummy_container"
     test_detach_key = "dummy"
@@ -1714,8 +1714,8 @@ def test_attach_detach_keys_argument(run_mock: Mock, inspect_mock: Mock) -> None
     )
 
 
-@patch("pydocker.components.container.cli_wrapper.ContainerCLI.inspect")
-@patch("pydocker.components.container.cli_wrapper.run")
+@patch("pywhales.components.container.cli_wrapper.ContainerCLI.inspect")
+@patch("pywhales.components.container.cli_wrapper.run")
 def test_attach_no_stdin_argument(run_mock: Mock, inspect_mock: Mock) -> None:
     test_container_name = "test_dummy_container"
 
@@ -1734,8 +1734,8 @@ def test_attach_no_stdin_argument(run_mock: Mock, inspect_mock: Mock) -> None:
     )
 
 
-@patch("pydocker.components.container.cli_wrapper.ContainerCLI.inspect")
-@patch("pydocker.components.container.cli_wrapper.run")
+@patch("pywhales.components.container.cli_wrapper.ContainerCLI.inspect")
+@patch("pywhales.components.container.cli_wrapper.run")
 def test_attach_sig_proxy_argument(run_mock: Mock, inspect_mock: Mock) -> None:
     test_container_name = "test_dummy_container"
 
@@ -1747,9 +1747,9 @@ def test_attach_sig_proxy_argument(run_mock: Mock, inspect_mock: Mock) -> None:
     )
 
 
-@patch("pydocker.components.container.cli_wrapper.run")
-@patch("pydocker.components.container.cli_wrapper.Container")
-@patch("pydocker.components.image.cli_wrapper.ImageCLI")
+@patch("pywhales.components.container.cli_wrapper.run")
+@patch("pywhales.components.container.cli_wrapper.Container")
+@patch("pywhales.components.image.cli_wrapper.ImageCLI")
 def test_create_default_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
     image_cli_mock = Mock()
     image_mock.return_value = image_cli_mock
@@ -1765,9 +1765,9 @@ def test_create_default_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
     )
 
 
-@patch("pydocker.components.container.cli_wrapper.run")
-@patch("pydocker.components.container.cli_wrapper.Container")
-@patch("pydocker.components.image.cli_wrapper.ImageCLI")
+@patch("pywhales.components.container.cli_wrapper.run")
+@patch("pywhales.components.container.cli_wrapper.Container")
+@patch("pywhales.components.image.cli_wrapper.ImageCLI")
 def test_create_missing_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
     image_cli_mock = Mock()
     image_mock.return_value = image_cli_mock
@@ -1783,9 +1783,9 @@ def test_create_missing_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
     )
 
 
-@patch("pydocker.components.container.cli_wrapper.run")
-@patch("pydocker.components.container.cli_wrapper.Container")
-@patch("pydocker.components.image.cli_wrapper.ImageCLI")
+@patch("pywhales.components.container.cli_wrapper.run")
+@patch("pywhales.components.container.cli_wrapper.Container")
+@patch("pywhales.components.image.cli_wrapper.ImageCLI")
 def test_create_always_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
     image_cli_mock = Mock()
     image_mock.return_value = image_cli_mock
@@ -1801,9 +1801,9 @@ def test_create_always_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
     )
 
 
-@patch("pydocker.components.container.cli_wrapper.run")
-@patch("pydocker.components.container.cli_wrapper.Container")
-@patch("pydocker.components.image.cli_wrapper.ImageCLI")
+@patch("pywhales.components.container.cli_wrapper.run")
+@patch("pywhales.components.container.cli_wrapper.Container")
+@patch("pywhales.components.image.cli_wrapper.ImageCLI")
 def test_create_never_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
     image_cli_mock = Mock()
     image_mock.return_value = image_cli_mock
@@ -1819,9 +1819,9 @@ def test_create_never_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
     )
 
 
-@patch("pydocker.components.container.cli_wrapper.run")
-@patch("pydocker.components.container.cli_wrapper.Container")
-@patch("pydocker.components.image.cli_wrapper.ImageCLI")
+@patch("pywhales.components.container.cli_wrapper.run")
+@patch("pywhales.components.container.cli_wrapper.Container")
+@patch("pywhales.components.image.cli_wrapper.ImageCLI")
 def test_run_default_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
     image_cli_mock = Mock()
     image_mock.return_value = image_cli_mock
@@ -1840,9 +1840,9 @@ def test_run_default_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
     )
 
 
-@patch("pydocker.components.container.cli_wrapper.run")
-@patch("pydocker.components.container.cli_wrapper.Container")
-@patch("pydocker.components.image.cli_wrapper.ImageCLI")
+@patch("pywhales.components.container.cli_wrapper.run")
+@patch("pywhales.components.container.cli_wrapper.Container")
+@patch("pywhales.components.image.cli_wrapper.ImageCLI")
 def test_run_missing_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
     image_cli_mock = Mock()
     image_mock.return_value = image_cli_mock
@@ -1861,9 +1861,9 @@ def test_run_missing_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
     )
 
 
-@patch("pydocker.components.container.cli_wrapper.run")
-@patch("pydocker.components.container.cli_wrapper.Container")
-@patch("pydocker.components.image.cli_wrapper.ImageCLI")
+@patch("pywhales.components.container.cli_wrapper.run")
+@patch("pywhales.components.container.cli_wrapper.Container")
+@patch("pywhales.components.image.cli_wrapper.ImageCLI")
 def test_run_always_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
     image_cli_mock = Mock()
     image_mock.return_value = image_cli_mock
@@ -1882,9 +1882,9 @@ def test_run_always_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
     )
 
 
-@patch("pydocker.components.container.cli_wrapper.run")
-@patch("pydocker.components.container.cli_wrapper.Container")
-@patch("pydocker.components.image.cli_wrapper.ImageCLI")
+@patch("pywhales.components.container.cli_wrapper.run")
+@patch("pywhales.components.container.cli_wrapper.Container")
+@patch("pywhales.components.image.cli_wrapper.ImageCLI")
 def test_run_never_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
     image_cli_mock = Mock()
     image_mock.return_value = image_cli_mock

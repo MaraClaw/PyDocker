@@ -6,10 +6,10 @@ from unittest.mock import patch
 
 import pytest
 
-from pydocker import DockerClient, Volume
-from pydocker.components.volume.models import VolumeInspectResult
-from pydocker.exceptions import NoSuchVolume
-from pydocker.test_utils import get_all_jsons, random_name
+from pywhales import DockerClient, Volume
+from pywhales.components.volume.models import VolumeInspectResult
+from pywhales.exceptions import NoSuchVolume
+from pywhales.test_utils import get_all_jsons, random_name
 
 
 def test_batch_inspect_volume_names_and_typed_snapshot() -> None:
@@ -24,7 +24,7 @@ def test_batch_inspect_volume_names_and_typed_snapshot() -> None:
             "subprocess.run",
             return_value=CompletedProcess([], 0, json.dumps(snapshots).encode(), b""),
         ) as command,
-        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+        patch("pywhales.client_config.CACHE_VALIDITY_PERIOD", 3600),
     ):
         volumes = client.volume.inspect(["second", "first", "second"])
         assert [volume.name for volume in volumes] == ["second", "first", "second"]

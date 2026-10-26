@@ -1,7 +1,7 @@
 import pytest
 
-from pydocker import docker
-from pydocker.exceptions import DockerException
+from pywhales import docker
+from pywhales.exceptions import DockerException
 
 
 def test_exception_attributes() -> None:

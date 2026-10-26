@@ -9,16 +9,16 @@ from typing import Literal, Unpack, overload
 
 from typing_extensions import TypedDict
 
-import pydocker.components.container.cli_wrapper
-import pydocker.components.volume.cli_wrapper
-from pydocker.client_config import Command, DockerCLICaller
-from pydocker.components.compose.models import (
+import pywhales.components.container.cli_wrapper
+import pywhales.components.volume.cli_wrapper
+from pywhales.client_config import Command, DockerCLICaller
+from pywhales.components.compose.models import (
     ComposeConfig,
     ComposeEvent,
     ComposeProject,
 )
-from pydocker.components.top import ComposeTopResult, parse_compose_top
-from pydocker.utils import (
+from pywhales.components.top import ComposeTopResult, parse_compose_top
+from pywhales.utils import (
     MappedProcessStream,
     custom_parse_object_as,
     format_mapping_for_cli,
@@ -39,12 +39,12 @@ class ComposeRunArgs(TypedDict, total=False, closed=True):
     name: str | None
     tty: bool
     dependencies: bool
-    publish: Sequence[pydocker.components.container.cli_wrapper.ValidPortMapping]
+    publish: Sequence[pywhales.components.container.cli_wrapper.ValidPortMapping]
     remove: bool
     service_ports: bool
     use_aliases: bool
     user: str | None
-    volumes: Iterable[pydocker.components.volume.cli_wrapper.VolumeDefinition]
+    volumes: Iterable[pywhales.components.volume.cli_wrapper.VolumeDefinition]
     workdir: str | Path | None
 
 
@@ -124,8 +124,8 @@ class ComposeCLI(DockerCLICaller):
                 function returns an Iterable of `Tuple[str, bytes]` where the first element
                 is the type of log (`"stdin"` or `"stdout"`). The second element is the log itself,
                 as bytes, you'll need to call `.decode()` if you want the logs as `str`.
-                See [the streaming guide](https://github.com/MaraClaw/PyDocker/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output) if you are
-                not familiar with the streaming of logs in PyDocker.
+                See [the streaming guide](https://github.com/MaraClaw/PyWhales/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output) if you are
+                not familiar with the streaming of logs in PyWhales.
         """
         if quiet and stream_logs:
             raise ValueError(
@@ -171,7 +171,7 @@ class ComposeCLI(DockerCLICaller):
 
         For example
         ```python
-        from pydocker import docker
+        from pywhales import docker
         project_config = docker.compose.config()
         print(project_config.services["my_first_service"].image)
         "redis"
@@ -262,8 +262,8 @@ class ComposeCLI(DockerCLICaller):
                 function returns an Iterable of `Tuple[str, bytes]` where the first element
                 is the type of log (`"stdin"` or `"stdout"`). The second element is the log itself,
                 as bytes, you'll need to call `.decode()` if you want the logs as `str`.
-                See [the streaming guide](https://github.com/MaraClaw/PyDocker/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output) if you are
-                not familiar with the streaming of logs in PyDocker.
+                See [the streaming guide](https://github.com/MaraClaw/PyWhales/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output) if you are
+                not familiar with the streaming of logs in PyWhales.
         """
         full_cmd = Command([*self.docker_compose_cmd, "create"])
         full_cmd.add_flag("--build", build)
@@ -505,7 +505,7 @@ class ComposeCLI(DockerCLICaller):
                 This function will then return and iterator that will yield a
                 tuple `(source, content)` with `source` being `"stderr"` or
                 `"stdout"`. `content` is the content of the line as bytes.
-                Take a look at [the user guide](https://github.com/MaraClaw/PyDocker/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output)
+                Take a look at [the user guide](https://github.com/MaraClaw/PyWhales/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output)
                 to have an example of the output.
         # Returns
             `str` if `stream=False` (the default), `Iterable[Tuple[str, bytes]]`
@@ -585,11 +585,11 @@ class ComposeCLI(DockerCLICaller):
         self,
         services: list[str] | None = None,
         all: bool = False,
-    ) -> list[pydocker.components.container.cli_wrapper.Container]:
+    ) -> list[pywhales.components.container.cli_wrapper.Container]:
         """Returns the containers that were created by the current project.
 
         # Returns
-            A `List[pydocker.Container]`
+            A `List[pywhales.Container]`
         """
         full_cmd = Command([*self.docker_compose_cmd, "ps", "--quiet"])
         full_cmd.add_flag("--all", all)
@@ -602,7 +602,7 @@ class ComposeCLI(DockerCLICaller):
         if len(ids) > 0 and "experimental" in ids[0]:
             ids.pop(0)
 
-        Container = pydocker.components.container.cli_wrapper.Container
+        Container = pywhales.components.container.cli_wrapper.Container
         return [Container(self.client_config, x, is_immutable_id=True) for x in ids]
 
     def ls(
@@ -615,7 +615,7 @@ class ComposeCLI(DockerCLICaller):
             filters: Filter results based on conditions provided.
 
         # Returns
-            A `List[pydocker.ComposeProject]`
+            A `List[pywhales.ComposeProject]`
         """
         full_cmd = Command([*self.docker_compose_cmd, "ls", "--format", "json"])
         full_cmd.add_flag("--all", all)
@@ -722,8 +722,8 @@ class ComposeCLI(DockerCLICaller):
                 function returns an Iterable of `Tuple[str, bytes]` where the first element
                 is the type of log (`"stdin"` or `"stdout"`). The second element is the log itself,
                 as bytes, you'll need to call `.decode()` if you want the logs as `str`.
-                See [the streaming guide](https://github.com/MaraClaw/PyDocker/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output) if you are
-                not familiar with the streaming of logs in PyDocker.
+                See [the streaming guide](https://github.com/MaraClaw/PyWhales/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output) if you are
+                not familiar with the streaming of logs in PyWhales.
 
         """
         if quiet and stream_logs:
@@ -828,7 +828,7 @@ class ComposeCLI(DockerCLICaller):
         detach: Literal[True],
         stream: bool = False,
         **kwargs: Unpack[ComposeRunArgs],
-    ) -> pydocker.components.container.cli_wrapper.Container: ...
+    ) -> pywhales.components.container.cli_wrapper.Container: ...
 
     @overload
     def run(
@@ -867,17 +867,17 @@ class ComposeCLI(DockerCLICaller):
         stream: bool = False,
         dependencies: bool = True,
         publish: Sequence[
-            pydocker.components.container.cli_wrapper.ValidPortMapping
+            pywhales.components.container.cli_wrapper.ValidPortMapping
         ] = (),
         remove: bool = False,
         service_ports: bool = False,
         use_aliases: bool = False,
         user: str | None = None,
-        volumes: Iterable[pydocker.components.volume.cli_wrapper.VolumeDefinition] = (),
+        volumes: Iterable[pywhales.components.volume.cli_wrapper.VolumeDefinition] = (),
         workdir: str | Path | None = None,
     ) -> (
         str
-        | pydocker.components.container.cli_wrapper.Container
+        | pywhales.components.container.cli_wrapper.Container
         | Iterable[tuple[str, bytes]]
     ): ...
 
@@ -895,17 +895,17 @@ class ComposeCLI(DockerCLICaller):
         stream: bool = False,
         dependencies: bool = True,
         publish: Sequence[
-            pydocker.components.container.cli_wrapper.ValidPortMapping
+            pywhales.components.container.cli_wrapper.ValidPortMapping
         ] = (),
         remove: bool = False,
         service_ports: bool = False,
         use_aliases: bool = False,
         user: str | None = None,
-        volumes: Iterable[pydocker.components.volume.cli_wrapper.VolumeDefinition] = (),
+        volumes: Iterable[pywhales.components.volume.cli_wrapper.VolumeDefinition] = (),
         workdir: str | Path | None = None,
     ) -> (
         str
-        | pydocker.components.container.cli_wrapper.Container
+        | pywhales.components.container.cli_wrapper.Container
         | Iterable[tuple[str, bytes]]
     ):
         """Run a one-off command on a service.
@@ -982,7 +982,7 @@ class ComposeCLI(DockerCLICaller):
         else:
             result = run(full_cmd, tty=tty)
             if detach:
-                Container = pydocker.components.container.cli_wrapper.Container
+                Container = pywhales.components.container.cli_wrapper.Container
                 return Container(self.client_config, result, is_immutable_id=True)
             else:
                 return result
@@ -1020,8 +1020,8 @@ class ComposeCLI(DockerCLICaller):
                 function returns an Iterable of `Tuple[str, bytes]` where the first element
                 is the type of log (`"stdin"` or `"stdout"`). The second element is the log itself,
                 as bytes, you'll need to call `.decode()` if you want the logs as `str`.
-                See [the streaming guide](https://github.com/MaraClaw/PyDocker/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output) if you are
-                not familiar with the streaming of logs in PyDocker.
+                See [the streaming guide](https://github.com/MaraClaw/PyWhales/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output) if you are
+                not familiar with the streaming of logs in PyWhales.
         """
         full_cmd = Command([*self.docker_compose_cmd, "start"])
         if services == []:
@@ -1076,8 +1076,8 @@ class ComposeCLI(DockerCLICaller):
                 function returns an Iterable of `Tuple[str, bytes]` where the first element
                 is the type of log (`"stdin"` or `"stdout"`). The second element is the log itself,
                 as bytes, you'll need to call `.decode()` if you want the logs as `str`.
-                See [the streaming guide](https://github.com/MaraClaw/PyDocker/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output) if you are
-                not familiar with the streaming of logs in PyDocker.
+                See [the streaming guide](https://github.com/MaraClaw/PyWhales/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output) if you are
+                not familiar with the streaming of logs in PyWhales.
         """
         if isinstance(timeout, timedelta):
             timeout = int(timeout.total_seconds())
@@ -1146,7 +1146,7 @@ class ComposeCLI(DockerCLICaller):
 
         Example usage:
         ```python
-        from pydocker import docker
+        from pywhales import docker
 
         # Stream events for a specific service
         with docker.compose.events(["my_service"]) as events:
@@ -1345,8 +1345,8 @@ class ComposeCLI(DockerCLICaller):
                 function returns an Iterable of `Tuple[str, bytes]` where the first element
                 is the type of log (`"stdin"` or `"stdout"`). The second element is the log itself,
                 as bytes, you'll need to call `.decode()` if you want the logs as `str`.
-                See [the streaming guide](https://github.com/MaraClaw/PyDocker/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output) if you are
-                not familiar with the streaming of logs in PyDocker.
+                See [the streaming guide](https://github.com/MaraClaw/PyWhales/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output) if you are
+                not familiar with the streaming of logs in PyWhales.
             wait_timeout: Maximum duration to wait for the project to be running|healthy
             dependencies: Also start linked services.
             use_default_sensitive_values: If `True` assume "yes" as answer to all prompts and run non-interactively.

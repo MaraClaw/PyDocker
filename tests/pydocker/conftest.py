@@ -5,9 +5,9 @@ import pytest
 from pytest_mock import MockerFixture
 
 from docs import docs_utils
-from pydocker import Builder, Container, Volume
-from pydocker.components.system.models import SystemInfo
-from pydocker.exceptions import DockerException, NoSuchImage
+from pywhales import Builder, Container, Volume
+from pywhales.components.system.models import SystemInfo
+from pywhales.exceptions import DockerException, NoSuchImage
 
 
 @pytest.fixture

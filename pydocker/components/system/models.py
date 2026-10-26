@@ -4,8 +4,8 @@ from typing import Annotated, Any
 
 import pydantic
 
-import pydocker.components.node.models
-from pydocker.utils import DockerCamelModel
+import pywhales.components.node.models
+from pywhales.utils import DockerCamelModel
 
 
 class DockerEventActor(DockerCamelModel):
@@ -105,11 +105,11 @@ class SwarmSpec(DockerCamelModel):
 
 class ClusterInfo(DockerCamelModel):
     id: Annotated[str | None, pydantic.Field(alias="ID")]
-    version: pydocker.components.node.models.NodeVersion | None = None
+    version: pywhales.components.node.models.NodeVersion | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
     spec: SwarmSpec | None = None
-    tls_info: pydocker.components.node.models.NodeTLSInfo | None = None
+    tls_info: pywhales.components.node.models.NodeTLSInfo | None = None
     root_rotation_in_progress: bool | None = None
     data_path_port: int | None = None
     default_addr_pool: list[str] | None = None
@@ -188,7 +188,7 @@ class SystemInfo(DockerCamelModel):
     index_server_address: str | None = None
     registry_config: dict[str, Any] | None = None
     generic_resources: (
-        list[pydocker.components.node.models.NodeGenericResource] | None
+        list[pywhales.components.node.models.NodeGenericResource] | None
     ) = None
 
     http_proxy: str | None = None

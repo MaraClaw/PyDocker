@@ -4,7 +4,7 @@ Configs objects present in Swarm mode
 
 Don't use the constructor directly. Instead use 
 ```python
-from pydocker import docker
+from pywhales import docker
 
 my_config = docker.config.inspect("my-config-name")
 
@@ -15,7 +15,7 @@ my_config = docker.config.create("my_config_name", "my_config_file")
 For type hints, use this
 
 ```python
-from pydocker import Config
+from pywhales import Config
 
 
 def print_config_labels(config: Config):
@@ -35,7 +35,7 @@ and click on "200 No error".
 An example is worth many lines of descriptions.
 
 ```
-In [1]: from pydocker import docker
+In [1]: from pywhales import docker
 
 In [2]: config = docker.config.create("my_config", "./config_file.cfg", labels=dict(hello="world"))
 

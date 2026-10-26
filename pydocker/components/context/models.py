@@ -2,7 +2,7 @@ from typing import Annotated
 
 import pydantic
 
-from pydocker.utils import DockerCamelModel
+from pywhales.utils import DockerCamelModel
 
 
 class ContextEndpoint(DockerCamelModel):

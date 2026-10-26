@@ -2,7 +2,7 @@
 
 Don't use the constructor directly. Instead use 
 ```python
-from pydocker import docker
+from pywhales import docker
 
 my_network = docker.network.create("some-network")
 
@@ -11,7 +11,7 @@ my_network = docker.network.inspect("some-network")
 For type hints, use this
 
 ```python
-from pydocker import Network, docker
+from pywhales import Network, docker
 
 
 def ping_hostname_in_network(my_network: Network):
@@ -30,7 +30,7 @@ An example is worth many lines of descriptions.
 
 
 ```
-In [1]: from pydocker import docker
+In [1]: from pywhales import docker
 
 In [2]: network = docker.network.create("my-network")
 

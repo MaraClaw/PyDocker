@@ -1,13 +1,13 @@
-# Running pydocker inside a container
+# Running pywhales inside a container
 
 *To follow this example, you just need Docker installed, and nothing else!*
 
 ### The use case
 
 Sometimes you don't want to install Python on your system, but you still
-would like to use pydocker to handle most of the Docker logic.
+would like to use pywhales to handle most of the Docker logic.
 
-You can then run pydocker inside a Docker container. For simplicity,
+You can then run pywhales inside a Docker container. For simplicity,
 we let the container access the Docker daemon of the host.
 
 Let's give you the code example, and we'll explain afterwards where is the magic.
@@ -15,11 +15,11 @@ Let's give you the code example, and we'll explain afterwards where is the magic
 
 ### Example
 
-We want to run this small Python script. It uses pydocker. We'll call it `main.py`.
+We want to run this small Python script. It uses pywhales. We'll call it `main.py`.
 
 ```python
 # main.py
-from pydocker import docker
+from pywhales import docker
 
 print("We are going to run the hello world docker container")
 
@@ -52,7 +52,7 @@ RUN mkdir -p ~/.docker/cli-plugins/
 RUN wget https://github.com/docker/compose/releases/download/latest/docker-compose-linux-x86_64 -O ~/.docker/cli-plugins/docker-compose
 RUN chmod a+x  ~/.docker/cli-plugins/docker-compose
 
-RUN pip install pydocker
+RUN pip install pywhales
 RUN mkdir /app
 COPY ./main.py /app/main.py
 CMD python3 /app/main.py
@@ -61,8 +61,8 @@ CMD python3 /app/main.py
 We're all set! Let's run this Python script, without having Python installed on the system!
 
 ```bash
-docker build -t image-with-pydocker .
-docker run -v /var/run/docker.sock:/var/run/docker.sock image-with-pydocker
+docker build -t image-with-pywhales .
+docker run -v /var/run/docker.sock:/var/run/docker.sock image-with-pywhales
 ```
 
 You should see this output:

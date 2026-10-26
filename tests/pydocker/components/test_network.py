@@ -5,11 +5,11 @@ from unittest.mock import patch
 
 import pytest
 
-from pydocker import DockerClient, Network
-from pydocker.components.container.models import ContainerEndpointIPAMConfig
-from pydocker.components.network.cli_wrapper import NetworkInspectResult
-from pydocker.exceptions import DockerException, NoSuchNetwork
-from pydocker.test_utils import get_all_jsons, random_name
+from pywhales import DockerClient, Network
+from pywhales.components.container.models import ContainerEndpointIPAMConfig
+from pywhales.components.network.cli_wrapper import NetworkInspectResult
+from pywhales.exceptions import DockerException, NoSuchNetwork
+from pywhales.test_utils import get_all_jsons, random_name
 
 
 def test_batch_inspect_network_aliases_and_typed_snapshot() -> None:
@@ -24,7 +24,7 @@ def test_batch_inspect_network_aliases_and_typed_snapshot() -> None:
                 [], 0, json.dumps([snapshot] * 3).encode(), b""
             ),
         ) as command,
-        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+        patch("pywhales.client_config.CACHE_VALIDITY_PERIOD", 3600),
     ):
         networks = client.network.inspect(["named", identity, identity[:12]])
         assert [network.id for network in networks] == [identity] * 3

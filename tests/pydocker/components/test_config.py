@@ -5,10 +5,10 @@ from unittest.mock import patch
 
 import pytest
 
-from pydocker import Config, DockerClient
-from pydocker.client_config import ParsingError
-from pydocker.components.config.models import ConfigInspectResult
-from pydocker.exceptions import DockerException
+from pywhales import Config, DockerClient
+from pywhales.client_config import ParsingError
+from pywhales.components.config.models import ConfigInspectResult
+from pywhales.exceptions import DockerException
 
 
 def test_batch_inspect_matches_config_references_and_hydrates_cache() -> None:
@@ -22,7 +22,7 @@ def test_batch_inspect_matches_config_references_and_hydrates_cache() -> None:
         patch(
             "subprocess.run", return_value=CompletedProcess([], 0, response, b"")
         ) as command,
-        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+        patch("pywhales.client_config.CACHE_VALIDITY_PERIOD", 3600),
     ):
         resources = client.config.inspect(references)
         assert [resource.id for resource in resources] == [

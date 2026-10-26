@@ -2,11 +2,11 @@ from collections.abc import Callable
 
 import pytest
 
-from pydocker import docker
-from pydocker.components.buildx.imagetools.models import Manifest
-from pydocker.utils import PROJECT_ROOT
+from pywhales import docker
+from pywhales.components.buildx.imagetools.models import Manifest
+from pywhales.utils import PROJECT_ROOT
 
-bake_test_dir = PROJECT_ROOT / "tests/pydocker/components/bake_tests"
+bake_test_dir = PROJECT_ROOT / "tests/pywhales/components/bake_tests"
 bake_file = bake_test_dir / "docker-bake.hcl"
 
 

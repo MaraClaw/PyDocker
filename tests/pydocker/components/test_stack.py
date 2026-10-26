@@ -4,10 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from pydocker import DockerClient, Service
-from pydocker.components.stack.cli_wrapper import Stack
-from pydocker.exceptions import NotASwarmManager
-from pydocker.utils import PROJECT_ROOT
+from pywhales import DockerClient, Service
+from pywhales.components.stack.cli_wrapper import Stack
+from pywhales.exceptions import NotASwarmManager
+from pywhales.utils import PROJECT_ROOT
 
 
 @pytest.fixture
@@ -15,7 +15,7 @@ def stack(docker_client: DockerClient, swarm_mode: None) -> Generator[Stack]:
     time.sleep(1)
     some_stack = docker_client.stack.deploy(
         "some_stack",
-        [PROJECT_ROOT / "tests/pydocker/components/test-stack-file.yml"],
+        [PROJECT_ROOT / "tests/pywhales/components/test-stack-file.yml"],
     )
     time.sleep(1)
     yield some_stack
@@ -57,7 +57,7 @@ def test_stack_ps_and_services(docker_client: DockerClient, stack: Stack) -> Non
 def test_stack_variables(docker_client: DockerClient) -> None:
     docker_client.stack.deploy(
         "other_stack",
-        [PROJECT_ROOT / "tests/pydocker/components/test-stack-file.yml"],
+        [PROJECT_ROOT / "tests/pywhales/components/test-stack-file.yml"],
         variables={"SOME_VARIABLE": "hello-world"},
     )
 
@@ -79,7 +79,7 @@ def test_stack_env_files(docker_client: DockerClient, tmp_path: Path) -> None:
     env_file.write_text('SOME_VARIABLE="--tls=true" # some var \n # some comment')
     third_stack = docker_client.stack.deploy(
         "third_stack",
-        [PROJECT_ROOT / "tests/pydocker/components/test-stack-file.yml"],
+        [PROJECT_ROOT / "tests/pywhales/components/test-stack-file.yml"],
         env_files=[env_file],
     )
 
@@ -101,7 +101,7 @@ def test_deploy_not_swarm_manager(docker_client: DockerClient) -> None:
     with pytest.raises(NotASwarmManager) as e:
         docker_client.stack.deploy(
             "some_stack",
-            [PROJECT_ROOT / "tests/pydocker/components/test-stack-file.yml"],
+            [PROJECT_ROOT / "tests/pywhales/components/test-stack-file.yml"],
         )
 
     assert "not a swarm manager" in str(e.value).lower()

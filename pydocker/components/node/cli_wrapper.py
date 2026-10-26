@@ -7,15 +7,15 @@ from datetime import datetime
 from types import MappingProxyType
 from typing import Any, assert_never, overload, override
 
-import pydocker.components.task.cli_wrapper
-from pydocker.client_config import (
+import pywhales.components.task.cli_wrapper
+from pywhales.client_config import (
     ClientConfig,
     Command,
     DockerCLICaller,
     ReloadableObjectFromJson,
 )
-from pydocker.components._swarm_inspect import parse_swarm_inspect_results
-from pydocker.components.node.models import (
+from pywhales.components._swarm_inspect import parse_swarm_inspect_results
+from pywhales.components.node.models import (
     NodeDescription,
     NodeInspectResult,
     NodeManagerStatus,
@@ -23,7 +23,7 @@ from pydocker.components.node.models import (
     NodeStatus,
     NodeVersion,
 )
-from pydocker.utils import run, to_list
+from pywhales.utils import run, to_list
 
 
 class Node(ReloadableObjectFromJson[NodeInspectResult]):
@@ -80,7 +80,7 @@ class Node(ReloadableObjectFromJson[NodeInspectResult]):
         hostname = description.hostname if description is not None else None
         role = spec.role if spec is not None else None
         return (
-            f"pydocker.Node(id='{self.id[:12]}', hostname='{hostname}', role='{role}')"
+            f"pywhales.Node(id='{self.id[:12]}', hostname='{hostname}', role='{role}')"
         )
 
     def update(
@@ -99,11 +99,11 @@ class Node(ReloadableObjectFromJson[NodeInspectResult]):
             self, availability, labels_add, rm_labels, role
         )
 
-    def ps(self) -> list[pydocker.components.task.cli_wrapper.Task]:
+    def ps(self) -> list[pywhales.components.task.cli_wrapper.Task]:
         """Returns the list of tasks running on this node
 
         # Returns
-            A `List[pydocker.Task]` object.
+            A `List[pywhales.Task]` object.
 
         """
         return NodeCLI(self.client_config).ps(self)
@@ -132,14 +132,14 @@ class NodeCLI(DockerCLICaller):
     def inspect(self, x: builtins.list[str]) -> builtins.list[Node]: ...
 
     def inspect(self, x: str | builtins.list[str]) -> Node | builtins.list[Node]:
-        """Returns a `pydocker.Node` object from a string
+        """Returns a `pywhales.Node` object from a string
         (id or hostname of the node)
 
         Parameters:
             x: One id or hostname or a list of ids or hostnames
 
         # Returns
-            One or a list of `pydocker.Node`
+            One or a list of `pywhales.Node`
         """
         references = to_list(x)
         if not references:
@@ -164,7 +164,7 @@ class NodeCLI(DockerCLICaller):
         """Returns the list of nodes in this swarm.
 
         # Returns
-            A `List[pydocker.Node]`
+            A `List[pywhales.Node]`
         """
         full_cmd = Command([*self.docker_cmd, "node", "list", "--quiet"])
         all_ids = run(full_cmd).splitlines()
@@ -184,11 +184,11 @@ class NodeCLI(DockerCLICaller):
 
     def ps(
         self, x: ValidNode | Sequence[ValidNode] | None = None
-    ) -> builtins.list[pydocker.components.task.cli_wrapper.Task]:
+    ) -> builtins.list[pywhales.components.task.cli_wrapper.Task]:
         """Returns the list of swarm tasks running on one or more nodes.
 
         ```python
-        from pydocker import docker
+        from pywhales import docker
 
         tasks = docker.node.ps("my-node-name")
         print(tasks[0].desired_state)
@@ -196,12 +196,12 @@ class NodeCLI(DockerCLICaller):
         ```
 
         Parameters:
-            x: One or more nodes (can be id, name or `pydocker.Node` object.).
+            x: One or more nodes (can be id, name or `pywhales.Node` object.).
                 If the argument is not provided, it defaults to the current node.
                 An empty list means an empty list will also be returned.
 
         # Returns
-            `List[pydocker.Task]`
+            `List[pywhales.Task]`
         """
         if x == []:
             return []
@@ -221,7 +221,7 @@ class NodeCLI(DockerCLICaller):
         ]
         ids = run(full_cmd).splitlines()
         return [
-            pydocker.components.task.cli_wrapper.Task(
+            pywhales.components.task.cli_wrapper.Task(
                 self.client_config, id_, is_immutable_id=True
             )
             for id_ in ids
@@ -232,7 +232,7 @@ class NodeCLI(DockerCLICaller):
 
         Parameters:
             x: One node or a list of nodes. You can use the id or the hostname of a node.
-                You can also use a `pydocker.Node`.
+                You can also use a `pywhales.Node`.
             force: Force remove a node from the swarm
         """
         full_cmd = Command([*self.docker_cmd, "node", "remove"])
@@ -253,7 +253,7 @@ class NodeCLI(DockerCLICaller):
         """Updates a Swarm node.
 
         Parameters:
-            node: The node to update, you can use a string or a `pydocker.Node`
+            node: The node to update, you can use a string or a `pywhales.Node`
                 object.
             availability: Availability of the node ("active"|"pause"|"drain")
             labels_add: Remove a node label if exists

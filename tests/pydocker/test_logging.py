@@ -2,11 +2,11 @@ import logging
 
 import pytest
 
-import pydocker.utils
+import pywhales.utils
 
 
 def test_debug_level_logging(caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.DEBUG)
     command = ["echo", "hello"]
-    pydocker.utils.run(command)
+    pywhales.utils.run(command)
     assert " ".join(command) in caplog.text

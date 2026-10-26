@@ -2,7 +2,7 @@
 
 Don't use the constructor directly. Instead use 
 ```python
-from pydocker import docker
+from pywhales import docker
 
 my_docker_volume = docker.volume.inspect("my-volume")
 
@@ -13,7 +13,7 @@ my_docker_image = docker.volume.create()
 For type hints, use this
 
 ```python
-from pydocker import docker, Volume
+from pywhales import docker, Volume
 
 
 def print_file(my_volume: Volume):
@@ -40,7 +40,7 @@ and click on "200 No error".
 An example is worth many lines of descriptions.
 
 ```
-In [1]: from pydocker import docker
+In [1]: from pywhales import docker
 
 In [2]: volume = docker.volume.create()
 

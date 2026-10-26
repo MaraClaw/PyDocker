@@ -3,14 +3,14 @@ from unittest.mock import patch
 
 import pytest
 
-from pydocker.client_config import ClientConfig
-from pydocker.components.buildx.cli_wrapper import Builder
-from pydocker.components.config.cli_wrapper import Config
-from pydocker.components.context.cli_wrapper import Context
-from pydocker.components.manifest.cli_wrapper import ManifestList
-from pydocker.components.plugin.cli_wrapper import Plugin
-from pydocker.components.secret.cli_wrapper import Secret
-from pydocker.components.service.cli_wrapper import Service
+from pywhales.client_config import ClientConfig
+from pywhales.components.buildx.cli_wrapper import Builder
+from pywhales.components.config.cli_wrapper import Config
+from pywhales.components.context.cli_wrapper import Context
+from pywhales.components.manifest.cli_wrapper import ManifestList
+from pywhales.components.plugin.cli_wrapper import Plugin
+from pywhales.components.secret.cli_wrapper import Secret
+from pywhales.components.service.cli_wrapper import Service
 
 type CleanupResource = (
     Service | Config | Secret | Context | Builder | ManifestList | Plugin

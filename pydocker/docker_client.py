@@ -6,25 +6,25 @@ from typing import Annotated, Literal
 
 import pydantic
 
-from pydocker.client_config import ClientConfig, Command, DockerCLICaller
-from pydocker.components.buildx.cli_wrapper import BuildxCLI
-from pydocker.components.compose.cli_wrapper import ComposeCLI
-from pydocker.components.config.cli_wrapper import ConfigCLI
-from pydocker.components.container.cli_wrapper import ContainerCLI
-from pydocker.components.context.cli_wrapper import ContextCLI
-from pydocker.components.image.cli_wrapper import ImageCLI
-from pydocker.components.manifest.cli_wrapper import ManifestCLI
-from pydocker.components.network.cli_wrapper import NetworkCLI
-from pydocker.components.node.cli_wrapper import NodeCLI
-from pydocker.components.plugin.cli_wrapper import PluginCLI
-from pydocker.components.secret.cli_wrapper import SecretCLI
-from pydocker.components.service.cli_wrapper import ServiceCLI
-from pydocker.components.stack.cli_wrapper import StackCLI
-from pydocker.components.swarm.cli_wrapper import SwarmCLI
-from pydocker.components.system.cli_wrapper import SystemCLI
-from pydocker.components.task.cli_wrapper import TaskCLI
-from pydocker.components.trust.cli_wrapper import TrustCLI
-from pydocker.components.volume.cli_wrapper import VolumeCLI
+from pywhales.client_config import ClientConfig, Command, DockerCLICaller
+from pywhales.components.buildx.cli_wrapper import BuildxCLI
+from pywhales.components.compose.cli_wrapper import ComposeCLI
+from pywhales.components.config.cli_wrapper import ConfigCLI
+from pywhales.components.container.cli_wrapper import ContainerCLI
+from pywhales.components.context.cli_wrapper import ContextCLI
+from pywhales.components.image.cli_wrapper import ImageCLI
+from pywhales.components.manifest.cli_wrapper import ManifestCLI
+from pywhales.components.network.cli_wrapper import NetworkCLI
+from pywhales.components.node.cli_wrapper import NodeCLI
+from pywhales.components.plugin.cli_wrapper import PluginCLI
+from pywhales.components.secret.cli_wrapper import SecretCLI
+from pywhales.components.service.cli_wrapper import ServiceCLI
+from pywhales.components.stack.cli_wrapper import StackCLI
+from pywhales.components.swarm.cli_wrapper import SwarmCLI
+from pywhales.components.system.cli_wrapper import SystemCLI
+from pywhales.components.task.cli_wrapper import TaskCLI
+from pywhales.components.trust.cli_wrapper import TrustCLI
+from pywhales.components.volume.cli_wrapper import VolumeCLI
 
 from .utils import DockerCamelModel, ValidPath, run
 
@@ -93,12 +93,12 @@ class DockerClient(DockerCLICaller):
 
     Note that
     ```python
-    from pydocker import docker
+    from pywhales import docker
     print(docker.run("hello-world"))
     ```
     is equivalent to
     ```python
-    from pydocker import DockerClient
+    from pywhales import DockerClient
     docker = DockerClient()
     print(docker.run("hello-world")
     ```
@@ -132,7 +132,7 @@ class DockerClient(DockerCLICaller):
             This option is a list because you can provide a list of command line arguments to be placed after `"docker"`.
             For exemple `host="ssh://my_user@host.com"` is equivalent
             to `client_call=["docker", "--host=ssh://my_user@host.com"]`.
-            This will allow you to use some exotic options that are not explicitly supported by PyDocker.
+            This will allow you to use some exotic options that are not explicitly supported by PyWhales.
             Let's say you want to use estargz to run a container immediately, without waiting for the "pull"
             to finish (yes it's possible!), you can
             do `nerdctl = DockerClient(client_call=["nerdctl", "--snapshotter=stargz"])`
@@ -142,11 +142,11 @@ class DockerClient(DockerCLICaller):
             program execution).
         client_binary: Deprecated, use `client_call`. If you used before `client_binary="docker"`, now use
             `client_call=["docker"]`.
-        client_type: The kind of client that is called by the Python process. It allows PyDocker to
+        client_type: The kind of client that is called by the Python process. It allows PyWhales to
             adapt to the client's behavior if two client have a different behavior. The `client_call` is not
-            enough for PyDocker to know what kind of client you're using. For example, if you use
-            a symlink to call Docker, PyDocker will not know that you're using Docker.
-            Default is "unknown". If at some point, PyDocker has to choose
+            enough for PyWhales to know what kind of client you're using. For example, if you use
+            a symlink to call Docker, PyWhales will not know that you're using Docker.
+            Default is "unknown". If at some point, PyWhales has to choose
             a behavior and `client_type` is `"unknown"`, it will raise an exception and ask you to specify
             what kind of client you're working with. Valid values are `"docker"`, `"nerdctl"` and `"unknown"`.
     """
@@ -269,12 +269,12 @@ class DockerClient(DockerCLICaller):
         Get version information about the container client and server.
 
         # Returns
-            A `pydocker.Version` object
+            A `pywhales.Version` object
 
         As an example:
 
         ```python
-        from pydocker import docker
+        from pywhales import docker
 
         version_info = docker.version()
         print(version_info.client.version)

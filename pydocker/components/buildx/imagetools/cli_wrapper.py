@@ -4,8 +4,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Literal, overload
 
-from pydocker.client_config import Command, DockerCLICaller
-from pydocker.utils import run
+from pywhales.client_config import Command, DockerCLICaller
+from pywhales.utils import run
 
 from .models import Manifest
 

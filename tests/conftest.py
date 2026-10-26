@@ -8,7 +8,7 @@ from typing import assert_never
 
 import pytest
 
-from pydocker import DockerClient
+from pywhales import DockerClient
 
 logger = logging.getLogger(__name__)
 
@@ -122,15 +122,15 @@ def swarm_mode(docker_client: DockerClient) -> Generator[None]:
 def pytest_addoption(parser: pytest.Parser) -> None:
     """Pytest hook for adding CLI options."""
 
-    pydocker_group = parser.getgroup("pydocker")
-    pydocker_group.addoption(
+    pywhales_group = parser.getgroup("pywhales")
+    pywhales_group.addoption(
         "--docker-exe",
         metavar="EXE",
         default="docker",
         help="Path to the docker executable to use in the unit tests."
         "Defaults to docker.",
     )
-    pydocker_group.addoption(
+    pywhales_group.addoption(
         "--no-runtime-skip",
         action="store_true",
         help="Do not skip tests corresponding to a container runtime that is not available",

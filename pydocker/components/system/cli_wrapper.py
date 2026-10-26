@@ -3,13 +3,13 @@ import json
 from collections.abc import Mapping
 from types import MappingProxyType
 
-from pydocker.client_config import Command, DockerCLICaller
-from pydocker.components.system.models import (
+from pywhales.client_config import Command, DockerCLICaller
+from pywhales.components.system.models import (
     DockerEvent,
     DockerItemsSummary,
     SystemInfo,
 )
-from pydocker.utils import (
+from pywhales.utils import (
     MappedProcessStream,
     format_mapping_for_cli,
     format_time_arg,
@@ -46,10 +46,10 @@ class SystemCLI(DockerCLICaller):
     def disk_free(self) -> DiskFreeResult:
         """Give information about the disk usage of the Docker daemon.
 
-        Returns a `pydocker.DiskFreeResult` object.
+        Returns a `pywhales.DiskFreeResult` object.
 
         ```python
-        from pydocker import docker
+        from pywhales import docker
         disk_free_result = docker.system.disk_free()
         print(disk_free_result.images.active)  #int
         print(disk_free_result.containers.reclaimable)  # int, number of bytes
@@ -83,7 +83,7 @@ class SystemCLI(DockerCLICaller):
         For example
 
         ```python
-        from pydocker import docker
+        from pywhales import docker
         from datetime import datetime, timedelta
 
 
@@ -145,12 +145,12 @@ class SystemCLI(DockerCLICaller):
         """Returns diverse information about the Docker client and daemon.
 
         # Returns
-            A `pydocker.SystemInfo` object
+            A `pywhales.SystemInfo` object
 
         As an example
 
         ```python
-        from pydocker import docker
+        from pywhales import docker
 
         info = docker.system.info()
         print(info.images)

@@ -6,10 +6,10 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import override
 
-import pydocker.components.service.cli_wrapper
-import pydocker.components.task.cli_wrapper
-from pydocker.client_config import ClientConfig, Command, DockerCLICaller
-from pydocker.utils import ValidPath, read_env_files, run, to_list
+import pywhales.components.service.cli_wrapper
+import pywhales.components.task.cli_wrapper
+from pywhales.client_config import ClientConfig, Command, DockerCLICaller
+from pywhales.utils import ValidPath, read_env_files, run, to_list
 
 
 class Stack:
@@ -30,15 +30,15 @@ class Stack:
 
     @override
     def __repr__(self) -> str:
-        return f"pydocker.Stack(name='{self.name}')"
+        return f"pywhales.Stack(name='{self.name}')"
 
     def remove(self) -> None:
         StackCLI(self.client_config).remove(self)
 
-    def ps(self) -> list[pydocker.components.task.cli_wrapper.Task]:
+    def ps(self) -> list[pywhales.components.task.cli_wrapper.Task]:
         return StackCLI(self.client_config).ps(self)
 
-    def services(self) -> list[pydocker.components.service.cli_wrapper.Service]:
+    def services(self) -> list[pywhales.components.service.cli_wrapper.Service]:
         return StackCLI(self.client_config).services(self)
 
 
@@ -81,7 +81,7 @@ class StackCLI(DockerCLICaller):
                 environment variables for this.
 
         # Returns
-            A `pydocker.Stack` object.
+            A `pywhales.Stack` object.
         """
         full_cmd = Command([*self.docker_cmd, "stack", "deploy"])
 
@@ -99,10 +99,10 @@ class StackCLI(DockerCLICaller):
         return Stack(self.client_config, name)
 
     def list(self) -> builtins.list[Stack]:
-        """Returns a list of `pydocker.Stack`
+        """Returns a list of `pywhales.Stack`
 
         # Returns
-            A `List[pydocker.Stack]`.
+            A `List[pywhales.Stack]`.
         """
         full_cmd = Command([*self.docker_cmd, "stack", "ls", "--format", "{{.Name}}"])
         stacks_names = run(full_cmd).splitlines()
@@ -110,11 +110,11 @@ class StackCLI(DockerCLICaller):
 
     def ps(
         self, x: ValidStack
-    ) -> builtins.list[pydocker.components.task.cli_wrapper.Task]:
+    ) -> builtins.list[pywhales.components.task.cli_wrapper.Task]:
         """Returns the list of swarm tasks in this stack.
 
         ```python
-        from pydocker import docker
+        from pywhales import docker
 
         tasks = docker.stack.ps("my-stack")
         print(tasks[0].desired_state)
@@ -122,10 +122,10 @@ class StackCLI(DockerCLICaller):
         ```
 
         Parameters:
-            x: A stack . It can be name or a `pydocker.Stack` object.
+            x: A stack . It can be name or a `pywhales.Stack` object.
 
         # Returns
-            `List[pydocker.Task]`
+            `List[pywhales.Task]`
         """
         full_cmd = Command(
             [*self.docker_cmd, "stack", "ps", "--quiet", "--no-trunc", x]
@@ -133,7 +133,7 @@ class StackCLI(DockerCLICaller):
 
         ids = run(full_cmd).splitlines()
         return [
-            pydocker.components.task.cli_wrapper.Task(
+            pywhales.components.task.cli_wrapper.Task(
                 self.client_config, id_, is_immutable_id=True
             )
             for id_ in ids
@@ -153,18 +153,18 @@ class StackCLI(DockerCLICaller):
 
     def services(
         self, stack: ValidStack
-    ) -> builtins.list[pydocker.components.service.cli_wrapper.Service]:
+    ) -> builtins.list[pywhales.components.service.cli_wrapper.Service]:
         """List the services present in the stack.
 
         Parameters:
             stack: A docker stack or the name of a stack.
 
         # Returns
-            A `List[pydocker.Stack]`
+            A `List[pywhales.Stack]`
         """
         full_cmd = Command([*self.docker_cmd, "stack", "services", "--quiet", stack])
         ids = run(full_cmd).splitlines()
         return [
-            pydocker.components.service.cli_wrapper.Service(self.client_config, id_)
+            pywhales.components.service.cli_wrapper.Service(self.client_config, id_)
             for id_ in ids
         ]

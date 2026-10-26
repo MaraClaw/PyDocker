@@ -6,8 +6,8 @@ import pytest
 from pytest_mock import MockerFixture
 
 from docs import docs_utils
-from pydocker.components.system.models import SystemInfo
-from pydocker.exceptions import DockerException
+from pywhales.components.system.models import SystemInfo
+from pywhales.exceptions import DockerException
 
 DEMOS: Final[dict[str, Callable[[], str]]] = {
     "networks": docs_utils.generate_code_demo_networks,
@@ -177,5 +177,5 @@ def test_live_network_and_config_use_fresh_names_when_host_has_named_resources(
 
     assert daemon.network.create.call_args.args[0] != "my-network"
     assert daemon.config.create.call_args.args[0] != "my_config"
-    assert daemon.volume.create.call_args.args[0].startswith("pydocker-docs-")
-    assert daemon.buildx.create.call_args.kwargs["name"].startswith("pydocker-docs-")
+    assert daemon.volume.create.call_args.args[0].startswith("pywhales-docs-")
+    assert daemon.buildx.create.call_args.kwargs["name"].startswith("pywhales-docs-")

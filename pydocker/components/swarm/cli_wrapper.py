@@ -1,7 +1,7 @@
 from datetime import timedelta
 
-from pydocker.client_config import Command, DockerCLICaller
-from pydocker.utils import ValidPath, run
+from pywhales.client_config import Command, DockerCLICaller
+from pywhales.utils import ValidPath, run
 
 
 class SwarmCLI(DockerCLICaller):
@@ -62,7 +62,7 @@ class SwarmCLI(DockerCLICaller):
         A example of how to initialize the whole swarm without leaving the manager
         if the manager has ssh access to the workers:
         ```python
-        from pydocker import docker, DockerClient
+        from pywhales import docker, DockerClient
 
         worker_docker = DockerClient(host="ssh://worker_linux_user@worker_hostname")
         # Here the docker variable is connected to the local daemon

@@ -4,11 +4,11 @@ from typing import get_type_hints
 
 import pytest
 
-import pydocker.components.container.cli_wrapper as container_cli
-from pydocker import DockerClient
-from pydocker.client_config import ClientConfig
-from pydocker.components.container.cli_wrapper import Container, ContainerPath
-from pydocker.utils import ValidPath
+import pywhales.components.container.cli_wrapper as container_cli
+from pywhales import DockerClient
+from pywhales.client_config import ClientConfig
+from pywhales.components.container.cli_wrapper import Container, ContainerPath
+from pywhales.utils import ValidPath
 
 
 @pytest.mark.parametrize("parameter", ["source", "destination"])

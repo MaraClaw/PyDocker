@@ -8,18 +8,18 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Self, overload, override
 
-from pydocker.client_config import (
+from pywhales.client_config import (
     ClientConfig,
     Command,
     DockerCLICaller,
     ReloadableObjectFromJson,
 )
-from pydocker.components.context.models import (
+from pywhales.components.context.models import (
     ContextEndpoint,
     ContextInspectResult,
     ContextStorage,
 )
-from pydocker.utils import run, to_list
+from pywhales.utils import run, to_list
 
 
 class Context(ReloadableObjectFromJson[ContextInspectResult, str | None]):
@@ -96,7 +96,7 @@ class Context(ReloadableObjectFromJson[ContextInspectResult, str | None]):
 
     @override
     def __repr__(self) -> str:
-        return f"pydocker.Context(name='{self.name}', endpoints={self.endpoints})"
+        return f"pywhales.Context(name='{self.name}', endpoints={self.endpoints})"
 
 
 ValidContext = Context | str
@@ -165,10 +165,10 @@ class ContextCLI(DockerCLICaller):
             default_stack_orchestrator: Default orchestrator for stack operations to use with this context (swarm|kubernetes|all)
             description: Description of the context
             docker: Set the docker endpoint, you can use a dict of a class to
-                specify the options. The class is `pydocker.DockerContextConfig`.
+                specify the options. The class is `pywhales.DockerContextConfig`.
             from_: Create context from a named context
             kubernetes: Set the kubernetes endpoint. You can use a dict or a class to specify the options. The class
-                is `pydocker.KubernetesContextConfig`.
+                is `pywhales.KubernetesContextConfig`.
         """
         if isinstance(docker, dict):
             docker = DockerContextConfig(**docker)
@@ -210,7 +210,7 @@ class ContextCLI(DockerCLICaller):
         """List all Docker contexts available
 
         # Returns
-            `List[pydocker.Context]`
+            `List[pywhales.Context]`
         """
 
         full_cmd = Command([*self.docker_cmd, "context", "list", "--quiet"])

@@ -9,11 +9,11 @@ from unittest.mock import patch
 import pytest
 from pydantic import ValidationError
 
-from pydocker import DockerClient
-from pydocker.components.system.models import DockerEvent, SystemInfo
-from pydocker.exceptions import DockerException, NoSuchContainer
-from pydocker.test_utils import get_all_jsons, random_name
-from pydocker.utils import stream_stdout_and_stderr
+from pywhales import DockerClient
+from pywhales.components.system.models import DockerEvent, SystemInfo
+from pywhales.exceptions import DockerException, NoSuchContainer
+from pywhales.test_utils import get_all_jsons, random_name
+from pywhales.utils import stream_stdout_and_stderr
 
 
 def test_disk_free(ctr_client: DockerClient) -> None:
@@ -189,7 +189,7 @@ def test_owned_system_events_cancel_idle_child(consume: bool) -> None:
             pipe_stdin=True,
         ) as raw,
         patch(
-            "pydocker.components.system.cli_wrapper.stream_stdout_and_stderr",
+            "pywhales.components.system.cli_wrapper.stream_stdout_and_stderr",
             return_value=raw,
         ) as start,
     ):
@@ -227,7 +227,7 @@ def test_owned_system_events_release_child_on_parse_error(payload: str) -> None:
             pipe_stdin=True,
         ) as raw,
         patch(
-            "pydocker.components.system.cli_wrapper.stream_stdout_and_stderr",
+            "pywhales.components.system.cli_wrapper.stream_stdout_and_stderr",
             return_value=raw,
         ),
     ):
@@ -247,7 +247,7 @@ def test_owned_system_events_preserve_body_error() -> None:
             [sys.executable, "-c", "input()"], pipe_stdin=True
         ) as raw,
         patch(
-            "pydocker.components.system.cli_wrapper.stream_stdout_and_stderr",
+            "pywhales.components.system.cli_wrapper.stream_stdout_and_stderr",
             return_value=raw,
         ),
     ):
@@ -274,7 +274,7 @@ def test_owned_system_events_preserve_eof_and_failure(exit_code: int) -> None:
             ]
         ) as raw,
         patch(
-            "pydocker.components.system.cli_wrapper.stream_stdout_and_stderr",
+            "pywhales.components.system.cli_wrapper.stream_stdout_and_stderr",
             return_value=raw,
         ),
     ):

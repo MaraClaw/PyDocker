@@ -5,9 +5,9 @@ from pathlib import Path
 from typing import Protocol, override
 from uuid import uuid4
 
-from pydocker import Builder, Container, Image, Volume, docker
-from pydocker.exceptions import NoSuchImage
-from pydocker.utils import run
+from pywhales import Builder, Container, Image, Volume, docker
+from pywhales.exceptions import NoSuchImage
+from pywhales.utils import run
 
 
 class DisplayValue(Protocol):
@@ -36,7 +36,7 @@ def _created_example[Resource](
     inventory: Callable[[], Mapping[str, Resource]],
     release: Callable[[Resource], None],
 ) -> Generator[Resource]:
-    name = f"pydocker-docs-{uuid4().hex}"
+    name = f"pywhales-docs-{uuid4().hex}"
     borrowed = inventory().get(name)
     if borrowed is not None:
         yield borrowed
@@ -93,7 +93,7 @@ def generate_code_demo_networks() -> str:
 
     with (
         _example_image("ubuntu"),
-        docker.network.create(f"pydocker-docs-{uuid4().hex}") as network,
+        docker.network.create(f"pywhales-docs-{uuid4().hex}") as network,
         _created_example(
             lambda name: docker.run(
                 "ubuntu",
@@ -239,7 +239,7 @@ def generate_code_demo_configs() -> str:
         config_file = Path(tmp_dir) / "file.conf"
         config_file.write_text("Hello world!")
         config = docker.config.create(
-            f"pydocker-docs-{uuid4().hex}", config_file, labels={"hello": "world"}
+            f"pywhales-docs-{uuid4().hex}", config_file, labels={"hello": "world"}
         )
         cleanup.callback(config.remove)
         print(config.id)
@@ -596,8 +596,8 @@ def generate_code_demo_containers() -> str:
 
 def add_links(text: str) -> str:
     text = text.replace(
-        "`pydocker.Container`",
-        "[`pydocker.Container`](/objects/containers/)",
+        "`pywhales.Container`",
+        "[`pywhales.Container`](/objects/containers/)",
     )
 
     return text

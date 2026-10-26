@@ -1,6 +1,6 @@
 from typing import NoReturn
 
-from pydocker.client_config import ClientConfig, DockerCLICaller
+from pywhales.client_config import ClientConfig, DockerCLICaller
 
 
 class TrustCLI(DockerCLICaller):

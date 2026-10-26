@@ -17,20 +17,20 @@ from typing import (
     override,
 )
 
-import pydocker.components.buildx.cli_wrapper
-import pydocker.components.container.cli_wrapper
-import pydocker.components.image.cli_wrapper
-from pydocker.client_config import (
+import pywhales.components.buildx.cli_wrapper
+import pywhales.components.container.cli_wrapper
+import pywhales.components.image.cli_wrapper
+from pywhales.client_config import (
     ClientConfig,
     Command,
     DockerCLICaller,
     ParsingError,
     ReloadableObjectFromJson,
 )
-from pydocker.components.volume.models import VolumeInspectResult
-from pydocker.exceptions import NoSuchVolume
-from pydocker.test_utils import random_name
-from pydocker.utils import ValidPath, run, to_list
+from pywhales.components.volume.models import VolumeInspectResult
+from pywhales.exceptions import NoSuchVolume
+from pywhales.test_utils import random_name
+from pywhales.utils import ValidPath, run, to_list
 
 type VolumeListFilter = (
     tuple[Literal["driver"], str]
@@ -114,7 +114,7 @@ class Volume(ReloadableObjectFromJson[VolumeInspectResult]):
 
     @override
     def __repr__(self) -> str:
-        return f"pydocker.Volume(name='{self.name}', driver={self.driver})"
+        return f"pywhales.Volume(name='{self.name}', driver={self.driver})"
 
     def remove(self) -> None:
         """Removes this volume"""
@@ -210,7 +210,7 @@ class VolumeCLI(DockerCLICaller):
         """Returns `True` if the volume exists. `False` otherwise.
 
          It's just calling `docker.volume.inspect(...)` and verifies that it doesn't throw
-         a `pydocker.exceptions.NoSuchVolume`.
+         a `pywhales.exceptions.NoSuchVolume`.
 
         # Returns
             A `bool`
@@ -233,7 +233,7 @@ class VolumeCLI(DockerCLICaller):
                 An example `filters=[("dangling", "true"), ("driver", "local")]`.
 
         # Returns
-            `List[pydocker.Volume]`
+            `List[pywhales.Volume]`
         """
         filter_items = filters.items() if isinstance(filters, Mapping) else filters
         if isinstance(filters, Mapping):
@@ -315,7 +315,7 @@ class VolumeCLI(DockerCLICaller):
             options: Set driver specific options
 
         # Returns
-            A `pydocker.Volume`, the new volume.
+            A `pywhales.Volume`, the new volume.
         """
         new_volume = self.create(new_volume_name, driver, labels, options)
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -333,7 +333,7 @@ class VolumeCLI(DockerCLICaller):
         Parameters:
             source: If `source` is a directory/file inside a Docker volume,
                 a tuple `(my_volume, path_in_volume)` must be provided. The volume
-                can be a `pydocker.Volume` or a volume name as `str`. The path
+                can be a `pywhales.Volume` or a volume name as `str`. The path
                 can be a `pathlib.Path` or a `str`. If `source` is  a local directory,
                 a `pathlib.Path` or `str` should be provided. End the source path with
                 `/.` if you want to copy the directory content in another directory.
@@ -343,16 +343,16 @@ class VolumeCLI(DockerCLICaller):
             temp_dir = Path(temp_dir)
             content = "FROM scratch\nCOPY Dockerfile /\nCMD /Dockerfile"
             (temp_dir / "Dockerfile").write_text(content)
-            buildx = pydocker.components.buildx.cli_wrapper.BuildxCLI(
+            buildx = pywhales.components.buildx.cli_wrapper.BuildxCLI(
                 self.client_config
             )
             image_name = random_name()
             dummy_image = buildx.build(
                 temp_dir, tags=image_name, progress=False, load=True
             )
-            assert isinstance(dummy_image, pydocker.components.image.cli_wrapper.Image)
+            assert isinstance(dummy_image, pywhales.components.image.cli_wrapper.Image)
 
-        container = pydocker.components.container.cli_wrapper.ContainerCLI(
+        container = pywhales.components.container.cli_wrapper.ContainerCLI(
             self.client_config
         )
         volume_in_container = Path("/volume")
@@ -383,7 +383,7 @@ class VolumeCLI(DockerCLICaller):
         else:
             raise ValueError("source or destination should be a tuple.")
         dummy_container.remove()
-        pydocker.components.image.cli_wrapper.ImageCLI(self.client_config).remove(
+        pywhales.components.image.cli_wrapper.ImageCLI(self.client_config).remove(
             image_name
         )
 

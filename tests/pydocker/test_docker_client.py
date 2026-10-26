@@ -6,13 +6,13 @@ from unittest.mock import Mock, call, patch
 
 import pytest
 
-from pydocker import DockerClient, Image
-from pydocker.components.top import ContainerTopResult
-from pydocker.exceptions import DockerException
+from pywhales import DockerClient, Image
+from pywhales.components.top import ContainerTopResult
+from pywhales.exceptions import DockerException
 
 
 @patch(
-    "pydocker.components.container.cli_wrapper.run", return_value="PID CMD\n1 sleep 60"
+    "pywhales.components.container.cli_wrapper.run", return_value="PID CMD\n1 sleep 60"
 )
 def test_top_dispatches_process_listing_when_root_alias_is_used(run_mock: Mock) -> None:
     client = DockerClient(client_call=[sys.executable, "engine"], context="remote")
@@ -34,7 +34,7 @@ def test_top_dispatches_process_listing_when_root_alias_is_used(run_mock: Mock) 
     )
 
 
-@patch("pydocker.components.container.cli_wrapper.run", return_value="")
+@patch("pywhales.components.container.cli_wrapper.run", return_value="")
 def test_stop_dispatch_is_unchanged_when_root_and_component_are_used(
     run_mock: Mock,
 ) -> None:

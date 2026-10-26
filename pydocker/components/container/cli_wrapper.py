@@ -21,17 +21,17 @@ from typing import (
 import pydantic
 from typing_extensions import TypedDict
 
-import pydocker.components.image.cli_wrapper
-import pydocker.components.network.cli_wrapper
-import pydocker.components.volume.cli_wrapper
-from pydocker.client_config import (
+import pywhales.components.image.cli_wrapper
+import pywhales.components.network.cli_wrapper
+import pywhales.components.volume.cli_wrapper
+from pywhales.client_config import (
     ClientConfig,
     Command,
     DockerCLICaller,
     ParsingError,
     ReloadableObjectFromJson,
 )
-from pydocker.components.container.models import (
+from pywhales.components.container.models import (
     ContainerConfig,
     ContainerGraphDriver,
     ContainerHostConfig,
@@ -40,10 +40,10 @@ from pydocker.components.container.models import (
     Mount,
     NetworkSettings,
 )
-from pydocker.components.container.top import docker_top_fields
-from pydocker.components.top import ContainerTopResult, parse_table
-from pydocker.exceptions import NoSuchContainer
-from pydocker.utils import (
+from pywhales.components.container.top import docker_top_fields
+from pywhales.components.top import ContainerTopResult, parse_table
+from pywhales.exceptions import NoSuchContainer
+from pywhales.utils import (
     ProcessStream,
     ValidPath,
     ValidPortMapping,
@@ -247,7 +247,7 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
 
     @override
     def __repr__(self) -> str:
-        return f"pydocker.Container(id='{self.id[:12]}', name='{self.name}')"
+        return f"pywhales.Container(id='{self.id[:12]}', name='{self.name}')"
 
     # --------------------------------------------------------------------
     # public methods
@@ -273,7 +273,7 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         author: str | None = None,
         message: str | None = None,
         pause: bool = True,
-    ) -> pydocker.components.image.cli_wrapper.Image:
+    ) -> pywhales.components.image.cli_wrapper.Image:
         """Create a new image from the container's changes.
 
         Alias: `docker.commit(...)`
@@ -596,7 +596,7 @@ class RunArgs(TypedDict, total=False, closed=True):
     memory_swappiness: int | None
     mounts: Iterable[list[str]]
     name: str | None
-    networks: Iterable[pydocker.components.network.cli_wrapper.ValidNetwork]
+    networks: Iterable[pywhales.components.network.cli_wrapper.ValidNetwork]
     network_aliases: Iterable[str]
     oom_kill: bool
     oom_score_adj: int | None
@@ -625,7 +625,7 @@ class RunArgs(TypedDict, total=False, closed=True):
     user: str | None
     userns: str | None
     uts: str | None
-    volumes: Iterable[pydocker.components.volume.cli_wrapper.VolumeDefinition]
+    volumes: Iterable[pywhales.components.volume.cli_wrapper.VolumeDefinition]
     volume_driver: str | None
     volumes_from: Iterable[ValidContainer]
     workdir: ValidPath | None
@@ -650,7 +650,7 @@ class ContainerCLI(DockerCLICaller):
             sig_proxy: Proxy all received signals to the process (default true)
 
         # Raises
-            `pydocker.exceptions.NoSuchContainer` if the container does not exists.
+            `pywhales.exceptions.NoSuchContainer` if the container does not exists.
         """
         self.inspect(container)
 
@@ -669,7 +669,7 @@ class ContainerCLI(DockerCLICaller):
         author: str | None = None,
         message: str | None = None,
         pause: bool = True,
-    ) -> pydocker.components.image.cli_wrapper.Image:
+    ) -> pywhales.components.image.cli_wrapper.Image:
         """Create a new image from a container's changes
 
         Parameters:
@@ -691,7 +691,7 @@ class ContainerCLI(DockerCLICaller):
         if tag is not None:
             full_cmd.append(tag)
 
-        return pydocker.components.image.cli_wrapper.Image(
+        return pywhales.components.image.cli_wrapper.Image(
             self.client_config, run(full_cmd), is_immutable_id=True
         )
 
@@ -705,7 +705,7 @@ class ContainerCLI(DockerCLICaller):
         Alias: `docker.copy(...)`
 
         ```python
-        from pydocker import docker
+        from pywhales import docker
 
         docker.run("ubuntu", ["sleep", "infinity"], name="dodo", remove=True, detach=True)
 
@@ -739,7 +739,7 @@ class ContainerCLI(DockerCLICaller):
 
     def create(
         self,
-        image: pydocker.components.image.cli_wrapper.ValidImage,
+        image: pywhales.components.image.cli_wrapper.ValidImage,
         command: Sequence[str] = (),
         *,
         add_hosts: Iterable[tuple[str, str]] = (),
@@ -803,7 +803,7 @@ class ContainerCLI(DockerCLICaller):
         memory_swappiness: int | None = None,
         mounts: Iterable[Iterable[str]] = (),
         name: str | None = None,
-        networks: Iterable[pydocker.components.network.cli_wrapper.ValidNetwork] = (),
+        networks: Iterable[pywhales.components.network.cli_wrapper.ValidNetwork] = (),
         network_aliases: Iterable[str] = (),
         oom_kill: bool = True,
         oom_score_adj: int | None = None,
@@ -831,7 +831,7 @@ class ContainerCLI(DockerCLICaller):
         user: str | None = None,
         userns: str | None = None,
         uts: str | None = None,
-        volumes: Iterable[pydocker.components.volume.cli_wrapper.VolumeDefinition] = (),
+        volumes: Iterable[pywhales.components.volume.cli_wrapper.VolumeDefinition] = (),
         volume_driver: str | None = None,
         volumes_from: Iterable[ValidContainer] = (),
         workdir: ValidPath | None = None,
@@ -863,7 +863,7 @@ class ContainerCLI(DockerCLICaller):
             )
             raise TypeError(error_message)
 
-        image_cli = pydocker.components.image.cli_wrapper.ImageCLI(self.client_config)
+        image_cli = pywhales.components.image.cli_wrapper.ImageCLI(self.client_config)
         if pull == "missing":
             image_cli._pull_if_necessary(image)
         elif pull == "always":
@@ -1130,7 +1130,7 @@ class ContainerCLI(DockerCLICaller):
             Optional[str]
 
         # Raises
-            `pydocker.exceptions.NoSuchContainer` if the container does not exists.
+            `pywhales.exceptions.NoSuchContainer` if the container does not exists.
         """
         if isinstance(command, str):
             container_name = container if isinstance(container, str) else container.name
@@ -1189,7 +1189,7 @@ class ContainerCLI(DockerCLICaller):
         """Returns `True` if the container exists. `False` otherwise.
 
          It's just calling `docker.container.inspect(...)` and verifies that it doesn't throw
-         a `pydocker.exceptions.NoSuchContainer`.
+         a `pywhales.exceptions.NoSuchContainer`.
 
         # Returns
             A `bool`
@@ -1212,7 +1212,7 @@ class ContainerCLI(DockerCLICaller):
                 is not yet implemented.
 
         # Raises
-            `pydocker.exceptions.NoSuchContainer` if the container does not exists.
+            `pywhales.exceptions.NoSuchContainer` if the container does not exists.
         """
         full_cmd = Command([*self.docker_cmd, "container", "export"])
         full_cmd.add_simple_arg("--output", output)
@@ -1241,11 +1241,11 @@ class ContainerCLI(DockerCLICaller):
                 and/or IDs
 
         Returns:
-            A `pydocker.Container` object or a list of those
+            A `pywhales.Container` object or a list of those
             if a list of IDs was passed as input.
 
         # Raises
-            `pydocker.exceptions.NoSuchContainer` if the container does not exists.
+            `pywhales.exceptions.NoSuchContainer` if the container does not exists.
         """
 
         if isinstance(x, str | Container):
@@ -1288,7 +1288,7 @@ class ContainerCLI(DockerCLICaller):
             signal: The signal to send the container
 
         # Raises
-            `pydocker.exceptions.NoSuchContainer` if any of the
+            `pywhales.exceptions.NoSuchContainer` if any of the
             containers do not exist.
 
         """
@@ -1385,7 +1385,7 @@ class ContainerCLI(DockerCLICaller):
                 This function will then return an iterator that will yield a
                 tuple `(source, content)` with `source` being `"stderr"` or
                 `"stdout"`. `content` is the content of the line as bytes.
-                Take a look at [the user guide](https://github.com/MaraClaw/PyDocker/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output)
+                Take a look at [the user guide](https://github.com/MaraClaw/PyWhales/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output)
                 to have an example of the output.
 
         # Returns
@@ -1393,7 +1393,7 @@ class ContainerCLI(DockerCLICaller):
             if `stream=True`.
 
         # Raises
-            `pydocker.exceptions.NoSuchContainer` if the container does not exist.
+            `pywhales.exceptions.NoSuchContainer` if the container does not exist.
 
         If you are a bit confused about `follow` and `stream`, here are some use cases.
 
@@ -1437,7 +1437,7 @@ class ContainerCLI(DockerCLICaller):
             filters: Filters to apply when listing containers.
 
         # Returns
-            A `List[pydocker.Container]`
+            A `List[pywhales.Container]`
         """
         filter_items = filters.items() if isinstance(filters, Mapping) else filters
         if isinstance(filters, Mapping):
@@ -1469,7 +1469,7 @@ class ContainerCLI(DockerCLICaller):
             containers: One or more containers to pause
 
         # Raises
-            `pydocker.exceptions.NoSuchContainer` if the container does not exists.
+            `pywhales.exceptions.NoSuchContainer` if the container does not exists.
         """
         container_list = (
             [containers]
@@ -1545,7 +1545,7 @@ class ContainerCLI(DockerCLICaller):
             new_name: The new name of the container.
 
         # Raises
-            `pydocker.exceptions.NoSuchContainer` if the container does not exist.
+            `pywhales.exceptions.NoSuchContainer` if the container does not exist.
         """
         full_cmd = Command(
             [*self.docker_cmd, "container", "rename", str(container), new_name]
@@ -1567,7 +1567,7 @@ class ContainerCLI(DockerCLICaller):
                 If `int`, the unit is seconds.
 
         # Raises
-            `pydocker.exceptions.NoSuchContainer` if the container does not exists.
+            `pywhales.exceptions.NoSuchContainer` if the container does not exists.
         """
         container_list = (
             [containers]
@@ -1604,7 +1604,7 @@ class ContainerCLI(DockerCLICaller):
             volumes: Remove anonymous volumes associated with the container
 
         # Raises
-            `pydocker.exceptions.NoSuchContainer` if the container does not exists.
+            `pywhales.exceptions.NoSuchContainer` if the container does not exists.
         """
         container_list = (
             [containers]
@@ -1625,7 +1625,7 @@ class ContainerCLI(DockerCLICaller):
     @overload
     def run(
         self,
-        image: pydocker.components.image.cli_wrapper.ValidImage,
+        image: pywhales.components.image.cli_wrapper.ValidImage,
         command: Sequence[str] = ...,
         *,
         detach: Literal[True],
@@ -1636,7 +1636,7 @@ class ContainerCLI(DockerCLICaller):
     @overload
     def run(
         self,
-        image: pydocker.components.image.cli_wrapper.ValidImage,
+        image: pywhales.components.image.cli_wrapper.ValidImage,
         command: Sequence[str] = ...,
         *,
         detach: Literal[False] = ...,
@@ -1647,7 +1647,7 @@ class ContainerCLI(DockerCLICaller):
     @overload
     def run(
         self,
-        image: pydocker.components.image.cli_wrapper.ValidImage,
+        image: pywhales.components.image.cli_wrapper.ValidImage,
         command: Sequence[str] = ...,
         *,
         detach: Literal[False] = ...,
@@ -1658,7 +1658,7 @@ class ContainerCLI(DockerCLICaller):
     @overload
     def run(
         self,
-        image: pydocker.components.image.cli_wrapper.ValidImage,
+        image: pywhales.components.image.cli_wrapper.ValidImage,
         command: Sequence[str] = (),
         *,
         detach: bool = False,
@@ -1668,7 +1668,7 @@ class ContainerCLI(DockerCLICaller):
 
     def run(
         self,
-        image: pydocker.components.image.cli_wrapper.ValidImage,
+        image: pywhales.components.image.cli_wrapper.ValidImage,
         command: Sequence[str] = (),
         *,
         add_hosts: Iterable[tuple[str, str]] = (),
@@ -1732,7 +1732,7 @@ class ContainerCLI(DockerCLICaller):
         memory_swappiness: int | None = None,
         mounts: Iterable[builtins.list[str]] = (),
         name: str | None = None,
-        networks: Iterable[pydocker.components.network.cli_wrapper.ValidNetwork] = (),
+        networks: Iterable[pywhales.components.network.cli_wrapper.ValidNetwork] = (),
         network_aliases: Iterable[str] = (),
         oom_kill: bool = True,
         oom_score_adj: int | None = None,
@@ -1762,7 +1762,7 @@ class ContainerCLI(DockerCLICaller):
         user: str | None = None,
         userns: str | None = None,
         uts: str | None = None,
-        volumes: Iterable[pydocker.components.volume.cli_wrapper.VolumeDefinition] = (),
+        volumes: Iterable[pywhales.components.volume.cli_wrapper.VolumeDefinition] = (),
         volume_driver: str | None = None,
         volumes_from: Iterable[ValidContainer] = (),
         workdir: ValidPath | None = None,
@@ -1779,7 +1779,7 @@ class ContainerCLI(DockerCLICaller):
         the [`docker.run()` guide](../user_guide/docker_run.md).
 
         ```python
-        >>> from pydocker import docker
+        >>> from pywhales import docker
         >>> returned_string = docker.run("hello-world")
         >>> print(returned_string)
 
@@ -1806,7 +1806,7 @@ class ContainerCLI(DockerCLICaller):
         ```
 
         ```python
-        >>> from pydocker import docker
+        >>> from pywhales import docker
         >>> result_string = docker.run("ubuntu", ["ls", "/host"], volumes=[("/", "/host", "ro")])
         >>> print(result_string)
         bin
@@ -1856,7 +1856,7 @@ class ContainerCLI(DockerCLICaller):
                 memory-node indices or a cpuset string (same format as
                 `cpuset_cpus`).
             detach: If `False`, returns the ouput of the container as a string.
-                If `True`, returns a `pydocker.Container` object.
+                If `True`, returns a `pywhales.Container` object.
             dns_search: Set custom DNS search domains
             domainname: Container NIS domain name
             entrypoint: Overwrite the default ENTRYPOINT of the image
@@ -1927,7 +1927,7 @@ class ContainerCLI(DockerCLICaller):
 
         # Returns
             The container output as a string if detach is `False` (the default),
-            and a `pydocker.Container` if detach is `True`.
+            and a `pywhales.Container` if detach is `True`.
         """
         if isinstance(command, str):
             error_message = textwrap.dedent(
@@ -1941,7 +1941,7 @@ class ContainerCLI(DockerCLICaller):
             )
             raise TypeError(error_message)
 
-        image_cli = pydocker.components.image.cli_wrapper.ImageCLI(self.client_config)
+        image_cli = pywhales.components.image.cli_wrapper.ImageCLI(self.client_config)
         if pull == "missing":
             image_cli._pull_if_necessary(image)
         elif pull == "always":
@@ -2160,7 +2160,7 @@ class ContainerCLI(DockerCLICaller):
         """Starts one or more created/stopped containers.
 
         Aliases: `docker.start`, `docker.container.start`,
-        `pydocker.Container.start`.
+        `pywhales.Container.start`.
 
         Parameters:
             containers: One or a list of containers.
@@ -2208,11 +2208,11 @@ class ContainerCLI(DockerCLICaller):
 
         Usage:
         ```python
-        from pydocker import docker
+        from pywhales import docker
 
         docker.run("redis", detach=True)
         print(docker.stats())
-        # [<<class 'pydocker.components.container.ContainerStats'> object,
+        # [<<class 'pywhales.components.container.ContainerStats'> object,
         # attributes are block_read=0, block_write=0, cpu_percentage=0.08,
         # container=e90ae41a5b17,
         # container_id=e90ae41a5b17df998584141692f1e361c485e8d00c37ee21fdc360d3523dd1c1,
@@ -2227,7 +2227,7 @@ class ContainerCLI(DockerCLICaller):
             containers: One or a list of containers.
 
         # Returns
-            A `List[pydocker.ContainerStats]`.
+            A `List[pywhales.ContainerStats]`.
         """
         containers_list = to_list(containers) if containers else []
         if len(containers_list) == 0 and containers is not None and not all:
@@ -2261,14 +2261,14 @@ class ContainerCLI(DockerCLICaller):
         Alias: `docker.stop(...)`
 
         Aliases: `docker.stop`, `docker.container.stop`,
-        `pydocker.Container.stop`.
+        `pywhales.Container.stop`.
 
         Parameters:
             containers: One or a list of containers.
             time: Seconds to wait for stop before killing a container (default 10)
 
         # Raises
-            `pydocker.exceptions.NoSuchContainer` if any of the
+            `pywhales.exceptions.NoSuchContainer` if any of the
             containers do not exist.
         """
         container_list = (
@@ -2349,10 +2349,10 @@ class ContainerCLI(DockerCLICaller):
         Alias: `docker.unpause(...)`
 
         Parameters:
-            x: One or more containers (name, id or `pydocker.Container` object).
+            x: One or more containers (name, id or `pywhales.Container` object).
 
         # Raises
-            `pydocker.exceptions.NoSuchContainer` if any of the
+            `pywhales.exceptions.NoSuchContainer` if any of the
             containers do not exist.
         """
         containers = [x] if isinstance(x, str | Container) else list(x)
@@ -2413,7 +2413,7 @@ class ContainerCLI(DockerCLICaller):
             restart: Restart policy to apply when a container exits (default "no")
 
         # Raises
-            `pydocker.exceptions.NoSuchContainer` if the container does not exists.
+            `pywhales.exceptions.NoSuchContainer` if the container does not exists.
         """
         containers = [x] if isinstance(x, str | Container) else list(x)
         if containers == []:
@@ -2483,7 +2483,7 @@ class ContainerCLI(DockerCLICaller):
         ```
 
         # Raises
-            `pydocker.exceptions.NoSuchContainer` if the container does not exists.
+            `pywhales.exceptions.NoSuchContainer` if the container does not exists.
         """
         containers = to_list(x)
         if len(containers) == 0:

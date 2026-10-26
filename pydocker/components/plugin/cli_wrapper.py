@@ -6,18 +6,18 @@ from collections.abc import Mapping, Sequence
 from types import MappingProxyType, TracebackType
 from typing import Any, Self, overload, override
 
-from pydocker.client_config import (
+from pywhales.client_config import (
     ClientConfig,
     Command,
     DockerCLICaller,
     ReloadableObjectFromJson,
 )
-from pydocker.components.plugin.models import (
+from pywhales.components.plugin.models import (
     PluginConfig,
     PluginInspectResult,
     PluginSettings,
 )
-from pydocker.utils import ValidPath, run, to_list
+from pywhales.utils import ValidPath, run, to_list
 
 
 class Plugin(ReloadableObjectFromJson[PluginInspectResult]):
@@ -83,7 +83,7 @@ class Plugin(ReloadableObjectFromJson[PluginInspectResult]):
 
     @override
     def __repr__(self) -> str:
-        return f"pydocker.Plugin(id='{self.id[:12]}', name='{self.name}')"
+        return f"pywhales.Plugin(id='{self.id[:12]}', name='{self.name}')"
 
     def disable(self, force: bool = False) -> None:
         """Disable this plugin"""
@@ -168,14 +168,14 @@ class PluginCLI(DockerCLICaller):
     def inspect(self, x: builtins.list[str]) -> builtins.list[Plugin]: ...
 
     def inspect(self, x: str | builtins.list[str]) -> Plugin | builtins.list[Plugin]:
-        """Returns a `pydocker.Plugin` object from a string
+        """Returns a `pywhales.Plugin` object from a string
         (name or id of the plugin)
 
         Parameters:
             x: One id or hostname or a list of name or ids
 
         # Returns
-            One or a list of `pydocker.Plugin`
+            One or a list of `pywhales.Plugin`
         """
         if isinstance(x, str):
             return Plugin(self.client_config, x)
@@ -203,7 +203,7 @@ class PluginCLI(DockerCLICaller):
             disable_content_trust: Skip image verification (default `True`)
 
         # Returns
-            A `pydocker.Plugin`.
+            A `pywhales.Plugin`.
         """
         full_cmd = Command(
             [*self.docker_cmd, "plugin", "install", "--grant-all-permissions"]
@@ -221,7 +221,7 @@ class PluginCLI(DockerCLICaller):
         return Plugin(self.client_config, plugin_name)
 
     def list(self) -> builtins.list[Plugin]:
-        """Returns a `List[pydocker.Plugin` that are installed on the daemon."""
+        """Returns a `List[pywhales.Plugin` that are installed on the daemon."""
         full_cmd = Command(
             [
                 *self.docker_cmd,

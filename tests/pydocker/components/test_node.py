@@ -5,11 +5,11 @@ from unittest.mock import patch
 
 import pytest
 
-from pydocker import DockerClient, Node
-from pydocker.client_config import ParsingError
-from pydocker.components.node.models import NodeInspectResult
-from pydocker.exceptions import DockerException
-from pydocker.test_utils import get_all_jsons
+from pywhales import DockerClient, Node
+from pywhales.client_config import ParsingError
+from pywhales.components.node.models import NodeInspectResult
+from pywhales.exceptions import DockerException
+from pywhales.test_utils import get_all_jsons
 
 
 def test_batch_inspect_matches_node_hostnames_and_hydrates_cache() -> None:
@@ -31,7 +31,7 @@ def test_batch_inspect_matches_node_hostnames_and_hydrates_cache() -> None:
         patch(
             "subprocess.run", return_value=CompletedProcess([], 0, response, b"")
         ) as command,
-        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+        patch("pywhales.client_config.CACHE_VALIDITY_PERIOD", 3600),
     ):
         resources = client.node.inspect(references)
         assert [resource.id for resource in resources] == [

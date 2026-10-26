@@ -2,11 +2,11 @@ from collections import Counter
 from collections.abc import Sequence
 from typing import assert_never
 
-from pydocker.client_config import ParsingError, ReloadableObjectFromJson
-from pydocker.components.config.models import ConfigInspectResult
-from pydocker.components.node.models import NodeInspectResult
-from pydocker.components.secret.models import SecretInspectResult
-from pydocker.components.service.models import ServiceInspectResult
+from pywhales.client_config import ParsingError, ReloadableObjectFromJson
+from pywhales.components.config.models import ConfigInspectResult
+from pywhales.components.node.models import NodeInspectResult
+from pywhales.components.secret.models import SecretInspectResult
+from pywhales.components.service.models import ServiceInspectResult
 
 type SwarmInspectResult = (
     ConfigInspectResult | NodeInspectResult | SecretInspectResult | ServiceInspectResult

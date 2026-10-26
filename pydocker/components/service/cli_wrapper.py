@@ -15,24 +15,24 @@ from typing import (
     override,
 )
 
-import pydocker.components.task.cli_wrapper
-from pydocker.client_config import (
+import pywhales.components.task.cli_wrapper
+from pywhales.client_config import (
     ClientConfig,
     Command,
     DockerCLICaller,
     ReloadableObjectFromJson,
 )
-from pydocker.components._swarm_inspect import parse_swarm_inspect_results
-from pydocker.components.container.cli_wrapper import to_seconds
-from pydocker.components.service.models import (
+from pywhales.components._swarm_inspect import parse_swarm_inspect_results
+from pywhales.components.container.cli_wrapper import to_seconds
+from pywhales.components.service.models import (
     ServiceEndpoint,
     ServiceInspectResult,
     ServiceSpec,
     ServiceUpdateStatus,
     ServiceVersion,
 )
-from pydocker.exceptions import NoSuchService
-from pydocker.utils import (
+from pywhales.exceptions import NoSuchService
+from pywhales.utils import (
     ValidPath,
     format_mapping_for_cli,
     format_time_arg,
@@ -114,7 +114,7 @@ class Service(ReloadableObjectFromJson[ServiceInspectResult]):
     def update_status(self) -> ServiceUpdateStatus | None:
         return self._get_inspect_result().update_status
 
-    def ps(self) -> list[pydocker.components.task.cli_wrapper.Task]:
+    def ps(self) -> list[pywhales.components.task.cli_wrapper.Task]:
         """Returns the list of tasks of this service."""
         return ServiceCLI(self.client_config).ps(self)
 
@@ -126,7 +126,7 @@ class Service(ReloadableObjectFromJson[ServiceInspectResult]):
         if an exception occurs.
 
         ```python
-        from pydocker import docker
+        from pywhales import docker
 
         docker.swarm.init()
         with docker.service.create("ubuntu", ["sleep", "infinity"]) as my_service:
@@ -288,10 +288,10 @@ class ServiceCLI(DockerCLICaller):
     def inspect(self, x: builtins.list[str]) -> builtins.list[Service]: ...
 
     def inspect(self, x: str | builtins.list[str]) -> Service | builtins.list[Service]:
-        """Returns one or a list of `pydocker.Service` object(s).
+        """Returns one or a list of `pywhales.Service` object(s).
 
         # Raises
-            `pydocker.exceptions.NoSuchService` if one of the services
+            `pywhales.exceptions.NoSuchService` if one of the services
             doesn't exists.
         """
         references = to_list(x)
@@ -317,7 +317,7 @@ class ServiceCLI(DockerCLICaller):
         """Verify that a service exists.
 
          It's just calling `docker.service.inspect(...)` and verifies that it doesn't throw
-         a `pydocker.exceptions.NoSuchService`.
+         a `pywhales.exceptions.NoSuchService`.
 
         # Returns
             A `bool`
@@ -414,7 +414,7 @@ class ServiceCLI(DockerCLICaller):
                 This function will then returns and iterator that will yield a
                 tuple `(source, content)` with `source` being `"stderr"` or
                 `"stdout"`. `content` is the content of the line as bytes.
-                Take a look at [the user guide](https://github.com/MaraClaw/PyDocker/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output)
+                Take a look at [the user guide](https://github.com/MaraClaw/PyWhales/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output)
                 to have an example of the output.
 
         # Returns
@@ -422,7 +422,7 @@ class ServiceCLI(DockerCLICaller):
             if `stream=True`.
 
         # Raises
-            `pydocker.exceptions.NoSuchService` if the service does not exists.
+            `pywhales.exceptions.NoSuchService` if the service does not exists.
         """
         # first we verify that the service exists and raise an exception if not.
         self.inspect(str(service))
@@ -456,7 +456,7 @@ class ServiceCLI(DockerCLICaller):
                 For example, `docker.service.list(filters=dict(label="my_label=hello"))`.
 
         # Returns
-            A `List[pydocker.Services]`
+            A `List[pywhales.Services]`
         """
         filter_items = filters.items() if isinstance(filters, Mapping) else filters
         if isinstance(filters, Mapping):
@@ -495,13 +495,13 @@ class ServiceCLI(DockerCLICaller):
 
     def ps(
         self, x: ValidService | Sequence[ValidService]
-    ) -> builtins.list[pydocker.components.task.cli_wrapper.Task]:
+    ) -> builtins.list[pywhales.components.task.cli_wrapper.Task]:
         """Returns the list of swarm tasks associated with this service.
 
         You can pass multiple services at once at this function.
 
         ```python
-        from pydocker import docker
+        from pywhales import docker
 
         tasks = docker.service.ps("my-service-name")
         print(tasks[0].desired_state)
@@ -509,13 +509,13 @@ class ServiceCLI(DockerCLICaller):
         ```
 
         Parameters:
-            x: One or more services (can be id, name or `pydocker.Service` object.)
+            x: One or more services (can be id, name or `pywhales.Service` object.)
 
         # Returns
-            `List[pydocker.Task]`
+            `List[pywhales.Task]`
 
         # Raises
-            `pydocker.exceptions.NoSuchService` if one of the services
+            `pywhales.exceptions.NoSuchService` if one of the services
             doesn't exist.
         """
         full_cmd = [
@@ -528,7 +528,7 @@ class ServiceCLI(DockerCLICaller):
         ]
         ids = run(full_cmd).splitlines()
         return [
-            pydocker.components.task.cli_wrapper.Task(
+            pywhales.components.task.cli_wrapper.Task(
                 self.client_config, id_, is_immutable_id=True
             )
             for id_ in ids
@@ -541,7 +541,7 @@ class ServiceCLI(DockerCLICaller):
             services: One or a list of services to remove.
 
         # Raises
-            `pydocker.exceptions.NoSuchService` if one of the services
+            `pywhales.exceptions.NoSuchService` if one of the services
             doesn't exist.
         """
         full_cmd = Command([*self.docker_cmd, "service", "remove"])
@@ -568,7 +568,7 @@ class ServiceCLI(DockerCLICaller):
                 immediately.
 
         # Raises
-            `pydocker.exceptions.NoSuchService` if one of the services
+            `pywhales.exceptions.NoSuchService` if one of the services
             doesn't exists.
 
         """
@@ -604,7 +604,7 @@ class ServiceCLI(DockerCLICaller):
                 to swarm agents
 
         # Raises
-            `pydocker.exceptions.NoSuchService` if the service doesn't exists.
+            `pywhales.exceptions.NoSuchService` if the service doesn't exists.
         """
         full_cmd = Command([*self.docker_cmd, "service", "update"])
         full_cmd.add_flag("--force", force)

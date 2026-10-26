@@ -13,15 +13,15 @@ from typing import (
     override,
 )
 
-from pydocker.client_config import (
+from pywhales.client_config import (
     ClientConfig,
     Command,
     DockerCLICaller,
     ReloadableObjectFromJson,
 )
-from pydocker.components._swarm_inspect import parse_swarm_inspect_results
-from pydocker.components.secret.models import SecretInspectResult, SecretSpec
-from pydocker.utils import ValidPath, format_mapping_for_cli, run, to_list
+from pywhales.components._swarm_inspect import parse_swarm_inspect_results
+from pywhales.components.secret.models import SecretInspectResult, SecretSpec
+from pywhales.utils import ValidPath, format_mapping_for_cli, run, to_list
 
 type SecretListFilter = (
     tuple[Literal["id"], str]
@@ -101,10 +101,10 @@ class SecretCLI(DockerCLICaller):
         labels: Mapping[str, str] = {},
         template_driver: str | None = None,
     ) -> Secret:
-        """Creates a `pydocker.Secret`.
+        """Creates a `pywhales.Secret`.
 
         # Returns
-            A `pydocker.Secret` object.
+            A `pywhales.Secret` object.
         """
         full_cmd = Command([*self.docker_cmd, "secret", "create"])
         full_cmd.add_simple_arg("--driver", driver)
@@ -120,7 +120,7 @@ class SecretCLI(DockerCLICaller):
     def inspect(self, x: Iterable[str]) -> builtins.list[Secret]: ...
 
     def inspect(self, x: str | Iterable[str]) -> Secret | builtins.list[Secret]:
-        """Returns one or more `pydocker.Secret` based on an ID or name.
+        """Returns one or more `pywhales.Secret` based on an ID or name.
 
         Parameters:
             x: One or more IDs/names.
@@ -147,7 +147,7 @@ class SecretCLI(DockerCLICaller):
     def list(
         self, filters: Iterable[SecretListFilter] | Mapping[str, Any] = ()
     ) -> builtins.list[Secret]:
-        """Returns all secrets as a `List[pydocker.Secret]`."""
+        """Returns all secrets as a `List[pywhales.Secret]`."""
         filter_items = filters.items() if isinstance(filters, Mapping) else filters
         if isinstance(filters, Mapping):
             warnings.warn(
@@ -167,7 +167,7 @@ class SecretCLI(DockerCLICaller):
 
         Parameters:
             x: One or more secrets.
-                Name, ids or `pydocker.Secret` objects are valid inputs.
+                Name, ids or `pywhales.Secret` objects are valid inputs.
         """
         secrets = [x] if isinstance(x, str | Secret) else list(x)
         if not secrets:

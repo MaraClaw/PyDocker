@@ -625,7 +625,7 @@ wheels = [
 ]
 
 [[package]]
-name = "pydocker"
+name = "pywhales"
 version = "0.1.1"
 source = { editable = "." }
 dependencies = [

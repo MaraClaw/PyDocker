@@ -8,7 +8,7 @@ import pytest
 from pytest_mock import MockerFixture
 
 from docs import autogen, docs_utils
-from pydocker.utils import PROJECT_ROOT
+from pywhales.utils import PROJECT_ROOT
 
 EXAMPLES: Final = (
     "plugins",
@@ -27,7 +27,7 @@ EXAMPLES: Final = (
 def docs_root(tmp_path: Path, mocker: MockerFixture) -> Path:
     copytree(PROJECT_ROOT / "docs" / "template", tmp_path / "docs" / "template")
     mocker.patch.object(autogen, "PROJECT_ROOT", tmp_path)
-    mocker.patch("pydocker.utils.PROJECT_ROOT", tmp_path)
+    mocker.patch("pywhales.utils.PROJECT_ROOT", tmp_path)
     mocker.patch.object(docs_utils, "docker", spec_set=())
     mocker.patch("subprocess.run", side_effect=AssertionError("external command"))
     return tmp_path

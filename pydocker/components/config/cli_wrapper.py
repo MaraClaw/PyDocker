@@ -8,19 +8,19 @@ from pathlib import Path
 from types import MappingProxyType, TracebackType
 from typing import Any, Self, assert_never, overload, override
 
-from pydocker.client_config import (
+from pywhales.client_config import (
     ClientConfig,
     Command,
     DockerCLICaller,
     ReloadableObjectFromJson,
 )
-from pydocker.components._swarm_inspect import parse_swarm_inspect_results
-from pydocker.components.config.models import (
+from pywhales.components._swarm_inspect import parse_swarm_inspect_results
+from pywhales.components.config.models import (
     ConfigInspectResult,
     ConfigSpec,
     DockerObjectVersion,
 )
-from pydocker.utils import format_mapping_for_cli, run, to_list
+from pywhales.utils import format_mapping_for_cli, run, to_list
 
 
 class Config(ReloadableObjectFromJson[ConfigInspectResult]):
@@ -59,7 +59,7 @@ class Config(ReloadableObjectFromJson[ConfigInspectResult]):
     def remove(self) -> None:
         """Remove this config.
 
-        Note that you can also use a `pydocker.Config` as a context manager
+        Note that you can also use a `pywhales.Config` as a context manager
         to ensure it's removed even if an exception occurs.
         """
         ConfigCLI(self.client_config).remove(self)
@@ -108,7 +108,7 @@ class ConfigCLI(DockerCLICaller):
             template_driver: The template driver
 
         # Returns
-            A `pydocker.Config` object.
+            A `pywhales.Config` object.
         """
         full_cmd = Command([*self.docker_cmd, "config", "create"])
         full_cmd.add_args_iterable_or_single("--label", format_mapping_for_cli(labels))
@@ -123,14 +123,14 @@ class ConfigCLI(DockerCLICaller):
     def inspect(self, x: builtins.list[str]) -> builtins.list[Config]: ...
 
     def inspect(self, x: str | builtins.list[str]) -> Config | builtins.list[Config]:
-        """Returns a `pydocker.Config` object based on its name or id.
+        """Returns a `pywhales.Config` object based on its name or id.
 
         # Argument
             x: An id or name or a list of ids/names.
 
         # Returns
-            A `pydocker.Config` if a string was passed as argument. A
-            `List[pydocker.Config]` if a list of strings was passed as argument.
+            A `pywhales.Config` if a string was passed as argument. A
+            `List[pywhales.Config]` if a list of strings was passed as argument.
         """
         references = to_list(x)
         if not references:
@@ -161,7 +161,7 @@ class ConfigCLI(DockerCLICaller):
                 For example, `docker.config.list(filters=dict(label="my_label=hello"))`.
 
         # Returns
-            A `List[pydocker.Config]`.
+            A `List[pywhales.Config]`.
         """
         full_cmd = Command([*self.docker_cmd, "config", "list", "--quiet"])
         full_cmd.add_args_iterable_or_single(
@@ -176,7 +176,7 @@ class ConfigCLI(DockerCLICaller):
 
         Parameters:
             x: One or a list of configs. Valid values are the id of the config or
-                a `pydocker.Config` object.
+                a `pywhales.Config` object.
                 An empty list means the function call does nothing.
         """
         full_cmd = Command([*self.docker_cmd, "config", "rm"])

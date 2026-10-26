@@ -3,15 +3,15 @@ from collections.abc import Sequence
 from types import TracebackType
 from typing import Any, Self, override
 
-from pydocker.client_config import (
+from pywhales.client_config import (
     ClientConfig,
     Command,
     DockerCLICaller,
     ReloadableObjectFromJson,
 )
-from pydocker.components.buildx.imagetools.models import ImageVariantManifest
-from pydocker.components.manifest.models import ManifestListInspectResult
-from pydocker.utils import run, to_list
+from pywhales.components.buildx.imagetools.models import ImageVariantManifest
+from pywhales.components.manifest.models import ManifestListInspectResult
+from pywhales.utils import run, to_list
 
 
 class ManifestList(ReloadableObjectFromJson[ManifestListInspectResult]):
@@ -76,7 +76,7 @@ class ManifestList(ReloadableObjectFromJson[ManifestListInspectResult]):
 
     @override
     def __repr__(self) -> str:
-        return f"pydocker.ManifestList(name='{self.name}')"
+        return f"pywhales.ManifestList(name='{self.name}')"
 
     def remove(self) -> None:
         """Removes this Docker manifest list.
@@ -136,7 +136,7 @@ class ManifestCLI(DockerCLICaller):
             manifests: The list of manifests to add to the manifest list
 
         # Returns
-            A `pydocker.ManifestList`.
+            A `pywhales.ManifestList`.
         """
         full_cmd = Command([*self.docker_cmd, "manifest", "create"])
         full_cmd.add_flag("--amend", ammend)

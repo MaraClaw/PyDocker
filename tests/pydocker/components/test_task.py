@@ -3,9 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from pydocker import docker
-from pydocker.components.task.models import TaskInspectResult
-from pydocker.test_utils import get_all_jsons
+from pywhales import docker
+from pywhales.components.task.models import TaskInspectResult
+from pywhales.test_utils import get_all_jsons
 
 
 @pytest.mark.parametrize("json_file", get_all_jsons("tasks"))

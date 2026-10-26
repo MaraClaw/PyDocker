@@ -6,10 +6,10 @@ from unittest.mock import patch
 
 import pytest
 
-from pydocker import DockerClient, Secret
-from pydocker.client_config import ParsingError
-from pydocker.components.secret.models import SecretInspectResult
-from pydocker.exceptions import DockerException
+from pywhales import DockerClient, Secret
+from pywhales.client_config import ParsingError
+from pywhales.components.secret.models import SecretInspectResult
+from pywhales.exceptions import DockerException
 
 
 def test_batch_inspect_matches_secret_single_pass_references_and_hydrates_cache() -> (
@@ -25,7 +25,7 @@ def test_batch_inspect_matches_secret_single_pass_references_and_hydrates_cache(
         patch(
             "subprocess.run", return_value=CompletedProcess([], 0, response, b"")
         ) as command,
-        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+        patch("pywhales.client_config.CACHE_VALIDITY_PERIOD", 3600),
     ):
         resources = client.secret.inspect(iter(references))
         assert [resource.id for resource in resources] == [

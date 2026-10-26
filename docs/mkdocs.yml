@@ -1,9 +1,9 @@
 
 
-site_name: pydocker
+site_name: pywhales
 docs_dir: docs/generated_sources
-repo_url: "https://github.com/MaraClaw/PyDocker"
-site_description: 'pydocker documentation for Python 3.14.8 and above'
+repo_url: "https://github.com/MaraClaw/PyWhales"
+site_description: 'pywhales documentation for Python 3.14.8 and above'
 
 theme:
   name: material
@@ -91,5 +91,5 @@ nav:
   - User guide:
       - docker.run() guide: user_guide/docker_run.md
       - Swarm generic resources: user_guide/generic_resources.md
-      - Running pydocker inside a container: user_guide/running_pydocker_inside_a_container.md
+      - Running pywhales inside a container: user_guide/running_pywhales_inside_a_container.md
       - dealing with exceptions: user_guide/exceptions.md

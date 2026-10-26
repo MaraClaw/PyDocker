@@ -27,43 +27,43 @@
 
 They're actually aliases
 
-* [`docker.attach`](sub-commands/container.md#pydocker.components.container.cli_wrapper.ContainerCLI.attach)
-* [`docker.build`](sub-commands/buildx.md#pydocker.components.buildx.cli_wrapper.BuildxCLI.build)
-* [`docker.commit`](sub-commands/container.md#pydocker.components.container.cli_wrapper.ContainerCLI.commit)
-* [`docker.copy`](sub-commands/container.md#pydocker.components.container.cli_wrapper.ContainerCLI.copy)
-* [`docker.create`](sub-commands/container.md#pydocker.components.container.cli_wrapper.ContainerCLI.create)
-* [`docker.diff`](sub-commands/container.md#pydocker.components.container.cli_wrapper.ContainerCLI.diff)
-* [`docker.execute`](sub-commands/container.md#pydocker.components.container.cli_wrapper.ContainerCLI.execute)
-* [`docker.export`](sub-commands/container.md#pydocker.components.image.cli_wrapper.ImageCLI.export)
-* [`docker.images`](sub-commands/image.md#pydocker.components.image.cli_wrapper.ImageCLI.list)
-* [`docker.import_`](sub-commands/image.md#pydocker.components.image.cli_wrapper.ImageCLI.import_)
-* [`docker.info`](sub-commands/system.md#pydocker.components.system.cli_wrapper.SystemCLI.info)
-* [`docker.kill`](sub-commands/container.md#pydocker.components.container.cli_wrapper.ContainerCLI.kill)
-* [`docker.load`](sub-commands/image.md#pydocker.components.image.cli_wrapper.ImageCLI.load)
-* [`docker.logs`](sub-commands/container.md#pydocker.components.container.cli_wrapper.ContainerCLI.logs)
-* [`docker.pause`](sub-commands/container.md#pydocker.components.container.cli_wrapper.ContainerCLI.pause)
-* [`docker.ps`](sub-commands/container.md#pydocker.components.container.cli_wrapper.ContainerCLI.list)
-* [`docker.pull`](sub-commands/image.md#pydocker.components.image.cli_wrapper.ImageCLI.pull)
-* [`docker.push`](sub-commands/image.md#pydocker.components.image.cli_wrapper.ImageCLI.push)
-* [`docker.rename`](sub-commands/container.md#pydocker.components.container.cli_wrapper.ContainerCLI.rename)
-* [`docker.restart`](sub-commands/container.md#pydocker.components.container.cli_wrapper.ContainerCLI.rename)
-* [`docker.remove`](sub-commands/container.md#pydocker.components.container.cli_wrapper.ContainerCLI.rename)
-* [`docker.run`](sub-commands/container.md#pydocker.components.container.cli_wrapper.ContainerCLI.rename)
-* [`docker.save`](sub-commands/image.md#pydocker.components.image.cli_wrapper.ImageCLI.save)
-* [`docker.start`](sub-commands/container.md#pydocker.components.container.cli_wrapper.ContainerCLI.start)
-* [`docker.stats`](sub-commands/container.md#pydocker.components.container.cli_wrapper.ContainerCLI.stats)
-* [`docker.stop`](sub-commands/container.md#pydocker.components.container.cli_wrapper.ContainerCLI.stop)
-* [`docker.tag`](sub-commands/image.md#pydocker.components.image.cli_wrapper.ImageCLI.tag)
-* [`docker.top`](sub-commands/container.md#pydocker.components.container.cli_wrapper.ContainerCLI.top)
-* [`docker.unpause`](sub-commands/container.md#pydocker.components.container.cli_wrapper.ContainerCLI.unpause)
-* [`docker.update`](sub-commands/container.md#pydocker.components.container.cli_wrapper.ContainerCLI.update)
-* [`docker.wait`](sub-commands/container.md#pydocker.components.container.cli_wrapper.ContainerCLI.wait)
+* [`docker.attach`](sub-commands/container.md#pywhales.components.container.cli_wrapper.ContainerCLI.attach)
+* [`docker.build`](sub-commands/buildx.md#pywhales.components.buildx.cli_wrapper.BuildxCLI.build)
+* [`docker.commit`](sub-commands/container.md#pywhales.components.container.cli_wrapper.ContainerCLI.commit)
+* [`docker.copy`](sub-commands/container.md#pywhales.components.container.cli_wrapper.ContainerCLI.copy)
+* [`docker.create`](sub-commands/container.md#pywhales.components.container.cli_wrapper.ContainerCLI.create)
+* [`docker.diff`](sub-commands/container.md#pywhales.components.container.cli_wrapper.ContainerCLI.diff)
+* [`docker.execute`](sub-commands/container.md#pywhales.components.container.cli_wrapper.ContainerCLI.execute)
+* [`docker.export`](sub-commands/container.md#pywhales.components.image.cli_wrapper.ImageCLI.export)
+* [`docker.images`](sub-commands/image.md#pywhales.components.image.cli_wrapper.ImageCLI.list)
+* [`docker.import_`](sub-commands/image.md#pywhales.components.image.cli_wrapper.ImageCLI.import_)
+* [`docker.info`](sub-commands/system.md#pywhales.components.system.cli_wrapper.SystemCLI.info)
+* [`docker.kill`](sub-commands/container.md#pywhales.components.container.cli_wrapper.ContainerCLI.kill)
+* [`docker.load`](sub-commands/image.md#pywhales.components.image.cli_wrapper.ImageCLI.load)
+* [`docker.logs`](sub-commands/container.md#pywhales.components.container.cli_wrapper.ContainerCLI.logs)
+* [`docker.pause`](sub-commands/container.md#pywhales.components.container.cli_wrapper.ContainerCLI.pause)
+* [`docker.ps`](sub-commands/container.md#pywhales.components.container.cli_wrapper.ContainerCLI.list)
+* [`docker.pull`](sub-commands/image.md#pywhales.components.image.cli_wrapper.ImageCLI.pull)
+* [`docker.push`](sub-commands/image.md#pywhales.components.image.cli_wrapper.ImageCLI.push)
+* [`docker.rename`](sub-commands/container.md#pywhales.components.container.cli_wrapper.ContainerCLI.rename)
+* [`docker.restart`](sub-commands/container.md#pywhales.components.container.cli_wrapper.ContainerCLI.rename)
+* [`docker.remove`](sub-commands/container.md#pywhales.components.container.cli_wrapper.ContainerCLI.rename)
+* [`docker.run`](sub-commands/container.md#pywhales.components.container.cli_wrapper.ContainerCLI.rename)
+* [`docker.save`](sub-commands/image.md#pywhales.components.image.cli_wrapper.ImageCLI.save)
+* [`docker.start`](sub-commands/container.md#pywhales.components.container.cli_wrapper.ContainerCLI.start)
+* [`docker.stats`](sub-commands/container.md#pywhales.components.container.cli_wrapper.ContainerCLI.stats)
+* [`docker.stop`](sub-commands/container.md#pywhales.components.container.cli_wrapper.ContainerCLI.stop)
+* [`docker.tag`](sub-commands/image.md#pywhales.components.image.cli_wrapper.ImageCLI.tag)
+* [`docker.top`](sub-commands/container.md#pywhales.components.container.cli_wrapper.ContainerCLI.top)
+* [`docker.unpause`](sub-commands/container.md#pywhales.components.container.cli_wrapper.ContainerCLI.unpause)
+* [`docker.update`](sub-commands/container.md#pywhales.components.container.cli_wrapper.ContainerCLI.update)
+* [`docker.wait`](sub-commands/container.md#pywhales.components.container.cli_wrapper.ContainerCLI.wait)
 
 
 ## About multithreading and multiprocessing
 
-Behind the scenes, pydocker calls the Docker command line interface with
-subprocess. The pydocker client does not store any intermediate state so it's safe
+Behind the scenes, pywhales calls the Docker command line interface with
+subprocess. The pywhales client does not store any intermediate state so it's safe
 to use with multithreading. 
 
 The Docker objects store some intermediate states (the attributes 
@@ -89,12 +89,12 @@ Thread 1: docker.logs(my_container)  # will fail because the container was remov
 ```
 
 In the end, unless you use this type of logic in your code, 
-pydocker is safe to use with multithreading and multiprocessing.
+pywhales is safe to use with multithreading and multiprocessing.
 
 
 ## The Docker CLI
 
-pydocker needs the Docker CLI to work (unlike docker-py).
+pywhales needs the Docker CLI to work (unlike docker-py).
 Most of the time, users already have the CLI installed on their machines. It's possible to 
 verify that the CLI is there by doing `docker --help` in the command line.
 
@@ -111,6 +111,6 @@ this functionality was removed under <https://github.com/gabrieldemarmiesse/pyth
 
 ### Handling an unavailable client
 
-Trying to use pydocker when it cannot find a Docker client binary
-will trigger a `pydocker.ClientNotFoundError`. You can use a try-except around
-a first `docker.ps()` call to handle the case when pydocker won't work.
+Trying to use pywhales when it cannot find a Docker client binary
+will trigger a `pywhales.ClientNotFoundError`. You can use a try-except around
+a first `docker.ps()` call to handle the case when pywhales won't work.

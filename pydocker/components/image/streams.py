@@ -5,7 +5,7 @@ from threading import Event, Lock
 from types import TracebackType
 from typing import Self, override
 
-from pydocker.utils import MappedProcessStream
+from pywhales.utils import MappedProcessStream
 
 
 class MultiImageStream(Iterator[tuple[str, bytes]]):

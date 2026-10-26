@@ -3,7 +3,7 @@
 import re
 from collections.abc import Sequence
 
-from pydocker.components.top import TopParseError
+from pywhales.components.top import TopParseError
 
 
 def docker_top_fields(ps_args: Sequence[str]) -> tuple[str, ...] | None:

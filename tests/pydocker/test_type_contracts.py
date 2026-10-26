@@ -2,7 +2,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import assert_type
 
-from pydocker import (
+from pywhales import (
     Config,
     Container,
     DockerClient,
@@ -13,13 +13,13 @@ from pydocker import (
     Service,
     Volume,
 )
-from pydocker.components.buildx.cli_wrapper import BakeResult
-from pydocker.components.buildx.imagetools.models import Manifest
-from pydocker.components.compose.models import ComposeEvent
-from pydocker.components.image.streams import EmptyImageStream, ImageStream
-from pydocker.components.system.models import DockerEvent
-from pydocker.components.top import ComposeTopResult, ContainerTopResult
-from pydocker.utils import MappedProcessStream, ProcessStream, stream_stdout_and_stderr
+from pywhales.components.buildx.cli_wrapper import BakeResult
+from pywhales.components.buildx.imagetools.models import Manifest
+from pywhales.components.compose.models import ComposeEvent
+from pywhales.components.image.streams import EmptyImageStream, ImageStream
+from pywhales.components.system.models import DockerEvent
+from pywhales.components.top import ComposeTopResult, ContainerTopResult
+from pywhales.utils import MappedProcessStream, ProcessStream, stream_stdout_and_stderr
 
 
 def _check_resource_inspection_contracts(client: DockerClient) -> None:

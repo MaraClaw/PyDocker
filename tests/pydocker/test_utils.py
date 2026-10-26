@@ -8,9 +8,9 @@ from time import monotonic
 
 import pytest
 
-import pydocker.utils
-from pydocker.exceptions import NoSuchContainer
-from pydocker.utils import (
+import pywhales.utils
+from pywhales.exceptions import NoSuchContainer
+from pywhales.utils import (
     MappedProcessStream,
     ProcessStream,
     format_cpuset,
@@ -57,7 +57,7 @@ def test_format_cpuset_generator() -> None:
 def test_environment_variables_propagation(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SOME_VARIABLE", "dododada")
 
-    stdout = pydocker.utils.run(
+    stdout = pywhales.utils.run(
         ["bash", "-c", "echo $SOME_VARIABLE && echo $OTHER_VARIABLE"],
         capture_stdout=True,
         env={"OTHER_VARIABLE": "dudu"},

@@ -6,12 +6,12 @@ from unittest.mock import patch
 
 import pytest
 
-from pydocker import DockerClient, Image
-from pydocker.components.manifest.cli_wrapper import (
+from pywhales import DockerClient, Image
+from pywhales.components.manifest.cli_wrapper import (
     ManifestList,
     ManifestListInspectResult,
 )
-from pydocker.test_utils import get_all_jsons, random_name
+from pywhales.test_utils import get_all_jsons, random_name
 
 
 @pytest.fixture
@@ -92,7 +92,7 @@ def test_manifest_inspect_insecure_flag(
         "manifests": [],
     }
 
-    with patch("pydocker.components.manifest.cli_wrapper.run") as mock_run:
+    with patch("pywhales.components.manifest.cli_wrapper.run") as mock_run:
         mock_run.return_value = json.dumps(fake_json)
 
         manifest: ManifestList = docker_client.manifest.inspect(ref, insecure=insecure)

@@ -19,16 +19,16 @@ from typing import (
 
 from pydantic import JsonValue, TypeAdapter
 
-import pydocker.components.image.cli_wrapper
-from pydocker.client_config import (
+import pywhales.components.image.cli_wrapper
+from pywhales.client_config import (
     ClientConfig,
     Command,
     DockerCLICaller,
     ReloadableObject,
 )
-from pydocker.components.buildx.imagetools.cli_wrapper import ImagetoolsCLI
-from pydocker.components.buildx.models import BuilderInspectResult, BuilderNode
-from pydocker.utils import (
+from pywhales.components.buildx.imagetools.cli_wrapper import ImagetoolsCLI
+from pywhales.components.buildx.models import BuilderInspectResult, BuilderNode
+from pywhales.utils import (
     MappedProcessStream,
     ValidPath,
     format_mapping_for_cli,
@@ -90,7 +90,7 @@ class Builder(ReloadableObject[BuilderInspectResult]):
         raise ValueError(
             f"Could not find a builder with the name {reference}, this should "
             f"never happen unless you are quickly creating and deleting builders. "
-            f"Please open an issue at https://github.com/MaraClaw/PyDocker/issues"
+            f"Please open an issue at https://github.com/MaraClaw/PyWhales/issues"
         )
 
     @property
@@ -115,7 +115,7 @@ class Builder(ReloadableObject[BuilderInspectResult]):
 
     @override
     def __repr__(self) -> str:
-        return f"pydocker.Builder(name='{self.name}', driver='{self.driver}')"
+        return f"pywhales.Builder(name='{self.name}', driver='{self.driver}')"
 
     def remove(self) -> None:
         """Removes this builder. After this operation the builder cannot be used anymore.
@@ -124,7 +124,7 @@ class Builder(ReloadableObject[BuilderInspectResult]):
         you exit the context manager.
 
         ```python
-        from pydocker import docker
+        from pywhales import docker
 
         buildx_builder = docker.buildx.create(use=True)
         with buildx_builder:
@@ -257,7 +257,7 @@ class BuildxCLI(DockerCLICaller):
 
 
         ```python
-        from pydocker import docker
+        from pywhales import docker
 
         # returns the config used and runs the builds
         config = docker.buildx.bake(["my_target1", "my_target2"], load=True)
@@ -350,7 +350,7 @@ class BuildxCLI(DockerCLICaller):
         tags: str | Sequence[str] = (),
         target: str | None = None,
         stream_logs: Literal[False] = False,
-    ) -> pydocker.components.image.cli_wrapper.Image | None: ...
+    ) -> pywhales.components.image.cli_wrapper.Image | None: ...
 
     @overload
     def build(
@@ -416,7 +416,7 @@ class BuildxCLI(DockerCLICaller):
         target: str | None = None,
         stream_logs: bool = False,
     ) -> (
-        pydocker.components.image.cli_wrapper.Image | MappedProcessStream[str] | None
+        pywhales.components.image.cli_wrapper.Image | MappedProcessStream[str] | None
     ): ...
 
     def build(
@@ -454,12 +454,12 @@ class BuildxCLI(DockerCLICaller):
         target: str | None = None,
         # TODO: ulimit
         stream_logs: bool = False,
-    ) -> pydocker.components.image.cli_wrapper.Image | MappedProcessStream[str] | None:
+    ) -> pywhales.components.image.cli_wrapper.Image | MappedProcessStream[str] | None:
         """Build a Docker image with builkit as backend.
 
         Alias: `docker.build(...)`
 
-        A `pydocker.Image` is returned, even when using multiple tags.
+        A `pywhales.Image` is returned, even when using multiple tags.
         That is because it will produce a single image with multiple tags.
         If no image is loaded into the Docker daemon (if `push=True` for ex),
         then `None` is returned.
@@ -494,7 +494,7 @@ class BuildxCLI(DockerCLICaller):
             labels: Dict of labels to add to the image.
                 `labels={"very-secure": "1", "needs-gpu": "0"}` for example.
             load: Shortcut for `output=dict(type="docker")` If `True`,
-                `docker.buildx.build` will return a `pydocker.Image`.
+                `docker.buildx.build` will return a `pywhales.Image`.
             network: which network to use when building the Docker image
             output: Output destination
                 (format: `output={"type": "local", "dest": "path"}`
@@ -526,7 +526,7 @@ class BuildxCLI(DockerCLICaller):
                 to the CLI flag `--metadata-file` and only used when provided.
 
         # Returns
-            A `pydocker.Image` if a Docker image is loaded
+            A `pywhales.Image` if a Docker image is loaded
             in the daemon after the build (the default behavior when
             calling `docker.build(...)`). Otherwise, `None`.
         """
@@ -615,7 +615,7 @@ class BuildxCLI(DockerCLICaller):
             run(full_cmd, capture_stderr=progress is False)
             return
 
-        docker_image = pydocker.components.image.cli_wrapper.ImageCLI(
+        docker_image = pywhales.components.image.cli_wrapper.ImageCLI(
             self.client_config
         )
         if self._method_to_get_image(builder) == GetImageMethod.TAG:
@@ -688,7 +688,7 @@ class BuildxCLI(DockerCLICaller):
                 `name` must be provided.
 
         # Returns
-            A `pydocker.Builder` object.
+            A `pywhales.Builder` object.
         """
         full_cmd = Command([*self.docker_cmd, "buildx", "create"])
 
@@ -727,7 +727,7 @@ class BuildxCLI(DockerCLICaller):
             bootstrap: If set to True, ensure builder has booted before inspecting.
 
         # Returns
-            A `pydocker.Builder` object.
+            A `pywhales.Builder` object.
         """
         # Sadly, docker buildx inspect has no json support,
         # so, it's ugly, but we grab the name from the first line and
@@ -744,11 +744,11 @@ class BuildxCLI(DockerCLICaller):
         raise ValueError(
             f"Could not find a builder with the name {name}, this should "
             f"never happen unless you are quickly creating and deleting builders. "
-            f"Please open an issue at https://github.com/MaraClaw/PyDocker/issues."
+            f"Please open an issue at https://github.com/MaraClaw/PyWhales/issues."
         )
 
     def list(self) -> builtins.list[Builder]:
-        """Returns the list of `pydocker.Builder` available."""
+        """Returns the list of `pywhales.Builder` available."""
         full_cmd = Command(
             [*self.docker_cmd, "buildx", "ls", "--format", "{{json . }}"]
         )
@@ -861,7 +861,7 @@ class BuildxCLI(DockerCLICaller):
         """Returns the docker buildx version as a string.
 
         ```python
-        from pydocker import docker
+        from pywhales import docker
 
         version = docker.buildx.version()
         print(version)

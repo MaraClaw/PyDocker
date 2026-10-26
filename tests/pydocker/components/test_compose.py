@@ -20,17 +20,17 @@ import pytest
 import pytz
 from pydantic import ValidationError
 
-import pydocker
-from pydocker import Container, DockerClient, DockerException
-from pydocker.components.compose.models import ComposeConfig, ComposeEvent
-from pydocker.components.container.models import ContainerState
-from pydocker.components.top import ComposeTopResult, TopParseError
-from pydocker.exceptions import NoSuchImage
-from pydocker.test_utils import get_all_jsons, random_name
-from pydocker.utils import PROJECT_ROOT, stream_stdout_and_stderr
+import pywhales
+from pywhales import Container, DockerClient, DockerException
+from pywhales.components.compose.models import ComposeConfig, ComposeEvent
+from pywhales.components.container.models import ContainerState
+from pywhales.components.top import ComposeTopResult, TopParseError
+from pywhales.exceptions import NoSuchImage
+from pywhales.test_utils import get_all_jsons, random_name
+from pywhales.utils import PROJECT_ROOT, stream_stdout_and_stderr
 
 
-@patch("pydocker.components.compose.cli_wrapper.run")
+@patch("pywhales.components.compose.cli_wrapper.run")
 @pytest.mark.parametrize("services", [None, "web", ["web", "worker"]])
 def test_top_uses_project_configuration_when_selecting_services(
     run_mock: Mock, services: str | list[str] | None
@@ -90,7 +90,7 @@ def test_top_uses_project_configuration_when_selecting_services(
     )
 
 
-@patch("pydocker.components.compose.cli_wrapper.run")
+@patch("pywhales.components.compose.cli_wrapper.run")
 def test_top_keeps_sections_separate_when_compose_groups_containers(
     run_mock: Mock,
 ) -> None:
@@ -111,7 +111,7 @@ def test_top_keeps_sections_separate_when_compose_groups_containers(
 
 
 @pytest.mark.parametrize("raw", [False, True])
-@patch("pydocker.components.compose.cli_wrapper.run")
+@patch("pywhales.components.compose.cli_wrapper.run")
 def test_top_is_noop_when_service_selection_is_empty(run_mock: Mock, raw: bool) -> None:
     client = DockerClient(client_call=["nonexistent-executable-for-top-noop"])
 
@@ -121,7 +121,7 @@ def test_top_is_noop_when_service_selection_is_empty(run_mock: Mock, raw: bool) 
     run_mock.assert_not_called()
 
 
-@patch("pydocker.components.compose.cli_wrapper.run")
+@patch("pywhales.components.compose.cli_wrapper.run")
 @pytest.mark.parametrize("output", ["", "\n\n"])
 def test_top_returns_empty_sections_when_project_has_no_processes(
     run_mock: Mock, output: str
@@ -134,7 +134,7 @@ def test_top_returns_empty_sections_when_project_has_no_processes(
     assert result == ComposeTopResult(output, ())
 
 
-@patch("pydocker.components.compose.cli_wrapper.run")
+@patch("pywhales.components.compose.cli_wrapper.run")
 @pytest.mark.parametrize(
     "output",
     ["owned-web-1", "owned-web-1\nPID CMD\n7", "SERVICE # CMD PID\nweb 1 sleep 300 7"],
@@ -150,7 +150,7 @@ def test_top_rejects_malformed_sections_when_parsing_is_requested(
 
 
 @patch(
-    "pydocker.components.compose.cli_wrapper.run", return_value="unrecognized layout\n"
+    "pywhales.components.compose.cli_wrapper.run", return_value="unrecognized layout\n"
 )
 def test_top_exposes_raw_output_when_compose_layout_is_unknown(run_mock: Mock) -> None:
     client = DockerClient(client_call=[sys.executable])
@@ -160,7 +160,7 @@ def test_top_exposes_raw_output_when_compose_layout_is_unknown(run_mock: Mock) -
     assert result == "unrecognized layout\n"
 
 
-@patch("pydocker.utils.subprocess.run")
+@patch("pywhales.utils.subprocess.run")
 @pytest.mark.parametrize("raw", [False, True])
 def test_top_retains_compose_exception_when_service_is_missing(
     run_mock: Mock, raw: bool
@@ -217,12 +217,12 @@ def test_top_preserves_attribution_when_inspecting_owned_live_project(
 
 
 pytestmark = pytest.mark.skipif(
-    not pydocker.docker.compose.is_installed(),
+    not pywhales.docker.compose.is_installed(),
     reason="Those tests need docker compose.",
 )
 
 docker = DockerClient(
-    compose_files=[PROJECT_ROOT / "tests/pydocker/components/dummy_compose.yml"],
+    compose_files=[PROJECT_ROOT / "tests/pywhales/components/dummy_compose.yml"],
     compose_compatibility=True,
 )
 
@@ -248,7 +248,7 @@ def test_build_empty_list_of_services() -> None:
     assert previous_images == set(docker.image.list())
 
 
-@patch("pydocker.components.compose.cli_wrapper.run")
+@patch("pywhales.components.compose.cli_wrapper.run")
 def test__build_with_dependencies(run_mock: Mock) -> None:
     test_services = ["test_a", "test_b"]
     docker.compose.build(services=test_services, with_dependencies=True)
@@ -272,7 +272,7 @@ def test_kill_empty_list_of_services() -> None:
 
 
 def test_wait_for_service() -> None:
-    docker = pydocker.DockerClient(
+    docker = pywhales.DockerClient(
         compose_files=[Path(__file__).parent / "compose-with-healthcheck.yml"]
     )
     # ensure environment is clean
@@ -345,7 +345,7 @@ def test_push_empty_list_of_services() -> None:
 
 def test_compose_project_name() -> None:
     docker = DockerClient(
-        compose_files=[PROJECT_ROOT / "tests/pydocker/components/dummy_compose.yml"],
+        compose_files=[PROJECT_ROOT / "tests/pywhales/components/dummy_compose.yml"],
         compose_project_name="dudu",
         compose_compatibility=True,
     )
@@ -391,7 +391,7 @@ def test_docker_compose_build_with_arguments() -> None:
 def test_docker_compose_up_down() -> None:
     docker = DockerClient(
         compose_files=[
-            PROJECT_ROOT / "tests/pydocker/components/dummy_compose_ends_quickly.yml"
+            PROJECT_ROOT / "tests/pywhales/components/dummy_compose_ends_quickly.yml"
         ],
         compose_compatibility=True,
     )
@@ -408,7 +408,7 @@ def test_docker_compose_up_dependencies(
     dependencies_value: bool, expected_running_containers: int
 ) -> None:
     docker = DockerClient(
-        compose_files=[PROJECT_ROOT / "tests/pydocker/components/dummy_compose.yml"],
+        compose_files=[PROJECT_ROOT / "tests/pywhales/components/dummy_compose.yml"],
         compose_compatibility=True,
     )
 
@@ -428,7 +428,7 @@ def test_docker_compose_up_dependencies(
 def test_docker_compose_up_down_streaming() -> None:
     docker = DockerClient(
         compose_files=[
-            PROJECT_ROOT / "tests/pydocker/components/dummy_compose_ends_quickly.yml"
+            PROJECT_ROOT / "tests/pywhales/components/dummy_compose_ends_quickly.yml"
         ],
         compose_compatibility=True,
     )
@@ -449,7 +449,7 @@ def test_docker_compose_down_services() -> None:
     docker = DockerClient(
         compose_files=[
             PROJECT_ROOT
-            / "tests/pydocker/components/dummy_compose_with_container_names.yml"
+            / "tests/pywhales/components/dummy_compose_with_container_names.yml"
         ],
         compose_compatibility=True,
         compose_project_name="test_docker_compose_down_services",
@@ -475,7 +475,7 @@ def test_docker_compose_down_no_services() -> None:
     docker = DockerClient(
         compose_files=[
             PROJECT_ROOT
-            / "tests/pydocker/components/dummy_compose_with_container_names.yml"
+            / "tests/pywhales/components/dummy_compose_with_container_names.yml"
         ],
         compose_compatibility=True,
         compose_project_name="test_docker_compose_down_no_services",
@@ -494,7 +494,7 @@ def test_docker_compose_down_no_services() -> None:
     assert docker.compose.ps() == []
 
 
-@patch("pydocker.components.compose.cli_wrapper.run")
+@patch("pywhales.components.compose.cli_wrapper.run")
 def test_docker_compose_cli_down_all_services(run_mock: Mock) -> None:
     docker.compose.down()
     run_mock.assert_called_once_with(
@@ -504,7 +504,7 @@ def test_docker_compose_cli_down_all_services(run_mock: Mock) -> None:
     )
 
 
-@patch("pydocker.components.compose.cli_wrapper.run")
+@patch("pywhales.components.compose.cli_wrapper.run")
 def test_docker_compose_cli_down_multiple_services(run_mock: Mock) -> None:
     test_services = ["test_a", "test_b"]
     docker.compose.down(services=test_services)
@@ -515,7 +515,7 @@ def test_docker_compose_cli_down_multiple_services(run_mock: Mock) -> None:
     )
 
 
-@patch("pydocker.components.compose.cli_wrapper.run")
+@patch("pywhales.components.compose.cli_wrapper.run")
 def test_docker_compose_cli_down_single_service(run_mock: Mock) -> None:
     test_service = "test_a"
     docker.compose.down(services=test_service)
@@ -526,7 +526,7 @@ def test_docker_compose_cli_down_single_service(run_mock: Mock) -> None:
     )
 
 
-@patch("pydocker.components.compose.cli_wrapper.run")
+@patch("pywhales.components.compose.cli_wrapper.run")
 def test_docker_compose_cli_down_services_no_op(run_mock: Mock) -> None:
     docker.compose.down(services=[])
     run_mock.assert_not_called()
@@ -841,7 +841,7 @@ def test_docker_compose_pull_ignore_pull_failures() -> None:
     docker = DockerClient(
         compose_files=[
             PROJECT_ROOT
-            / "tests/pydocker/components/dummy_compose_non_existent_image.yml"
+            / "tests/pywhales/components/dummy_compose_non_existent_image.yml"
         ]
     )
     with contextlib.suppress(NoSuchImage):
@@ -859,7 +859,7 @@ def test_docker_compose_pull_include_deps() -> None:
 def test_docker_compose_up_abort_on_container_exit() -> None:
     docker = DockerClient(
         compose_files=[
-            PROJECT_ROOT / "tests/pydocker/components/dummy_compose_ends_quickly.yml"
+            PROJECT_ROOT / "tests/pywhales/components/dummy_compose_ends_quickly.yml"
         ],
         compose_compatibility=True,
     )
@@ -874,7 +874,7 @@ def test_docker_compose_up_no_attach_services(
     capfd: pytest.CaptureFixture[str],
 ) -> None:
     docker = DockerClient(
-        compose_files=[PROJECT_ROOT / "tests/pydocker/components/compose_logs.yml"],
+        compose_files=[PROJECT_ROOT / "tests/pywhales/components/compose_logs.yml"],
         compose_compatibility=True,
     )
     docker.compose.up(no_attach_services=["my_service"])
@@ -900,7 +900,7 @@ def test_passing_env_files(tmp_path: Path) -> None:
     compose_env_file.write_text("SOME_VARIABLE_TO_INSERT=hello\n")
     docker = DockerClient(
         compose_files=[
-            PROJECT_ROOT / "tests/pydocker/components/dummy_compose_ends_quickly.yml"
+            PROJECT_ROOT / "tests/pywhales/components/dummy_compose_ends_quickly.yml"
         ],
         compose_env_file=compose_env_file,
         compose_compatibility=True,
@@ -923,7 +923,7 @@ def test_project_directory_env_files(tmp_path: Path) -> None:
     docker = DockerClient(
         compose_files=[
             PROJECT_ROOT
-            / "tests/pydocker/components/dummy_compose_project_directory.yml"
+            / "tests/pywhales/components/dummy_compose_project_directory.yml"
         ],
         compose_project_directory=tmp_path,
         compose_compatibility=True,
@@ -947,7 +947,7 @@ def test_entrypoint_loaded_in_config() -> None:
 
 def test_config_complexe_compose() -> None:
     """Checking that the pydantic model does its job"""
-    compose_file = PROJECT_ROOT / "tests/pydocker/components/complex-compose.yml"
+    compose_file = PROJECT_ROOT / "tests/pywhales/components/complex-compose.yml"
     docker = DockerClient(compose_files=[compose_file], compose_compatibility=True)
     config = docker.compose.config()
 
@@ -956,7 +956,7 @@ def test_config_complexe_compose() -> None:
     my_service = config.services["my_service"]
     assert my_service.build is not None
     assert my_service.build.context == (
-        PROJECT_ROOT / "tests/pydocker/components/my_service_build"
+        PROJECT_ROOT / "tests/pywhales/components/my_service_build"
     )
     assert my_service.image == "some_random_image"
     assert my_service.command == [
@@ -1055,7 +1055,7 @@ def test_config_complexe_compose() -> None:
 
 
 def test_compose_down_networks() -> None:
-    compose_file = PROJECT_ROOT / "tests/pydocker/components/cleanup-compose.yml"
+    compose_file = PROJECT_ROOT / "tests/pywhales/components/cleanup-compose.yml"
     project_name = f"cleanup-{random_name()}"
     docker = DockerClient(
         compose_files=[compose_file],
@@ -1088,7 +1088,7 @@ def test_compose_down_networks() -> None:
 
 
 def test_compose_down_volumes() -> None:
-    compose_file = PROJECT_ROOT / "tests/pydocker/components/cleanup-compose.yml"
+    compose_file = PROJECT_ROOT / "tests/pywhales/components/cleanup-compose.yml"
     project_name = f"cleanup-{random_name()}"
     docker = DockerClient(
         compose_files=[compose_file],
@@ -1224,7 +1224,7 @@ def test_compose_run_volume_with_parameter() -> None:
 def test_compose_run_service_ports_flag() -> None:
     """Test that --service-ports flag is included in the command."""
 
-    with patch("pydocker.components.compose.cli_wrapper.run") as mock_run:
+    with patch("pywhales.components.compose.cli_wrapper.run") as mock_run:
         mock_run.return_value = ""
         docker.compose.run(
             "my_service",
@@ -1243,7 +1243,7 @@ def test_compose_run_service_ports_integration(service_ports: bool) -> None:
     """Test that service ports are correctly mapped when using --service-ports."""
 
     docker_client = DockerClient(
-        compose_files=[PROJECT_ROOT / "tests/pydocker/components/service_ports.yml"],
+        compose_files=[PROJECT_ROOT / "tests/pywhales/components/service_ports.yml"],
         compose_compatibility=True,
     )
     container = docker_client.compose.run(
@@ -1297,7 +1297,7 @@ def test_eager_compose_logs_release_child_when_decoding_fails(
             pipe_stdin=True,
         ) as raw,
         patch(
-            "pydocker.components.compose.cli_wrapper.stream_stdout_and_stderr",
+            "pywhales.components.compose.cli_wrapper.stream_stdout_and_stderr",
             return_value=raw,
         ) as start,
     ):
@@ -1333,7 +1333,7 @@ def test_eager_compose_logs_preserve_text_when_child_exits(source: str) -> None:
             ]
         ) as raw,
         patch(
-            "pydocker.components.compose.cli_wrapper.stream_stdout_and_stderr",
+            "pywhales.components.compose.cli_wrapper.stream_stdout_and_stderr",
             return_value=raw,
         ),
     ):
@@ -1362,7 +1362,7 @@ def test_streaming_compose_logs_retain_caller_ownership(
             pipe_stdin=True,
         ) as raw,
         patch(
-            "pydocker.components.compose.cli_wrapper.stream_stdout_and_stderr",
+            "pywhales.components.compose.cli_wrapper.stream_stdout_and_stderr",
             return_value=raw,
         ) as start,
     ):
@@ -1385,7 +1385,7 @@ def test_streaming_compose_logs_retain_caller_ownership(
 
 def test_compose_logs_simple_use_case() -> None:
     docker = DockerClient(
-        compose_files=[PROJECT_ROOT / "tests/pydocker/components/compose_logs.yml"],
+        compose_files=[PROJECT_ROOT / "tests/pywhales/components/compose_logs.yml"],
         compose_compatibility=True,
     )
     docker.compose.up(detach=True)
@@ -1400,7 +1400,7 @@ def test_compose_logs_simple_use_case() -> None:
 
 def test_compose_logs_stream() -> None:
     docker = DockerClient(
-        compose_files=[PROJECT_ROOT / "tests/pydocker/components/compose_logs.yml"],
+        compose_files=[PROJECT_ROOT / "tests/pywhales/components/compose_logs.yml"],
         compose_compatibility=True,
     )
     docker.compose.up(detach=True)
@@ -1417,7 +1417,7 @@ def test_compose_logs_stream() -> None:
 
 def test_compose_logs_follow() -> None:
     docker = DockerClient(
-        compose_files=[PROJECT_ROOT / "tests/pydocker/components/compose_logs.yml"],
+        compose_files=[PROJECT_ROOT / "tests/pywhales/components/compose_logs.yml"],
         compose_compatibility=True,
     )
     docker.compose.up(detach=True)
@@ -1454,7 +1454,7 @@ def test_compose_logs_follow() -> None:
 def test_compose_events() -> None:
     docker = DockerClient(
         compose_files=[
-            PROJECT_ROOT / "tests/pydocker/components/compose-with-healthcheck.yml"
+            PROJECT_ROOT / "tests/pywhales/components/compose-with-healthcheck.yml"
         ],
         compose_compatibility=True,
     )
@@ -1483,7 +1483,7 @@ def test_compose_events() -> None:
 @pytest.mark.parametrize("privileged", [True, False])
 def test_compose_execute_no_tty(privileged: bool) -> None:
     docker = DockerClient(
-        compose_files=[PROJECT_ROOT / "tests/pydocker/components/dummy_compose.yml"],
+        compose_files=[PROJECT_ROOT / "tests/pywhales/components/dummy_compose.yml"],
         compose_compatibility=True,
     )
     docker.compose.up(["busybox"], detach=True)
@@ -1496,12 +1496,12 @@ def test_compose_execute_no_tty(privileged: bool) -> None:
 
 
 # We can't test the TTY flag on execute because we can't have a true tty in pytest
-# of course tty still works if pydocker is executed outside pytest.
+# of course tty still works if pywhales is executed outside pytest.
 
 
 def test_compose_execute_detach() -> None:
     docker = DockerClient(
-        compose_files=[PROJECT_ROOT / "tests/pydocker/components/dummy_compose.yml"],
+        compose_files=[PROJECT_ROOT / "tests/pywhales/components/dummy_compose.yml"],
         compose_compatibility=True,
     )
     docker.compose.up(["busybox"], detach=True)
@@ -1515,7 +1515,7 @@ def test_compose_execute_detach() -> None:
 
 def test_compose_execute_envs() -> None:
     docker = DockerClient(
-        compose_files=[PROJECT_ROOT / "tests/pydocker/components/dummy_compose.yml"],
+        compose_files=[PROJECT_ROOT / "tests/pywhales/components/dummy_compose.yml"],
         compose_compatibility=True,
     )
     docker.compose.up(["busybox"], detach=True)
@@ -1531,7 +1531,7 @@ def test_compose_execute_envs() -> None:
 
 def test_compose_execute_user() -> None:
     docker = DockerClient(
-        compose_files=[PROJECT_ROOT / "tests/pydocker/components/dummy_compose.yml"],
+        compose_files=[PROJECT_ROOT / "tests/pywhales/components/dummy_compose.yml"],
         compose_compatibility=True,
     )
     docker.compose.up(["busybox"], detach=True)
@@ -1542,7 +1542,7 @@ def test_compose_execute_user() -> None:
 
 def test_compose_execute_workdir() -> None:
     docker = DockerClient(
-        compose_files=[PROJECT_ROOT / "tests/pydocker/components/dummy_compose.yml"],
+        compose_files=[PROJECT_ROOT / "tests/pywhales/components/dummy_compose.yml"],
         compose_compatibility=True,
     )
     docker.compose.up(["busybox"], detach=True)
@@ -1558,7 +1558,7 @@ def test_compose_execute_workdir() -> None:
 
 def test_compose_single_profile() -> None:
     docker = DockerClient(
-        compose_files=[PROJECT_ROOT / "tests/pydocker/components/dummy_compose.yml"],
+        compose_files=[PROJECT_ROOT / "tests/pywhales/components/dummy_compose.yml"],
         compose_profiles=["my_test_profile"],
         compose_compatibility=True,
     )
@@ -1572,7 +1572,7 @@ def test_compose_single_profile() -> None:
 
 def test_compose_multiple_profiles() -> None:
     docker = DockerClient(
-        compose_files=[PROJECT_ROOT / "tests/pydocker/components/dummy_compose.yml"],
+        compose_files=[PROJECT_ROOT / "tests/pywhales/components/dummy_compose.yml"],
         compose_profiles=["my_test_profile", "my_test_profile2"],
         compose_compatibility=True,
     )
@@ -1588,7 +1588,7 @@ def test_compose_multiple_profiles() -> None:
 def test_compose_anon_volumes_recreate_not_enabled() -> None:
     docker = DockerClient(
         compose_files=[
-            PROJECT_ROOT / "tests/pydocker/components/compose_anon_volumes.yml"
+            PROJECT_ROOT / "tests/pywhales/components/compose_anon_volumes.yml"
         ],
     )
     docker.compose.up(detach=True)
@@ -1610,7 +1610,7 @@ def test_compose_anon_volumes_recreate_not_enabled() -> None:
 def test_compose_anon_volumes_recreate_enabled() -> None:
     docker = DockerClient(
         compose_files=[
-            PROJECT_ROOT / "tests/pydocker/components/compose_anon_volumes.yml"
+            PROJECT_ROOT / "tests/pywhales/components/compose_anon_volumes.yml"
         ],
     )
     docker.compose.up(detach=True)
@@ -1633,7 +1633,7 @@ def test_compose_port() -> None:
     d = DockerClient(
         compose_files=[
             PROJECT_ROOT
-            / "tests/pydocker/components/dummy_compose_non_existent_image.yml"
+            / "tests/pywhales/components/dummy_compose_non_existent_image.yml"
         ]
     )
     service = "busybox"
@@ -1691,8 +1691,8 @@ def test_compose_port() -> None:
 def test_compose_ls_project_multiple_statuses() -> None:
     d = DockerClient(
         compose_files=[
-            PROJECT_ROOT / "tests/pydocker/components/dummy_compose_ends_quickly.yml",
-            PROJECT_ROOT / "tests/pydocker/components/dummy_compose.yml",
+            PROJECT_ROOT / "tests/pywhales/components/dummy_compose_ends_quickly.yml",
+            PROJECT_ROOT / "tests/pywhales/components/dummy_compose.yml",
         ],
         compose_compatibility=True,
         compose_project_name="test_compose_ls",
@@ -1793,7 +1793,7 @@ def test_docker_compose_run_build() -> None:
 
 
 def test_build_args() -> None:
-    compose_file = PROJECT_ROOT / "tests/pydocker/components/test-build-args.yml"
+    compose_file = PROJECT_ROOT / "tests/pywhales/components/test-build-args.yml"
     docker = DockerClient(compose_files=[compose_file])
     config = docker.compose.config()
 
@@ -1834,7 +1834,7 @@ def test_build_args() -> None:
     assert my_service.environment == {"DATADOG_HOST": "something"}
 
 
-@patch("pydocker.components.compose.cli_wrapper.run")
+@patch("pywhales.components.compose.cli_wrapper.run")
 def test_compose_publish_cli_basic(run_mock: Mock) -> None:
     test_application = "repo/app:tag"
     docker.compose.publish(test_application)
@@ -1845,7 +1845,7 @@ def test_compose_publish_cli_basic(run_mock: Mock) -> None:
     )
 
 
-@patch("pydocker.components.compose.cli_wrapper.run")
+@patch("pywhales.components.compose.cli_wrapper.run")
 def test_compose_publish_cli_all_flags(run_mock: Mock) -> None:
     docker.compose.publish(
         repository="repo/image:tag",
@@ -1956,7 +1956,7 @@ def test_docker_compose_publish(tmp_path: Path) -> None:
 
 
 COMPOSE_WD_FIXTURE_DIR = (
-    PROJECT_ROOT / "tests/pydocker/components/build_with_dependencies_test"
+    PROJECT_ROOT / "tests/pywhales/components/build_with_dependencies_test"
 )
 WD_DB_IMAGE = "withdeps_db"
 WD_APP_IMAGE = "withdeps_app"
@@ -1965,7 +1965,7 @@ WD_APP_IMAGE = "withdeps_app"
 @pytestmark
 def test_compose_build_with_dependencies(tmp_path: Path) -> None:
     """
-    This test demonstrates that the pydocker `compose.build` wrapper
+    This test demonstrates that the pywhales `compose.build` wrapper
     correctly passes through `--with-dependencies` to `docker compose`.
 
     It uses a tiny compose project with:
@@ -2037,7 +2037,7 @@ def test_owned_compose_events_cancel_idle_child(consume: bool) -> None:
             pipe_stdin=True,
         ) as raw,
         patch(
-            "pydocker.components.compose.cli_wrapper.stream_stdout_and_stderr",
+            "pywhales.components.compose.cli_wrapper.stream_stdout_and_stderr",
             return_value=raw,
         ) as start,
     ):
@@ -2071,7 +2071,7 @@ def test_owned_compose_events_release_child_on_parse_error(payload: str) -> None
             pipe_stdin=True,
         ) as raw,
         patch(
-            "pydocker.components.compose.cli_wrapper.stream_stdout_and_stderr",
+            "pywhales.components.compose.cli_wrapper.stream_stdout_and_stderr",
             return_value=raw,
         ),
     ):
@@ -2091,7 +2091,7 @@ def test_owned_compose_events_preserve_body_error() -> None:
             [sys.executable, "-c", "input()"], pipe_stdin=True
         ) as raw,
         patch(
-            "pydocker.components.compose.cli_wrapper.stream_stdout_and_stderr",
+            "pywhales.components.compose.cli_wrapper.stream_stdout_and_stderr",
             return_value=raw,
         ),
     ):
@@ -2118,7 +2118,7 @@ def test_owned_compose_events_preserve_eof_and_failure(exit_code: int) -> None:
             ]
         ) as raw,
         patch(
-            "pydocker.components.compose.cli_wrapper.stream_stdout_and_stderr",
+            "pywhales.components.compose.cli_wrapper.stream_stdout_and_stderr",
             return_value=raw,
         ),
     ):

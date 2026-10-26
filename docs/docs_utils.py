@@ -1,14 +1,84 @@
 import tempfile
+from collections.abc import Callable, Generator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Protocol, override
+from uuid import uuid4
 
-from pydocker import docker
-from pydocker.exceptions import DockerException
+from pydocker import Builder, Container, Image, Volume, docker
+from pydocker.exceptions import NoSuchImage
+from pydocker.utils import run
 
 
 class DisplayValue(Protocol):
     @override
     def __str__(self) -> str: ...
+
+
+def _example_names(command: Sequence[str]) -> list[str]:
+    return run([*docker.docker_cmd, *command]).splitlines()
+
+
+def _example_inventory[Resource](
+    command: Sequence[str], reference: Callable[[str], Resource]
+) -> Mapping[str, Resource]:
+    return {
+        name: reference(identifier)
+        for name, identifier in (
+            line.split("\t", 1) for line in _example_names(command)
+        )
+    }
+
+
+@contextmanager
+def _created_example[Resource](
+    create: Callable[[str], Resource],
+    inventory: Callable[[], Mapping[str, Resource]],
+    release: Callable[[Resource], None],
+) -> Generator[Resource]:
+    name = f"pydocker-docs-{uuid4().hex}"
+    borrowed = inventory().get(name)
+    if borrowed is not None:
+        yield borrowed
+        return
+    acquired: list[Resource] = []
+    try:
+        resource = create(name)
+        acquired.append(resource)
+        yield resource
+    finally:
+        if acquired:
+            release(acquired[0])
+        else:
+            candidate = inventory().get(name)
+            if candidate is not None:
+                release(candidate)
+
+
+@contextmanager
+def _example_image(name: str) -> Generator[Image]:
+    try:
+        image = docker.image.inspect(name)
+    except NoSuchImage:
+        try:
+            yield docker.image.pull(name)
+        finally:
+            if f"{name}:latest" in _example_names(
+                ["image", "ls", "--format", "{{.Repository}}:{{.Tag}}"]
+            ):
+                docker.image.remove(name, force=True, prune=False)
+    else:
+        yield image
+
+
+@contextmanager
+def _example_swarm() -> Generator[None]:
+    with ExitStack() as cleanup:
+        swarm = docker.system.info().swarm
+        if swarm is not None and swarm.local_node_state == "inactive":
+            docker.swarm.init()
+            cleanup.callback(docker.swarm.leave, force=True)
+        yield
 
 
 def write_code(index: int, attribute_access: str, value: DisplayValue) -> str:
@@ -21,48 +91,65 @@ type = {type(value)}, value = {value}
 def generate_code_demo_networks() -> str:
     result = []
 
-    network = docker.network.create("my-network")
-    with network:
-        container = docker.run(
-            "ubuntu",
-            ["sleep", "infinity"],
-            name="my_ubuntu",
-            detach=True,
-            networks=[network],
-            remove=True,
-        )
-        with container:
-            to_evaluate = [
-                "network.name",
-                "network.id",
-                "network.created",
-                "network.scope",
-                "network.driver",
-                "network.enable_ipv6",
-                "network.ipam.driver",
-                "network.ipam.config",
-                "network.ipam.options",
-                "network.internal",
-                "network.attachable",
-                "network.ingress",
-                "network.containers",
-                "network.options",
-                "network.labels",
-                "network.config_from",
-                "network.config_only",
-            ]
+    with (
+        _example_image("ubuntu"),
+        docker.network.create(f"pydocker-docs-{uuid4().hex}") as network,
+        _created_example(
+            lambda name: docker.run(
+                "ubuntu",
+                ["sleep", "infinity"],
+                name=name,
+                detach=True,
+                networks=[network],
+                pull="never",
+            ),
+            lambda: _example_inventory(
+                [
+                    "container",
+                    "list",
+                    "--all",
+                    "--no-trunc",
+                    "--format",
+                    "{{.Names}}\t{{.ID}}",
+                ],
+                lambda identifier: Container(
+                    docker.client_config, identifier, is_immutable_id=True
+                ),
+            ),
+            lambda container: container.remove(force=True),
+        ),
+    ):
+        to_evaluate = [
+            "network.name",
+            "network.id",
+            "network.created",
+            "network.scope",
+            "network.driver",
+            "network.enable_ipv6",
+            "network.ipam.driver",
+            "network.ipam.config",
+            "network.ipam.options",
+            "network.internal",
+            "network.attachable",
+            "network.ingress",
+            "network.containers",
+            "network.options",
+            "network.labels",
+            "network.config_from",
+            "network.config_only",
+        ]
 
-            for i, attribute_access in enumerate(to_evaluate):
-                value = eval(attribute_access)
-                result.append(write_code(i + 5, attribute_access, value))
+        for i, attribute_access in enumerate(to_evaluate):
+            value = eval(attribute_access)
+            result.append(write_code(i + 5, attribute_access, value))
 
     return "\n".join(result)
 
 
+@_example_swarm()
 def generate_code_demo_nodes() -> str:
     result = []
 
-    docker.swarm.init()
     node = docker.node.list()[0]
     print(node.id)
 
@@ -99,63 +186,62 @@ def generate_code_demo_nodes() -> str:
         value = eval(attribute_access)
         result.append(write_code(i + 4, attribute_access, value))
 
-    docker.swarm.leave(force=True)
-
     return "\n".join(result)
 
 
+@_example_swarm()
 def generate_code_demo_services() -> str:
     result = []
 
-    docker.swarm.init()
-    service = docker.service.create("busybox", ["ping", "www.google.com"])
-    print(service.id)
+    with (
+        _example_image("busybox"),
+        docker.service.create("busybox", ["ping", "www.google.com"]) as service,
+    ):
+        print(service.id)
 
-    to_evaluate = [
-        "service.id",
-        "service.version",
-        "service.created_at",
-        "service.updated_at",
-        "service.spec.name",
-        "service.spec.labels",
-        "service.spec.mode",
-        "service.spec.update_config",
-        "service.spec.rollback_config",
-        "service.spec.task_template.container_spec.image",
-        "service.spec.task_template.container_spec.labels",
-        "service.spec.task_template.container_spec.privileges",
-        "service.spec.task_template.container_spec.stop_grace_period",
-        "service.spec.task_template.container_spec.isolation",
-        "service.spec.task_template.container_spec.env",
-        "service.spec.task_template.resources.limits",
-        "service.spec.task_template.resources.reservations",
-        "service.previous_spec",
-        "service.endpoint.spec",
-        "service.endpoint.ports",
-        "service.endpoint.virtual_ips",
-        "service.update_status",
-    ]
+        to_evaluate = [
+            "service.id",
+            "service.version",
+            "service.created_at",
+            "service.updated_at",
+            "service.spec.name",
+            "service.spec.labels",
+            "service.spec.mode",
+            "service.spec.update_config",
+            "service.spec.rollback_config",
+            "service.spec.task_template.container_spec.image",
+            "service.spec.task_template.container_spec.labels",
+            "service.spec.task_template.container_spec.privileges",
+            "service.spec.task_template.container_spec.stop_grace_period",
+            "service.spec.task_template.container_spec.isolation",
+            "service.spec.task_template.container_spec.env",
+            "service.spec.task_template.resources.limits",
+            "service.spec.task_template.resources.reservations",
+            "service.previous_spec",
+            "service.endpoint.spec",
+            "service.endpoint.ports",
+            "service.endpoint.virtual_ips",
+            "service.update_status",
+        ]
 
-    for i, attribute_access in enumerate(to_evaluate):
-        value = eval(attribute_access)
-        result.append(write_code(i + 4, attribute_access, value))
-
-    docker.swarm.leave(force=True)
+        for i, attribute_access in enumerate(to_evaluate):
+            value = eval(attribute_access)
+            result.append(write_code(i + 4, attribute_access, value))
 
     return "\n".join(result)
 
 
+@_example_swarm()
 def generate_code_demo_configs() -> str:
     result = []
 
-    docker.swarm.init()
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
+    with tempfile.TemporaryDirectory() as tmp_dir, ExitStack() as cleanup:
         config_file = Path(tmp_dir) / "file.conf"
         config_file.write_text("Hello world!")
         config = docker.config.create(
-            "my_config", config_file, labels={"hello": "world"}
+            f"pydocker-docs-{uuid4().hex}", config_file, labels={"hello": "world"}
         )
+        cleanup.callback(config.remove)
         print(config.id)
 
         to_evaluate = [
@@ -172,17 +258,22 @@ def generate_code_demo_configs() -> str:
             value = eval(attribute_access)
             result.append(write_code(i + 4, attribute_access, value))
 
-    docker.swarm.leave(force=True)
-
     return "\n".join(result)
 
 
 def generate_code_demo_volumes() -> str:
     result = []
 
-    volume = docker.volume.create()
-
-    with volume:
+    with _created_example(
+        lambda name: docker.volume.create(name),
+        lambda: _example_inventory(
+            ["volume", "ls", "--format", "{{.Name}}\t{{.Name}}"],
+            lambda identifier: Volume(
+                docker.client_config, identifier, is_immutable_id=True
+            ),
+        ),
+        lambda volume: volume.remove(),
+    ) as volume:
         to_evaluate = [
             "volume.name",
             "volume.driver",
@@ -195,7 +286,7 @@ def generate_code_demo_volumes() -> str:
         ]
 
         for i, attribute_access in enumerate(to_evaluate):
-            value = eval(attribute_access)
+            value = eval(attribute_access, {}, {"volume": volume})
             result.append(write_code(i + 4, attribute_access, value))
 
     return "\n".join(result)
@@ -204,9 +295,16 @@ def generate_code_demo_volumes() -> str:
 def generate_code_demo_builders() -> str:
     result = []
 
-    builder = docker.buildx.create()
-
-    with builder:
+    with _created_example(
+        lambda name: docker.buildx.create(name=name),
+        lambda: _example_inventory(
+            ["buildx", "ls", "--format", "{{.Name}}\t{{.Name}}"],
+            lambda identifier: Builder(
+                docker.client_config, identifier, is_immutable_id=True
+            ),
+        ),
+        lambda builder: builder.remove(),
+    ) as builder:
         to_evaluate = [
             "builder.name",
             "builder.driver",
@@ -223,7 +321,7 @@ def generate_code_demo_builders() -> str:
         ]
 
         for i, attribute_access in enumerate(to_evaluate):
-            value = eval(attribute_access)
+            value = eval(attribute_access, {}, {"builder": builder})
             result.append(write_code(i + 4, attribute_access, value))
 
     return "\n".join(result)
@@ -232,36 +330,36 @@ def generate_code_demo_builders() -> str:
 def generate_code_demo_images() -> str:
     result = []
 
-    image = docker.image._pull_if_necessary("ubuntu")
-    print(f"Generating example for {image.repo_tags}")
-    to_evaluate = [
-        "image.id",
-        "image.repo_tags",
-        "image.repo_digests",
-        "image.parent",
-        "image.comment",
-        "image.created",
-        "image.container",
-        "image.container_config",
-        "image.docker_version",
-        "image.author",
-        "image.config",
-        "image.architecture",
-        "image.os",
-        "image.os_version",
-        "image.size",
-        "image.virtual_size",
-        "image.graph_driver.name",
-        "image.graph_driver.data",
-        "image.root_fs.type",
-        "image.root_fs.layers",
-        "image.root_fs.base_layer",
-        "image.metadata",
-    ]
+    with _example_image("ubuntu") as image:
+        print(f"Generating example for {image.repo_tags}")
+        to_evaluate = [
+            "image.id",
+            "image.repo_tags",
+            "image.repo_digests",
+            "image.parent",
+            "image.comment",
+            "image.created",
+            "image.container",
+            "image.container_config",
+            "image.docker_version",
+            "image.author",
+            "image.config",
+            "image.architecture",
+            "image.os",
+            "image.os_version",
+            "image.size",
+            "image.virtual_size",
+            "image.graph_driver.name",
+            "image.graph_driver.data",
+            "image.root_fs.type",
+            "image.root_fs.layers",
+            "image.root_fs.base_layer",
+            "image.metadata",
+        ]
 
-    for i, attribute_access in enumerate(to_evaluate):
-        value = eval(attribute_access)
-        result.append(write_code(i + 4, attribute_access, value))
+        for i, attribute_access in enumerate(to_evaluate):
+            value = eval(attribute_access)
+            result.append(write_code(i + 4, attribute_access, value))
 
     return "\n".join(result)
 
@@ -269,24 +367,46 @@ def generate_code_demo_images() -> str:
 def generate_code_demo_plugins() -> str:
     result = []
 
+    name = "mochoa/s3fs-volume-plugin"
+    borrowed = next(
+        (
+            plugin
+            for plugin in docker.plugin.list()
+            if plugin.name in (name, f"{name}:latest")
+        ),
+        None,
+    )
+    acquired = []
     try:
-        plugin = docker.plugin.inspect("mochoa/s3fs-volume-plugin")
-    except DockerException:
-        plugin = docker.plugin.install("mochoa/s3fs-volume-plugin")
+        if borrowed is None:
+            plugin = docker.plugin.install(name)
+            acquired.append(plugin)
+        else:
+            plugin = borrowed
+        print(f"Generating example for {plugin.name}")
+        to_evaluate = [
+            "plugin.id",
+            "plugin.name",
+            "plugin.enabled",
+            "plugin.settings",
+            "plugin.plugin_reference",
+            "plugin.config",
+        ]
 
-    print(f"Generating example for {plugin.name}")
-    to_evaluate = [
-        "plugin.id",
-        "plugin.name",
-        "plugin.enabled",
-        "plugin.settings",
-        "plugin.plugin_reference",
-        "plugin.config",
-    ]
-
-    for i, attribute_access in enumerate(to_evaluate):
-        value = eval(attribute_access)
-        result.append(write_code(i + 4, attribute_access, value))
+        for i, attribute_access in enumerate(to_evaluate):
+            value = eval(attribute_access)
+            result.append(write_code(i + 4, attribute_access, value))
+    finally:
+        if borrowed is None and (
+            acquired
+            or any(
+                installed_name in (name, f"{name}:latest")
+                for installed_name in _example_names(
+                    ["plugin", "list", "--format", "{{.Name}}"]
+                )
+            )
+        ):
+            docker.plugin.remove(name, force=True)
 
     return "\n".join(result)
 
@@ -294,9 +414,28 @@ def generate_code_demo_plugins() -> str:
 def generate_code_demo_containers() -> str:
     result = []
 
-    container = docker.run("ubuntu", ["sleep", "infinity"], detach=True)
-
-    with container:
+    with (
+        _example_image("ubuntu"),
+        _created_example(
+            lambda name: docker.run(
+                "ubuntu", ["sleep", "infinity"], name=name, detach=True, pull="never"
+            ),
+            lambda: _example_inventory(
+                [
+                    "container",
+                    "list",
+                    "--all",
+                    "--no-trunc",
+                    "--format",
+                    "{{.Names}}\t{{.ID}}",
+                ],
+                lambda identifier: Container(
+                    docker.client_config, identifier, is_immutable_id=True
+                ),
+            ),
+            lambda container: container.remove(force=True),
+        ) as container,
+    ):
         to_evaluate = [
             "container.id",
             "container.created",
@@ -449,7 +588,7 @@ def generate_code_demo_containers() -> str:
         ]
 
         for i, attribute_access in enumerate(to_evaluate):
-            value = eval(attribute_access)
+            value = eval(attribute_access, {}, {"container": container})
             result.append(write_code(i + 4, attribute_access, value))
 
     return "\n".join(result)
@@ -473,13 +612,25 @@ def add_code_example(destination: Path, markdown_file: str, code: str) -> None:
     print("added code example for", markdown_file)
 
 
-def add_all_code_examples(destination: Path) -> None:
-    add_code_example(destination, "plugins.md", generate_code_demo_plugins())
-    add_code_example(destination, "configs.md", generate_code_demo_configs())
-    add_code_example(destination, "networks.md", generate_code_demo_networks())
-    add_code_example(destination, "volumes.md", generate_code_demo_volumes())
-    add_code_example(destination, "images.md", generate_code_demo_images())
-    add_code_example(destination, "containers.md", generate_code_demo_containers())
-    add_code_example(destination, "builders.md", generate_code_demo_builders())
-    add_code_example(destination, "nodes.md", generate_code_demo_nodes())
-    add_code_example(destination, "services.md", generate_code_demo_services())
+def add_all_code_examples(destination: Path, live_examples: bool = False) -> None:
+    examples = {
+        "plugins.md": generate_code_demo_plugins,
+        "configs.md": generate_code_demo_configs,
+        "networks.md": generate_code_demo_networks,
+        "volumes.md": generate_code_demo_volumes,
+        "images.md": generate_code_demo_images,
+        "containers.md": generate_code_demo_containers,
+        "builders.md": generate_code_demo_builders,
+        "nodes.md": generate_code_demo_nodes,
+        "services.md": generate_code_demo_services,
+    }
+    for markdown_file, provider in examples.items():
+        code = (
+            provider()
+            if live_examples
+            else (
+                "# Live Docker output omitted. Run `uv run --locked python -m docs.autogen "
+                "--live-examples` with Docker available to generate it.\n"
+            )
+        )
+        add_code_example(destination, markdown_file, code)

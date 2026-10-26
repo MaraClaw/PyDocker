@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Final
@@ -87,7 +88,7 @@ def md_generate(
         target_file_path.write_text(filedata, encoding="utf-8")
 
 
-def mkdoc_autogen() -> None:
+def mkdoc_autogen(live_examples: bool = False) -> None:
     template_path = PROJECT_ROOT / "docs" / "template"
     destination_path = PROJECT_ROOT / "docs" / "generated_sources"
     md_generate(pages, template_path, destination_path)
@@ -95,8 +96,16 @@ def mkdoc_autogen() -> None:
     for file in destination_path.rglob("*.md"):
         file.write_text(add_links(file.read_text(encoding="utf-8")), encoding="utf-8")
 
-    add_all_code_examples(destination_path)
+    add_all_code_examples(destination_path, live_examples=live_examples)
 
 
 if __name__ == "__main__":
-    mkdoc_autogen()
+    parser = argparse.ArgumentParser(
+        description="Generate documentation without Docker by default."
+    )
+    parser.add_argument(
+        "--live-examples",
+        action="store_true",
+        help="Generate live examples using Docker.",
+    )
+    mkdoc_autogen(live_examples=parser.parse_args().live_examples)

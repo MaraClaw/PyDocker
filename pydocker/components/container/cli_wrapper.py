@@ -1420,7 +1420,8 @@ class ContainerCLI(DockerCLICaller):
         if stream:
             return iterator
         else:
-            return "".join(x[1].decode() for x in iterator)
+            with iterator:
+                return "".join(x[1].decode() for x in iterator)
 
     def list(
         self,

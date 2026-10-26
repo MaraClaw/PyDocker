@@ -33,6 +33,7 @@ from pydocker.exceptions import (
     NoSuchVolume,
 )
 from pydocker.test_utils import get_all_jsons, random_name
+from pydocker.utils import stream_stdout_and_stderr
 
 
 @patch("pydocker.components.container.cli_wrapper.run")
@@ -869,6 +870,113 @@ def test_remove_manually(ctr_client: DockerClient) -> None:
     assert container in ctr_client.container.list(all=True)
     ctr_client.container.remove(container)
     assert container not in ctr_client.container.list(all=True)
+
+
+@pytest.mark.parametrize("source", ["stdout", "stderr"])
+@pytest.mark.parametrize("follow", [False, True])
+def test_eager_container_logs_release_child_when_decoding_fails(
+    source: str, follow: bool
+) -> None:
+    client = DockerClient(client_call=[sys.executable])
+    with (
+        stream_stdout_and_stderr(
+            [
+                sys.executable,
+                "-c",
+                "import sys; print('ready', flush=True); sys.stdin.buffer.read(1); "
+                f"sys.{source}.buffer.write(b'\\xff\\n'); sys.{source}.buffer.flush(); "
+                "sys.stdin.buffer.read(1)",
+            ],
+            pipe_stdin=True,
+        ) as raw,
+        patch.object(client.container, "inspect"),
+        patch(
+            "pydocker.components.container.cli_wrapper.stream_stdout_and_stderr",
+            return_value=raw,
+        ) as start,
+    ):
+        assert raw._queue.get(timeout=3) == ("stdout", b"ready\n")
+        assert raw.stdin is not None
+        raw.stdin.write(b"x")
+        raw.stdin.flush()
+
+        with pytest.raises(UnicodeDecodeError):
+            client.container.logs("workload", follow=follow)
+
+        assert raw._process.returncode == (
+            1 if sys.platform == "win32" else -signal.SIGKILL
+        )
+        assert all(not thread.is_alive() for thread in raw._threads)
+        assert all(
+            pipe.closed
+            for pipe in (raw.stdin, raw._process.stdout, raw._process.stderr)
+            if pipe is not None
+        )
+        assert ("--follow" in start.call_args.args[0]) is follow
+
+
+@pytest.mark.parametrize("source", ["stdout", "stderr"])
+def test_eager_container_logs_preserve_text_when_child_exits(source: str) -> None:
+    client = DockerClient(client_call=[sys.executable])
+    with (
+        stream_stdout_and_stderr(
+            [
+                sys.executable,
+                "-c",
+                f"import sys; sys.{source}.buffer.write(b'first\\nlast')",
+            ]
+        ) as raw,
+        patch.object(client.container, "inspect"),
+        patch(
+            "pydocker.components.container.cli_wrapper.stream_stdout_and_stderr",
+            return_value=raw,
+        ),
+    ):
+        output = client.container.logs("workload")
+
+        assert output == "first\nlast"
+        assert raw._process.returncode == 0
+        assert all(not thread.is_alive() for thread in raw._threads)
+
+
+@pytest.mark.parametrize("source", ["stdout", "stderr"])
+@pytest.mark.parametrize("follow", [False, True])
+def test_streaming_container_logs_retain_caller_ownership(
+    source: str, follow: bool
+) -> None:
+    client = DockerClient(client_call=[sys.executable])
+    with (
+        stream_stdout_and_stderr(
+            [
+                sys.executable,
+                "-c",
+                "import sys; print('ready', flush=True); sys.stdin.buffer.read(1); "
+                f"sys.{source}.buffer.write(b'\\xff\\n'); sys.{source}.buffer.flush(); "
+                "sys.stdin.buffer.read(1)",
+            ],
+            pipe_stdin=True,
+        ) as raw,
+        patch.object(client.container, "inspect"),
+        patch(
+            "pydocker.components.container.cli_wrapper.stream_stdout_and_stderr",
+            return_value=raw,
+        ) as start,
+    ):
+        assert raw._queue.get(timeout=3) == ("stdout", b"ready\n")
+
+        output = client.container.logs("workload", follow=follow, stream=True)
+
+        assert output is raw
+        assert raw._process.poll() is None
+        assert raw.stdin is not None
+        raw.stdin.write(b"x")
+        raw.stdin.flush()
+        assert next(output) == (source, b"\xff\n")
+        assert raw._process.poll() is None
+        assert ("--follow" in start.call_args.args[0]) is follow
+        output.close()
+        assert raw._process.returncode is not None
+        assert all(not thread.is_alive() for thread in raw._threads)
 
 
 def test_simple_logs(ctr_client: DockerClient) -> None:

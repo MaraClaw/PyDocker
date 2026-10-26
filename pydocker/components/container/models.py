@@ -217,7 +217,6 @@ class ContainerConfig(DockerCamelModel):
     stop_signal: str | int | None = None
     stop_timeout: int | None = None
     shell: list[str] | None = None
-    systemd_mode: bool | None = None
 
 
 class Mount(DockerCamelModel):
@@ -291,7 +290,6 @@ class ContainerInspectResult(DockerCamelModel):
     args: list[str] | None = None
     state: ContainerState | None = None
     image: str | None = None
-    pod: str | None = None
     resolv_conf_path: str | None = None
     hostname_path: Path | None = None
     hosts_path: Path | None = None
@@ -312,5 +310,3 @@ class ContainerInspectResult(DockerCamelModel):
     mounts: list[Mount] | None = None
     config: ContainerConfig | None = None
     network_settings: NetworkSettings | None = None
-    namespace: str | None = None
-    is_infra: bool | None = None

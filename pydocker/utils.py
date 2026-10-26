@@ -7,15 +7,17 @@ import signal
 import subprocess
 import sys
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import suppress
 from datetime import datetime, timedelta
 from pathlib import Path
 from queue import Queue
 from subprocess import PIPE, Popen
-from threading import Thread
-from types import MappingProxyType
+from threading import Event, Thread
+from types import MappingProxyType, TracebackType
 from typing import (
     IO,
     Literal,
+    Self,
     overload,
     override,
 )
@@ -27,7 +29,6 @@ from pydocker.exceptions import (
     NoSuchContainer,
     NoSuchImage,
     NoSuchNetwork,
-    NoSuchPod,
     NoSuchService,
     NoSuchVolume,
     NotASwarmManager,
@@ -80,7 +81,6 @@ def to_docker_camel(string: str) -> str:
             "ipam_config": "IPAMConfig",
             "tls_info": "TLSInfo",
             "virtual_ips": "VirtualIPs",
-            "infra_container_id": "InfraContainerID",
             "default_api_version": "DefaultAPIVersion",
             "min_api_version": "MinAPIVersion",
         }
@@ -101,7 +101,7 @@ def get_docker_exception_type(output: bytes | None) -> type[DockerException]:
     if output is None or len(output) == 0:
         return DockerException
     decoded = output.decode().lower()
-    if "no such image" in decoded or "image not known" in decoded:
+    if "no such image" in decoded:
         return NoSuchImage
     if "no such service" in decoded or (
         "service" in decoded and "not found" in decoded
@@ -109,8 +109,6 @@ def get_docker_exception_type(output: bytes | None) -> type[DockerException]:
         return NoSuchService
     if "no such container" in decoded:
         return NoSuchContainer
-    if "no such pod" in decoded:
-        return NoSuchPod
     if "this node is not a swarm manager" in decoded:
         return NotASwarmManager
     if "no such volume" in decoded:
@@ -251,34 +249,153 @@ def to_list(x: object) -> list[object]:
     return [x]
 
 
-def reader(
-    pipe: IO[bytes], pipe_name: str, queue: Queue[tuple[str, bytes] | None]
-) -> None:
-    try:
-        with pipe:
-            for line in iter(pipe.readline, b""):
-                queue.put((pipe_name, line))
-    finally:
-        queue.put(None)
-
-
-class ProcessStream(Iterable[tuple[str, bytes]]):
-    """Wrapper around a streaming subprocess that also exposes stdin.
+class ProcessStream(Iterator[tuple[str, bytes]]):
+    """Own a local CLI process, its pipes and its reader threads.
 
     Iterating over a ``ProcessStream`` yields ``(source, line)`` tuples.
+    Exhaustion drains output and reports command failures. ``close()`` or
+    context exit cancels the local CLI without reporting its cancellation as
+    a command failure. A bare loop break does not close the stream, and closing
+    it does not remove daemon-managed containers or other remote resources.
     """
 
-    def __init__(
-        self,
-        iterator: Iterable[tuple[str, bytes]],
-        stdin: IO[bytes] | None = None,
-    ) -> None:
-        self.iterator: Iterable[tuple[str, bytes]] = iterator
-        self.stdin: IO[bytes] | None = stdin
+    def __init__(self, process: Popen[bytes], full_cmd: list[str]) -> None:
+        self._process = process
+        self._full_cmd = full_cmd
+        self.stdin = process.stdin
+        self._queue: Queue[tuple[str, bytes] | None] = Queue()
+        self._stop = Event()
+        self._closed = False
+        self._remaining_readers = 2
+        self._stderr = bytearray()
+        assert process.stdout is not None
+        assert process.stderr is not None
+        self._threads = tuple(
+            Thread(target=self._read_pipe, args=(pipe, name), daemon=True)
+            for pipe, name in ((process.stdout, "stdout"), (process.stderr, "stderr"))
+        )
+        for thread in self._threads:
+            thread.start()
+
+    def _read_pipe(self, pipe: IO[bytes], name: str) -> None:
+        pending = b""
+        try:
+            with pipe:
+                os.set_blocking(pipe.fileno(), False)
+                while not self._stop.is_set():
+                    try:
+                        chunk = os.read(pipe.fileno(), 65536)
+                    except BlockingIOError:
+                        self._stop.wait(0.01)
+                        continue
+                    if not chunk:
+                        if pending:
+                            self._queue.put((name, pending))
+                        break
+                    *lines, pending = (pending + chunk).split(b"\n")
+                    for line in lines:
+                        self._queue.put((name, line + b"\n"))
+        finally:
+            self._queue.put(None)
 
     @override
-    def __iter__(self) -> Iterator[tuple[str, bytes]]:
-        return iter(self.iterator)
+    def __iter__(self) -> Self:
+        return self
+
+    @override
+    def __next__(self) -> tuple[str, bytes]:
+        if self._closed:
+            raise StopIteration
+        while self._remaining_readers:
+            item = self._queue.get()
+            if self._closed:
+                raise StopIteration
+            if item is None:
+                self._remaining_readers -= 1
+            else:
+                source, line = item
+                if source == "stderr":
+                    self._stderr.extend(line)
+                return item
+        exit_code = self._process.wait()
+        if self._closed:
+            raise StopIteration
+        self.close()
+        if exit_code != 0:
+            stderr = bytes(self._stderr)
+            exception_type = get_docker_exception_type(stderr)
+            raise exception_type(
+                command_launched=self._full_cmd, return_code=exit_code, stderr=stderr
+            )
+        raise StopIteration
+
+    def close(self) -> None:
+        """Cancel consumption and reap the local CLI, even before iteration."""
+        if self._closed:
+            return
+        self._closed = True
+        self._stop.set()
+        self._queue.put(None)
+        if self._process.poll() is None:
+            with suppress(ProcessLookupError):
+                self._process.kill()
+            self._process.wait(timeout=1)
+        if self.stdin is not None and not self.stdin.closed:
+            os.set_blocking(self.stdin.fileno(), False)
+            with suppress(BrokenPipeError, BlockingIOError):
+                self.stdin.close()
+        for thread in self._threads:
+            thread.join()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+
+class MappedProcessStream[T](Iterator[T]):
+    """Carry process ownership through decoding, filtering or event parsing."""
+
+    def __init__(self, stream: ProcessStream, iterator: Iterator[T]) -> None:
+        self._stream = stream
+        self._iterator = iterator
+
+    @override
+    def __iter__(self) -> Self:
+        return self
+
+    @override
+    def __next__(self) -> T:
+        yielded = False
+        try:
+            result = next(self._iterator)
+            yielded = True
+            return result
+        finally:
+            if not yielded:
+                self.close()
+
+    def close(self) -> None:
+        """Release the process independently of whether mapping has started."""
+        self._stream.close()
+        self._iterator = iter(())
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
 
 
 def _start_process(
@@ -286,7 +403,7 @@ def _start_process(
     env: Mapping[str, str] | None = None,
     pass_fds: Sequence[int] = (),
     pipe_stdin: bool = False,
-) -> tuple[Popen[bytes], Queue[tuple[str, bytes] | None]]:
+) -> ProcessStream:
     """Start a subprocess and wire up reader threads for stdout/stderr."""
     if env is None:
         subprocess_env = None
@@ -302,36 +419,7 @@ def _start_process(
         env=subprocess_env,
         pass_fds=pass_fds,
     )
-    q: Queue[tuple[str, bytes] | None] = Queue()
-    # we use deamon threads to avoid hanging if the user uses ctrl+c
-    th = Thread(target=reader, args=[process.stdout, "stdout", q])
-    th.daemon = True
-    th.start()
-    th = Thread(target=reader, args=[process.stderr, "stderr", q])
-    th.daemon = True
-    th.start()
-    return process, q
-
-
-def _iter_process(
-    process: Popen[bytes],
-    q: Queue[tuple[str, bytes] | None],
-    full_cmd: list[str],
-) -> Iterator[tuple[str, bytes]]:
-    """Iterate stdout/stderr from a non-interactive process."""
-    full_stderr = b""
-    for _ in range(2):
-        for source, line in iter(q.get, None):
-            yield source, line
-            if source == "stderr":
-                full_stderr += line
-
-    exit_code = process.wait()
-    if exit_code != 0:
-        exception_type = get_docker_exception_type(full_stderr)
-        raise exception_type(
-            command_launched=full_cmd, return_code=exit_code, stderr=full_stderr
-        )
+    return ProcessStream(process, [str(x) for x in full_cmd])
 
 
 def stream_stdout_and_stderr(
@@ -347,10 +435,7 @@ def stream_stdout_and_stderr(
     ``result.stdin`` is available for writing.  Otherwise ``result.stdin``
     is ``None``.
     """
-    process, q = _start_process(full_cmd, env, pass_fds, pipe_stdin)
-    return ProcessStream(
-        _iter_process(process, q, [str(x) for x in full_cmd]), process.stdin
-    )
+    return _start_process(full_cmd, env, pass_fds, pipe_stdin)
 
 
 def format_mapping_for_cli(

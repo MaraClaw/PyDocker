@@ -4,7 +4,7 @@ import builtins
 import datetime as dt
 import json
 import tempfile
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType, TracebackType
@@ -29,6 +29,7 @@ from pydocker.client_config import (
 from pydocker.components.buildx.imagetools.cli_wrapper import ImagetoolsCLI
 from pydocker.components.buildx.models import BuilderInspectResult, BuilderNode
 from pydocker.utils import (
+    MappedProcessStream,
     ValidPath,
     format_mapping_for_cli,
     run,
@@ -176,7 +177,7 @@ class BuildxCLI(DockerCLICaller):
         *,
         stream_logs: Literal[True],
         remote_definition: str | None = None,
-    ) -> Iterator[str]: ...
+    ) -> MappedProcessStream[str]: ...
 
     @overload
     def bake(
@@ -195,7 +196,7 @@ class BuildxCLI(DockerCLICaller):
         metadata_file: ValidPath | None = None,
         stream_logs: bool = False,
         remote_definition: str | None = None,
-    ) -> BakeResult | Iterator[str]: ...
+    ) -> BakeResult | MappedProcessStream[str]: ...
 
     def bake(
         self,
@@ -215,7 +216,7 @@ class BuildxCLI(DockerCLICaller):
         metadata_file: ValidPath | None = None,
         stream_logs: bool = False,
         remote_definition: str | None = None,
-    ) -> BakeResult | Iterator[str]:
+    ) -> BakeResult | MappedProcessStream[str]:
         """Bake is similar to make, it allows you to build things declared in a file.
 
         For example it allows you to build multiple docker image in parallel.
@@ -375,7 +376,7 @@ class BuildxCLI(DockerCLICaller):
         target: str | None = None,
         *,
         stream_logs: Literal[True],
-    ) -> Iterator[str]: ...
+    ) -> MappedProcessStream[str]: ...
 
     @overload
     def build(
@@ -407,7 +408,9 @@ class BuildxCLI(DockerCLICaller):
         tags: str | Sequence[str] = (),
         target: str | None = None,
         stream_logs: bool = False,
-    ) -> pydocker.components.image.cli_wrapper.Image | Iterator[str] | None: ...
+    ) -> (
+        pydocker.components.image.cli_wrapper.Image | MappedProcessStream[str] | None
+    ): ...
 
     def build(
         self,
@@ -444,7 +447,7 @@ class BuildxCLI(DockerCLICaller):
         target: str | None = None,
         # TODO: ulimit
         stream_logs: bool = False,
-    ) -> pydocker.components.image.cli_wrapper.Image | Iterator[str] | None:
+    ) -> pydocker.components.image.cli_wrapper.Image | MappedProcessStream[str] | None:
         """Build a Docker image with builkit as backend.
 
         Alias: `docker.build(...)`
@@ -764,7 +767,7 @@ class BuildxCLI(DockerCLICaller):
         filters: Mapping[str, str] = MappingProxyType({}),
         *,
         stream_logs: Literal[True],
-    ) -> Iterator[str]: ...
+    ) -> MappedProcessStream[str]: ...
 
     @overload
     def prune(
@@ -780,14 +783,14 @@ class BuildxCLI(DockerCLICaller):
         all: bool = False,
         filters: Mapping[str, str] = MappingProxyType({}),
         stream_logs: bool = False,
-    ) -> Iterator[str] | None: ...
+    ) -> MappedProcessStream[str] | None: ...
 
     def prune(
         self,
         all: bool = False,
         filters: Mapping[str, str] = MappingProxyType({}),
         stream_logs: bool = False,
-    ) -> Iterator[str] | None:
+    ) -> MappedProcessStream[str] | None:
         """Remove build cache on the current builder.
 
         Parameters:
@@ -879,6 +882,9 @@ def format_dict_for_buildx(options: BuildxOptions) -> str:
 
 def stream_buildx_logs(
     full_cmd: Sequence[object], env: Mapping[str, str] | None = None
-) -> Iterator[str]:
-    for _, value in stream_stdout_and_stderr(full_cmd, env=env):
-        yield value.decode(errors="replace")
+) -> MappedProcessStream[str]:
+    """Decode Buildx output while retaining close and context ownership."""
+    stream = stream_stdout_and_stderr(full_cmd, env=env)
+    return MappedProcessStream(
+        stream, (value.decode(errors="replace") for _, value in stream)
+    )

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pydocker"
-version = "0.1.0"
+version = "0.1.1"
 description = "A Docker client for Python, designed to be fun and intuitive!"
 readme = "README.md"
 license = "MIT"
@@ -91,7 +91,6 @@ exclude = ["docs/site"]
 [tool.pytest.ini_options]
 markers = [
   "docker: marks tests as needing a docker engine to run",
-  "podman: marks tests as needing a podman engine to run",
 ]
 xfail_strict = true
 pythonpath = ["./"]

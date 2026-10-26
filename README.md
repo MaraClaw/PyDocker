@@ -27,8 +27,8 @@ The upstream project and contributors retain their attribution under the MIT lic
 uv pip install pydocker
 ```
 
-See [the Docker/Podman CLI guide](https://github.com/MaraClaw/PyDocker/blob/HEAD/docs/template/docker_client.md#the-dockerpodman-cli)
-for instructions on installing Docker/Podman.
+See [the Docker CLI guide](https://github.com/MaraClaw/PyDocker/blob/HEAD/docs/template/docker_client.md#the-docker-cli)
+for instructions on installing Docker.
 
 ## Some cool examples
 

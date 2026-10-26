@@ -2,10 +2,8 @@ import tempfile
 from pathlib import Path
 from typing import Protocol, override
 
-from pydocker import DockerClient, docker
+from pydocker import docker
 from pydocker.exceptions import DockerException
-
-podman = DockerClient(client_call=["podman"])
 
 
 class DisplayValue(Protocol):
@@ -457,31 +455,6 @@ def generate_code_demo_containers() -> str:
     return "\n".join(result)
 
 
-def generate_code_demo_pods() -> str:
-    result = []
-
-    pod = podman.pod.create("my-pod")
-
-    with pod:
-        to_evaluate = [
-            "pod.id",
-            "pod.name",
-            "pod.created",
-            "pod.state",
-            "pod.num_containers",
-            "pod.infra_container_id",
-            "pod.shared_namespaces",
-            "pod.hostname",
-            "pod.exit_policy",
-        ]
-
-        for i, attribute_access in enumerate(to_evaluate):
-            value = eval(attribute_access)
-            result.append(write_code(i + 5, attribute_access, value))
-
-    return "\n".join(result)
-
-
 def add_links(text: str) -> str:
     text = text.replace(
         "`pydocker.Container`",
@@ -510,4 +483,3 @@ def add_all_code_examples(destination: Path) -> None:
     add_code_example(destination, "builders.md", generate_code_demo_builders())
     add_code_example(destination, "nodes.md", generate_code_demo_nodes())
     add_code_example(destination, "services.md", generate_code_demo_services())
-    add_code_example(destination, "pods.md", generate_code_demo_pods())

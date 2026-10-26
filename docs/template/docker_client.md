@@ -21,7 +21,6 @@
 * [`docker.system`](sub-commands/system.md)
 * [`docker.trust`](sub-commands/trust.md)
 * [`docker.volume`](sub-commands/volume.md)
-* [`podman.pod`](sub-commands/pod.md)
 
 
 ## Other commands
@@ -93,21 +92,18 @@ In the end, unless you use this type of logic in your code,
 pydocker is safe to use with multithreading and multiprocessing.
 
 
-## The Docker/Podman CLI
+## The Docker CLI
 
-pydocker needs the Docker or Podman CLI to work (unlike docker-py).
+pydocker needs the Docker CLI to work (unlike docker-py).
 Most of the time, users already have the CLI installed on their machines. It's possible to 
-verify that the CLI is there by doing `docker --help` (or `podman --help`) in the command line.
+verify that the CLI is there by doing `docker --help` in the command line.
 
 Sometimes, the CLI might not be available on the system, it can happen if you want to control
 Docker from within a container with `-v /var/run/docker.sock:/var/run/docker.sock`, or if you
 want to connect to a remote daemon with the `host` argument.
 
-Instructions for installing Docker can be found at <https://docs.docker.com/engine/install/>,
-and Podman at <https://podman.io/docs/installation/>. Note that if connecting to Docker/Podman
-remotely then the Docker daemon (`dockerd`) is not needed, and similarly for Podman it is
-possible to use `podman-remote` (available as a static binary from
-<https://github.com/containers/podman/releases/latest>).
+Instructions for installing Docker can be found at <https://docs.docker.com/engine/install/>.
+Note that if connecting to Docker remotely then a local Docker daemon (`dockerd`) is not needed.
 
 Previously, when using python-on-whales, the Docker CLI was downloaded automatically, but
 this functionality was removed under <https://github.com/gabrieldemarmiesse/python-on-whales/pull/633>.

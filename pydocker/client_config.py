@@ -77,7 +77,7 @@ class ClientConfig:
     compose_project_directory: ValidPath | None = None
     compose_compatibility: bool | None = None
     client_call: list[str] = field(default_factory=lambda: ["docker"])
-    client_type: Literal["docker", "podman", "nerdctl", "unknown"] = "unknown"
+    client_type: Literal["docker", "nerdctl", "unknown"] = "unknown"
     _client_call_with_path: list[Path | str] | None = None
 
     def get_client_call_with_path(self) -> list[Path | str]:
@@ -254,6 +254,33 @@ class ReloadableObjectFromJson[InspectResultT, ReferenceT: str | None = str](
     @override
     def _fetch_and_parse_inspect_result(self, reference: ReferenceT) -> InspectResultT:
         json_object = self._fetch_inspect_result_json(reference)
+        return self._parse_inspect_result(json_object)
+
+    def _parse_inspect_results(
+        self, json_str: str, references: Sequence[str]
+    ) -> list[InspectResultT]:
+        try:
+            json_objects = pydantic.TypeAdapter(
+                list[dict[str, pydantic.JsonValue]]
+            ).validate_json(json_str)
+        except pydantic.ValidationError as err:
+            raise ParsingError("Invalid batch inspect JSON response") from err
+        if len(json_objects) != len(references):
+            raise ParsingError(
+                f"Expected {len(references)} inspect results, received {len(json_objects)}"
+            )
+        results = [self._parse_inspect_result(item) for item in json_objects]
+        resolved: dict[str, str] = {}
+        for reference, result in zip(references, results, strict=True):
+            identity = getattr(result, self._id_in_inspect)
+            if not isinstance(identity, str) or not identity:
+                raise ParsingError(f"Missing inspect identity for {reference!r}")
+            if reference in resolved and resolved[reference] != identity:
+                raise ParsingError(f"Inconsistent inspect identity for {reference!r}")
+            resolved[reference] = identity
+        return results
+
+    def _parse_inspect_result(self, json_object: dict[str, Any]) -> InspectResultT:
         try:
             return self._parse_json_object(json_object)
         except pydantic.ValidationError as err:

@@ -19,6 +19,7 @@ from pydocker.client_config import (
     ClientConfig,
     Command,
     DockerCLICaller,
+    ParsingError,
     ReloadableObjectFromJson,
 )
 from pydocker.components.network.models import (
@@ -57,7 +58,16 @@ class Network(ReloadableObjectFromJson[NetworkInspectResult]):
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        self.remove()
+        try:
+            self.remove()
+        except NoSuchNetwork:
+            return
+        except BaseException as cleanup_error:
+            if exc_val is None:
+                raise
+            raise BaseExceptionGroup(
+                "Network body and cleanup both failed", [exc_val, cleanup_error]
+            ) from None
 
     @override
     def _fetch_inspect_result_json(self, reference: str) -> dict[str, Any]:
@@ -127,10 +137,6 @@ class Network(ReloadableObjectFromJson[NetworkInspectResult]):
     @property
     def config_only(self) -> bool | None:
         return self._get_inspect_result().config_only
-
-    @property
-    def dns_enabled(self) -> bool | None:
-        return self._get_inspect_result().dns_enabled
 
     @override
     def __repr__(self) -> str:
@@ -205,7 +211,6 @@ class NetworkCLI(DockerCLICaller):
         self,
         name: str,
         attachable: bool = False,
-        disable_dns: bool = False,
         driver: str | None = None,
         gateway: str | None = None,
         subnet: str | None = None,
@@ -216,14 +221,12 @@ class NetworkCLI(DockerCLICaller):
 
         Parameters:
             name: The name of the network
-            disable_dns: A podman only option to disable the dns plugin
 
         # Returns
             A `pydocker.Network`.
         """
         full_cmd = Command([*self.docker_cmd, "network", "create"])
         full_cmd.add_flag("--attachable", attachable)
-        full_cmd.add_flag("--disable-dns", disable_dns)
         full_cmd.add_simple_arg("--driver", driver)
         full_cmd.add_simple_arg("--gateway", gateway)
         full_cmd.add_simple_arg("--subnet", subnet)
@@ -269,9 +272,9 @@ class NetworkCLI(DockerCLICaller):
     def inspect(self, x: str) -> Network: ...
 
     @overload
-    def inspect(self, x: builtins.list[str]) -> builtins.list[Network]: ...
+    def inspect(self, x: Iterable[str]) -> builtins.list[Network]: ...
 
-    def inspect(self, x: str | builtins.list[str]) -> Network | builtins.list[Network]:
+    def inspect(self, x: str | Iterable[str]) -> Network | builtins.list[Network]:
         """Returns a `pydocker.Network` object from a string (id or network name).
 
         Parameters:
@@ -282,8 +285,25 @@ class NetworkCLI(DockerCLICaller):
         """
         if isinstance(x, str):
             return Network(self.client_config, x)
-        else:
-            return [Network(self.client_config, reference) for reference in x]
+        references = list(x)
+        if not references:
+            return []
+        json_str = run([*self.docker_cmd, "network", "inspect", *references])
+        parser = Network(self.client_config, references[0], is_immutable_id=True)
+        snapshots = parser._parse_inspect_results(json_str, references)
+        networks = []
+        for reference, snapshot in zip(references, snapshots, strict=True):
+            if snapshot.id is None or not (
+                reference
+                and (snapshot.id.startswith(reference) or snapshot.name == reference)
+            ):
+                raise ParsingError(
+                    f"Network inspect identity does not match {reference!r}"
+                )
+            network = Network(self.client_config, snapshot.id, is_immutable_id=True)
+            network._set_inspect_result(snapshot)
+            networks.append(network)
+        return networks
 
     def list(
         self, filters: Iterable[NetworkListFilter] | Mapping[str, Any] = ()

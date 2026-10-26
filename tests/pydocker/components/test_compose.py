@@ -1,8 +1,11 @@
 import contextlib
 import json
 import os
+import re
 import shutil
 import signal
+import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Iterable
@@ -15,14 +18,203 @@ from unittest.mock import Mock, patch
 
 import pytest
 import pytz
+from pydantic import ValidationError
 
 import pydocker
 from pydocker import Container, DockerClient, DockerException
 from pydocker.components.compose.models import ComposeConfig, ComposeEvent
 from pydocker.components.container.models import ContainerState
+from pydocker.components.top import ComposeTopResult, TopParseError
 from pydocker.exceptions import NoSuchImage
-from pydocker.test_utils import get_all_jsons
-from pydocker.utils import PROJECT_ROOT
+from pydocker.test_utils import get_all_jsons, random_name
+from pydocker.utils import PROJECT_ROOT, stream_stdout_and_stderr
+
+
+@patch("pydocker.components.compose.cli_wrapper.run")
+@pytest.mark.parametrize("services", [None, "web", ["web", "worker"]])
+def test_top_uses_project_configuration_when_selecting_services(
+    run_mock: Mock, services: str | list[str] | None
+) -> None:
+    client = DockerClient(
+        client_call=[sys.executable, "engine"],
+        context="remote",
+        compose_files=["first.yml", "second.yml"],
+        compose_profiles=["debug"],
+        compose_env_files=["vars.env"],
+        compose_project_name="owned",
+        compose_project_directory="/project",
+        compose_compatibility=True,
+    )
+    run_mock.return_value = (
+        "SERVICE # PID CMD\nweb 1 7 python  server.py --name two words"
+    )
+
+    result = client.compose.top(services)
+
+    assert isinstance(result, ComposeTopResult)
+    assert result.sections[0].container is None
+    assert result.sections[0].headings == ("SERVICE", "#", "PID", "CMD")
+    assert result.sections[0].rows == (
+        ("web", "1", "7", "python  server.py --name two words"),
+    )
+    selected = (
+        []
+        if services is None
+        else [services]
+        if isinstance(services, str)
+        else services
+    )
+    run_mock.assert_called_once_with(
+        [
+            Path(sys.executable),
+            "engine",
+            "--context",
+            "remote",
+            "compose",
+            "--file",
+            "first.yml",
+            "--file",
+            "second.yml",
+            "--profile",
+            "debug",
+            "--env-file",
+            "vars.env",
+            "--project-name",
+            "owned",
+            "--project-directory",
+            "/project",
+            "--compatibility",
+            "top",
+            *selected,
+        ]
+    )
+
+
+@patch("pydocker.components.compose.cli_wrapper.run")
+def test_top_keeps_sections_separate_when_compose_groups_containers(
+    run_mock: Mock,
+) -> None:
+    client = DockerClient(client_call=[sys.executable])
+    output = "owned-web-1\nUID PID CMD\n---------------------\nroot 7 python  web.py\n\nowned-web-2\nPID USER COMMAND\n8 worker sleep 300\n"
+    run_mock.return_value = output
+
+    result = client.compose.top()
+
+    assert result.raw_output == output
+    assert [
+        (section.container, section.headings, section.rows)
+        for section in result.sections
+    ] == [
+        ("owned-web-1", ("UID", "PID", "CMD"), (("root", "7", "python  web.py"),)),
+        ("owned-web-2", ("PID", "USER", "COMMAND"), (("8", "worker", "sleep 300"),)),
+    ]
+
+
+@pytest.mark.parametrize("raw", [False, True])
+@patch("pydocker.components.compose.cli_wrapper.run")
+def test_top_is_noop_when_service_selection_is_empty(run_mock: Mock, raw: bool) -> None:
+    client = DockerClient(client_call=["nonexistent-executable-for-top-noop"])
+
+    result = client.compose.top([], raw=raw)
+
+    assert result == ("" if raw else ComposeTopResult("", ()))
+    run_mock.assert_not_called()
+
+
+@patch("pydocker.components.compose.cli_wrapper.run")
+@pytest.mark.parametrize("output", ["", "\n\n"])
+def test_top_returns_empty_sections_when_project_has_no_processes(
+    run_mock: Mock, output: str
+) -> None:
+    client = DockerClient(client_call=[sys.executable])
+    run_mock.return_value = output
+
+    result = client.compose.top()
+
+    assert result == ComposeTopResult(output, ())
+
+
+@patch("pydocker.components.compose.cli_wrapper.run")
+@pytest.mark.parametrize(
+    "output",
+    ["owned-web-1", "owned-web-1\nPID CMD\n7", "SERVICE # CMD PID\nweb 1 sleep 300 7"],
+)
+def test_top_rejects_malformed_sections_when_parsing_is_requested(
+    run_mock: Mock, output: str
+) -> None:
+    client = DockerClient(client_call=[sys.executable])
+    run_mock.return_value = output
+
+    with pytest.raises(TopParseError, match="raw=True"):
+        client.compose.top()
+
+
+@patch(
+    "pydocker.components.compose.cli_wrapper.run", return_value="unrecognized layout\n"
+)
+def test_top_exposes_raw_output_when_compose_layout_is_unknown(run_mock: Mock) -> None:
+    client = DockerClient(client_call=[sys.executable])
+
+    result = client.compose.top("web", raw=True)
+
+    assert result == "unrecognized layout\n"
+
+
+@patch("pydocker.utils.subprocess.run")
+@pytest.mark.parametrize("raw", [False, True])
+def test_top_retains_compose_exception_when_service_is_missing(
+    run_mock: Mock, raw: bool
+) -> None:
+    client = DockerClient(client_call=[sys.executable])
+    run_mock.return_value = subprocess.CompletedProcess(
+        [], 1, b"", b"no such service: absent"
+    )
+
+    with pytest.raises(DockerException) as error:
+        client.compose.top("absent", raw=raw)
+
+    assert error.value.stderr == "no such service: absent"
+    assert error.value.docker_command[-2:] == ["top", "absent"]
+
+
+def test_top_preserves_attribution_when_inspecting_owned_live_project(
+    docker_client: DockerClient, tmp_path: Path
+) -> None:
+    compose_file = tmp_path / "top-compose.yml"
+    compose_file.write_text(
+        'services:\n  web:\n    image: python:3.14.8-slim-trixie\n    command: ["sleep", "300"]\n'
+        '  worker:\n    image: python:3.14.8-slim-trixie\n    command: ["sleep", "301"]\n'
+    )
+    project = DockerClient(
+        client_call=docker_client.client_config.client_call,
+        compose_files=[compose_file],
+        compose_project_name=f"top-{random_name()}",
+    )
+    try:
+        project.compose.up(detach=True)
+
+        result = project.compose.top("web")
+
+        assert result.sections
+        assert all(
+            "sleep 301" not in row[-1]
+            for section in result.sections
+            for row in section.rows
+        )
+        assert any(
+            "sleep 300" in row[-1]
+            for section in result.sections
+            for row in section.rows
+        )
+        for section in result.sections:
+            if section.container is None:
+                assert section.headings[:2] == ("SERVICE", "#")
+                assert all(row[0] == "web" for row in section.rows)
+            else:
+                assert "web" in section.container
+    finally:
+        project.compose.down(timeout=0)
+
 
 pytestmark = pytest.mark.skipif(
     not pydocker.docker.compose.is_installed(),
@@ -470,9 +662,18 @@ def test_docker_compose_stop_stream() -> None:
     docker.compose.up(["my_service", "busybox", "alpine"], detach=True)
     logs = _collect_logs(docker.compose.stop(stream_logs=True))
     assert len(logs) >= 2
+    assert all(source in ("stdout", "stderr") for source, _ in logs)
     full_logs_as_binary = b"".join(log for _, log in logs)
-    assert b"Container components_busybox_1  Stopping" in full_logs_as_binary
-    assert b"Container components_busybox_1  Stopped" in full_logs_as_binary
+    assert re.search(
+        rb"Container\s+components_busybox_1\s+Stopping\b", full_logs_as_binary
+    )
+    assert re.search(
+        rb"Container\s+components_busybox_1\s+Stopped\b", full_logs_as_binary
+    )
+    assert (
+        _container_state(docker.container.inspect("components_busybox_1")).running
+        is False
+    )
 
 
 def test_docker_compose_up_rm() -> None:
@@ -528,9 +729,14 @@ def test_docker_compose_start_stream() -> None:
     assert docker.compose.ps() == []
     logs = _collect_logs(docker.compose.start(["busybox"], stream_logs=True))
     assert len(logs) >= 2
+    assert all(source in ("stdout", "stderr") for source, _ in logs)
     full_logs_as_binary = b"".join(log for _, log in logs)
-    assert b"Container components_busybox_1  Starting" in full_logs_as_binary
-    assert b"Container components_busybox_1  Started" in full_logs_as_binary
+    assert re.search(
+        rb"Container\s+components_busybox_1\s+Starting\b", full_logs_as_binary
+    )
+    assert re.search(
+        rb"Container\s+components_busybox_1\s+Started\b", full_logs_as_binary
+    )
     assert _container_state(docker.compose.ps()[0]).running is True
     docker.compose.down(timeout=1)
 
@@ -620,8 +826,15 @@ def test_docker_compose_pull_stream() -> None:
     for log_type, log_value in logs:
         assert log_type in ("stdout", "stderr")
         logs_as_big_binary += log_value
-    assert b"busybox Pulled" in logs_as_big_binary
-    assert b"Pull complete" in logs_as_big_binary
+    assert re.search(
+        rb"(?m)^[ \t]*(?:Image[ \t]+)?busybox(?::latest)?[ \t]+Pulling\b",
+        logs_as_big_binary,
+    )
+    assert re.search(
+        rb"(?m)^[ \t]*(?:Image[ \t]+)?busybox(?::latest)?[ \t]+Pulled\b",
+        logs_as_big_binary,
+    )
+    docker.image.inspect("busybox:latest")
 
 
 def test_docker_compose_pull_ignore_pull_failures() -> None:
@@ -842,50 +1055,58 @@ def test_config_complexe_compose() -> None:
 
 
 def test_compose_down_networks() -> None:
-    compose_file = PROJECT_ROOT / "tests/pydocker/components/complex-compose.yml"
-    docker = DockerClient(compose_files=[compose_file], compose_compatibility=True)
-
-    # Start services to create networks
-    docker.compose.up(
-        ["my_service", "network_service"],
-        detach=True,
-        scales={"my_service": 1},
-        build=True,
+    compose_file = PROJECT_ROOT / "tests/pydocker/components/cleanup-compose.yml"
+    project_name = f"cleanup-{random_name()}"
+    docker = DockerClient(
+        compose_files=[compose_file],
+        compose_project_name=project_name,
+        compose_compatibility=True,
     )
+    expected_network_names = {
+        f"{project_name}_{network}"
+        for network in (
+            "some-network",
+            "other-network",
+            "app_net_1",
+            "app_net_2",
+            "app_net_3",
+            "app_net_4",
+            "app_net_5",
+        )
+    }
+    try:
+        docker.compose.up(["my_service", "network_service"], detach=True)
+        network_names = {network.name for network in docker.network.list()}
+        assert expected_network_names <= network_names
 
-    # Check that networks are created
-    networks = docker.network.list()
-    network_names = [network.name for network in networks]
-    assert "components_some-network" in network_names
-    assert "components_other-network" in network_names
-    assert "components_app_net_1" in network_names
-    assert "components_app_net_2" in network_names
-    assert "components_app_net_3" in network_names
-    assert "components_app_net_4" in network_names
-    assert "components_app_net_5" in network_names
+        docker.compose.down()
 
-    # Stop services - Docker Compose automatically removes unused networks
-    docker.compose.down()
-
-    # Networks should be removed when no containers are using them (normal Docker Compose behavior)
-    networks_after_down = docker.network.list()
-    network_names_after = [network.name for network in networks_after_down]
-
-    # Verify the networks have been cleaned up as expected
-    assert "components_some-network" not in network_names_after
-    assert "components_other-network" not in network_names_after
-    assert "components_app_net_1" not in network_names_after
+        network_names_after = {network.name for network in docker.network.list()}
+        assert expected_network_names.isdisjoint(network_names_after)
+    finally:
+        docker.compose.down(volumes=True, timeout=0)
 
 
 def test_compose_down_volumes() -> None:
-    compose_file = PROJECT_ROOT / "tests/pydocker/components/complex-compose.yml"
-    docker = DockerClient(compose_files=[compose_file], compose_compatibility=True)
-    docker.compose.up(["my_service"], detach=True, scales={"my_service": 1}, build=True)
-    assert docker.volume.exists("components_dodo")
-    docker.compose.down()
-    assert docker.volume.exists("components_dodo")
-    docker.compose.down(volumes=True)
-    assert not docker.volume.exists("components_dodo")
+    compose_file = PROJECT_ROOT / "tests/pydocker/components/cleanup-compose.yml"
+    project_name = f"cleanup-{random_name()}"
+    docker = DockerClient(
+        compose_files=[compose_file],
+        compose_project_name=project_name,
+        compose_compatibility=True,
+    )
+    volume_name = f"{project_name}_dodo"
+    try:
+        docker.compose.up(["my_service"], detach=True)
+        assert docker.volume.exists(volume_name)
+
+        docker.compose.down()
+        assert docker.volume.exists(volume_name)
+
+        docker.compose.down(volumes=True)
+        assert not docker.volume.exists(volume_name)
+    finally:
+        docker.compose.down(volumes=True, timeout=0)
 
 
 @pytest.mark.parametrize("json_file", get_all_jsons("compose"))
@@ -1052,7 +1273,10 @@ def test_compose_run_service_ports_integration(service_ports: bool) -> None:
 
 
 def test_compose_version() -> None:
-    assert "Docker Compose version v2" in docker.compose.version()
+    assert re.fullmatch(
+        r"Docker Compose version v?\d+\.\d+\.\d+(?:[-+]\S+)?",
+        docker.compose.version(),
+    )
 
 
 def test_compose_logs_simple_use_case() -> None:
@@ -1543,33 +1767,88 @@ def test_compose_publish_cli_all_flags(run_mock: Mock) -> None:
     )
 
 
-def test_docker_compose_publish() -> None:
-    docker = DockerClient(
-        compose_files=[
-            PROJECT_ROOT
-            / "tests/pydocker/components/dummy_compose_with_container_names.yml"
-        ],
-        compose_compatibility=True,
+def test_docker_compose_publish(tmp_path: Path) -> None:
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text(
+        "services:\n"
+        "  busybox:\n    image: busybox:latest\n    command: sleep infinity\n"
+        "  alpine:\n    image: alpine:latest\n    command: sleep infinity\n"
+        "    environment:\n"
+        "      DD_API_KEY: __your_datadog_api_key_here__\n"
+        "      POSTGRES_HOST_AUTH_METHOD: trust\n"
+        "  dodo:\n    image: busybox:latest\n    entrypoint: /bin/sh\n"
     )
+    project_name = f"publish-{random_name()}"
+    docker = DockerClient()
+    docker_executable = str(docker.client_config.get_client_call_with_path()[0])
+    registry_capabilities: list[bool] = []
+    # Compose 2.35 lacks these flags; newer releases need them for HTTP registries.
+    for arguments in (
+        ["compose", "publish", "--insecure-registry", "--help"],
+        ["compose", "--insecure-registry", "127.0.0.1:12345", "--help"],
+    ):
+        result = subprocess.run(
+            [docker_executable, *arguments],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if "unknown flag: --insecure-registry" not in result.stderr.splitlines():
+            result.check_returncode()
+        registry_capabilities.append(result.returncode == 0)
+    publish_registry_supported, oci_registry_supported = registry_capabilities
 
     with docker.run(
         "registry:3",
         remove=True,
         privileged=False,
-        publish=[(5000, 5000)],
+        publish=[("127.0.0.1::5000",)],
         detach=True,
-        name="test_registry_container",
-    ):
-        docker.compose.publish(
-            "localhost:5000/repo/app:tag",
-            with_env=True,
-            allow_publishing_sensitive_data=True,
+        name=f"test-registry-{random_name()}",
+    ) as registry:
+        assert registry.network_settings is not None
+        published_ports = registry.network_settings.ports
+        assert published_ports is not None
+        binding = published_ports["5000/tcp"][0]
+        assert binding["HostIp"] == "127.0.0.1"
+        registry_address = f"{binding['HostIp']}:{binding['HostPort']}"
+        repository = f"{registry_address}/repo/app:tag"
+        registry_cli = tmp_path / "registry_cli.py"
+        registry_cli.write_text(
+            "import os\n"
+            "import sys\n"
+            "\n"
+            "args = sys.argv[1:]\n"
+            f"if 'publish' in args and {publish_registry_supported!r}:\n"
+            "    args.insert(args.index('publish') + 1, '--insecure-registry')\n"
+            f"elif 'publish' not in args and {oci_registry_supported!r}:\n"
+            f"    args[1:1] = ['--insecure-registry', {registry_address!r}]\n"
+            f"os.execvp({docker_executable!r}, [{docker_executable!r}, *args])\n"
+        )
+        client_call = [sys.executable, str(registry_cli)]
+        compose_client = DockerClient(
+            compose_files=[compose_file],
+            compose_project_name=project_name,
+            compose_compatibility=True,
+            client_call=client_call,
         )
 
-        app_client = DockerClient(compose_files=["oci://localhost:5000/repo/app:tag"])
-        app_client.compose.pull()
-        app_client.compose.up(detach=True)
-        app_client.compose.rm(stop=True)
+        app_client = DockerClient(
+            compose_files=[f"oci://{repository}"],
+            compose_project_name=project_name,
+            client_call=client_call,
+        )
+        try:
+            compose_client.compose.publish(
+                repository,
+                with_env=True,
+                allow_publishing_sensitive_data=True,
+            )
+            app_client.compose.pull()
+            app_client.compose.up(detach=True)
+            app_client.compose.rm(stop=True)
+        finally:
+            compose_client.compose.down(volumes=True, timeout=0)
 
 
 COMPOSE_WD_FIXTURE_DIR = (
@@ -1640,3 +1919,116 @@ def test_compose_build_with_dependencies(tmp_path: Path) -> None:
 
     # just in case leave it all clean
     docker.image.remove([WD_APP_IMAGE, WD_DB_IMAGE], force=True, prune=True)
+
+
+@pytest.mark.parametrize("consume", [False, True])
+def test_owned_compose_events_cancel_idle_child(consume: bool) -> None:
+    with (
+        stream_stdout_and_stderr(
+            [
+                sys.executable,
+                "-c",
+                'print(\'{"type":"container","action":"start","service":"web"}\', flush=True); input()',
+            ],
+            pipe_stdin=True,
+        ) as raw,
+        patch(
+            "pydocker.components.compose.cli_wrapper.stream_stdout_and_stderr",
+            return_value=raw,
+        ) as start,
+    ):
+        stream = docker.compose.events(["web", "worker"])
+        with stream:
+            if consume:
+                event = next(stream)
+                assert isinstance(event, ComposeEvent)
+                assert event.action == "start"
+                assert event.service == "web"
+            stream.close()
+            stream.close()
+
+        assert list(stream) == []
+        assert raw._process.poll() is not None
+        assert all(not thread.is_alive() for thread in raw._threads)
+        assert start.call_args.args[0] == [
+            *docker.compose.docker_compose_cmd,
+            "events",
+            "--json",
+            "web",
+            "worker",
+        ]
+
+
+@pytest.mark.parametrize("payload", ["not-json", '{"time":"invalid"}'])
+def test_owned_compose_events_release_child_on_parse_error(payload: str) -> None:
+    with (
+        stream_stdout_and_stderr(
+            [sys.executable, "-c", f"print({payload!r}, flush=True); input()"],
+            pipe_stdin=True,
+        ) as raw,
+        patch(
+            "pydocker.components.compose.cli_wrapper.stream_stdout_and_stderr",
+            return_value=raw,
+        ),
+    ):
+        stream = docker.compose.events()
+
+        with pytest.raises((json.JSONDecodeError, ValidationError)):
+            next(stream)
+
+        assert raw._process.poll() is not None
+        assert all(not thread.is_alive() for thread in raw._threads)
+        assert list(stream) == []
+
+
+def test_owned_compose_events_preserve_body_error() -> None:
+    with (
+        stream_stdout_and_stderr(
+            [sys.executable, "-c", "input()"], pipe_stdin=True
+        ) as raw,
+        patch(
+            "pydocker.components.compose.cli_wrapper.stream_stdout_and_stderr",
+            return_value=raw,
+        ),
+    ):
+        stream = docker.compose.events()
+        error = RuntimeError("event consumer failed")
+
+        with pytest.raises(RuntimeError) as raised, stream:
+            raise error
+
+        assert raised.value is error
+        assert raw._process.poll() is not None
+
+
+@pytest.mark.parametrize("exit_code", [0, 8])
+def test_owned_compose_events_preserve_eof_and_failure(exit_code: int) -> None:
+    with (
+        stream_stdout_and_stderr(
+            [
+                sys.executable,
+                "-c",
+                'import sys; print(\'{"action":"start","service":"web"}\'); '
+                "sys.stderr.write('No such image: missing\\n'); "
+                f"sys.exit({exit_code})",
+            ]
+        ) as raw,
+        patch(
+            "pydocker.components.compose.cli_wrapper.stream_stdout_and_stderr",
+            return_value=raw,
+        ),
+    ):
+        stream = docker.compose.events()
+        output: list[ComposeEvent] = []
+
+        if exit_code:
+            with pytest.raises(NoSuchImage) as raised:
+                output.extend(stream)
+            assert raised.value.return_code == exit_code
+            assert raised.value.stderr == "No such image: missing\n"
+        else:
+            output.extend(stream)
+
+        assert [event.action for event in output] == ["start"]
+        assert raw._process.poll() == exit_code
+        assert all(not thread.is_alive() for thread in raw._threads)

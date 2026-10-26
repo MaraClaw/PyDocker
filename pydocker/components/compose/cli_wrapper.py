@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import timedelta
 from pathlib import Path
 from types import MappingProxyType
@@ -17,7 +17,9 @@ from pydocker.components.compose.models import (
     ComposeEvent,
     ComposeProject,
 )
+from pydocker.components.top import ComposeTopResult, parse_compose_top
 from pydocker.utils import (
+    MappedProcessStream,
     custom_parse_object_as,
     format_mapping_for_cli,
     format_port_arg,
@@ -1090,28 +1092,65 @@ class ComposeCLI(DockerCLICaller):
         else:
             run(full_cmd)
 
-    def top(self) -> None:
-        """Not yet implemented"""
-        raise NotImplementedError
+    @overload
+    def top(
+        self, services: str | list[str] | None = None, *, raw: Literal[False] = False
+    ) -> ComposeTopResult: ...
+
+    @overload
+    def top(
+        self, services: str | list[str] | None = None, *, raw: Literal[True]
+    ) -> str: ...
+
+    @overload
+    def top(
+        self, services: str | list[str] | None = None, *, raw: bool
+    ) -> ComposeTopResult | str: ...
+
+    def top(
+        self, services: str | list[str] | None = None, *, raw: bool = False
+    ) -> ComposeTopResult | str:
+        """List processes using this client's Compose project configuration.
+
+        Parameters:
+            services: Service name(s), or None for all services. An explicit []
+                returns an empty result without resolving or invoking the CLI.
+            raw: Return CLI text without parsing, including unsupported layouts.
+
+        Returns:
+            ComposeTopResult retaining raw_output and ordered sections. Grouped
+            sections retain their container name; flat SERVICE/# tables retain
+            attribution in their original headings and cells, with container=None.
+
+        Raises:
+            TopParseError: A malformed or ambiguous table; use raw=True.
+            DockerException: CLI failures, including unknown services.
+        """
+        if services == []:
+            return "" if raw else ComposeTopResult("", ())
+        selected = [] if services is None else to_list(services)
+        output = run([*self.docker_compose_cmd, "top", *selected])
+        return output if raw else parse_compose_top(output)
 
     def events(
         self,
         services: Sequence[str] = (),
-    ) -> Iterator[ComposeEvent]:
+    ) -> MappedProcessStream[ComposeEvent]:
         """Return Docker Compose events for the specified services.
 
         This function streams events related to the specified services in real-time.
         If no services are specified, it streams events for all services in the current Compose project.
+        Use the returned stream as a context manager or call `close()` when
+        stopping early. A bare loop break does not release the local CLI.
 
         Example usage:
         ```python
         from pydocker import docker
 
         # Stream events for a specific service
-        for event in docker.compose.events(["my_service"]):
-            print(event)
-            # This will keep streaming events indefinitely.
-            # Use 'break' to exit the loop if needed.
+        with docker.compose.events(["my_service"]) as events:
+            for event in events:
+                print(event)
 
         # Stream events for all services in the Compose project
         for event in docker.compose.events():
@@ -1122,7 +1161,7 @@ class ComposeCLI(DockerCLICaller):
             services: A list of service names to filter events. If empty, events for all services are streamed.
 
         Returns:
-            An iterator that yields `ComposeEvent` objects representing the events.
+            A closeable iterator yielding `ComposeEvent` objects from stdout.
 
         Note:
             This function streams events indefinitely unless interrupted. Use it carefully in long-running processes.
@@ -1131,10 +1170,15 @@ class ComposeCLI(DockerCLICaller):
         """
         full_cmd = [*self.docker_compose_cmd, "events", "--json", *services]
 
-        iterator = stream_stdout_and_stderr(full_cmd)
-        for stream_origin, stream_content in iterator:
-            if stream_origin == "stdout":
-                yield ComposeEvent(**json.loads(stream_content))
+        stream = stream_stdout_and_stderr(full_cmd)
+        return MappedProcessStream(
+            stream,
+            (
+                ComposeEvent(**json.loads(content))
+                for origin, content in stream
+                if origin == "stdout"
+            ),
+        )
 
     def unpause(self, services: str | list[str] | None = None) -> None:
         """Unpause one or more services

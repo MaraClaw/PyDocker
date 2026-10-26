@@ -21,7 +21,7 @@ jobs:
         run: uv sync --locked
       - name: prepare
         run: |
-          ./scripts/ci-podman-update.sh
+          ./scripts/ci-setup.sh
           uv run --locked python -m docs.autogen
           cp docs/mkdocs.yml mkdocs.yml
       - name: Render
@@ -63,7 +63,6 @@ jobs:
           - test_network.py
           - test_node.py
           - test_plugin.py
-          - test_pod.py
           - test_service.py
           - test_stack.py
           - test_swarm.py
@@ -80,7 +79,7 @@ jobs:
           python-version: "3.14.8"
       - name: Install locked dependencies
         run: uv sync --locked
-      - name: Setup Podman and Docker
+      - name: Setup Docker
         run: |
           ./scripts/ci-setup.sh
       - name: Run tests
@@ -98,7 +97,7 @@ jobs:
           python-version: "3.14.8"
       - name: Install locked dependencies
         run: uv sync --locked
-      - name: Setup Podman and Docker
+      - name: Setup Docker
         run: |
           ./scripts/ci-setup.sh
       - name: Run tests
@@ -122,4 +121,4 @@ jobs:
           docker run hello-world
       - name: Run single test
         run: |
-          uv run --locked pytest -vv --no-runtime-skip -m "not podman" tests/pydocker/components/test_volume.py::test_simple_volume
+          uv run --locked pytest -vv --no-runtime-skip tests/pydocker/components/test_volume.py::test_simple_volume

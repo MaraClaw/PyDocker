@@ -17,7 +17,6 @@ from pydocker.components.manifest.cli_wrapper import ManifestCLI
 from pydocker.components.network.cli_wrapper import NetworkCLI
 from pydocker.components.node.cli_wrapper import NodeCLI
 from pydocker.components.plugin.cli_wrapper import PluginCLI
-from pydocker.components.pod.cli_wrapper import PodCLI
 from pydocker.components.secret.cli_wrapper import SecretCLI
 from pydocker.components.service.cli_wrapper import ServiceCLI
 from pydocker.components.stack.cli_wrapper import StackCLI
@@ -126,7 +125,7 @@ class DockerClient(DockerCLICaller):
             uses the path of the compose file.
         compose_compatibility: Use docker compose in compatibility mode.
         client_call: Client binary to use and how to call it. Default is `["docker"]`. You can try with
-            for example `["podman"]` or `["nerdctl"]`. The client must have the same commands and
+            for example `["docker", "--debug"]` or `["nerdctl"]`. The client must have the same commands and
             outputs as Docker to work. Some best effort support is done in case of divergences,
             meaning you can report issues occuring on some other binary than Docker, but
             we don't guarantee that it will be fixed.
@@ -141,15 +140,15 @@ class DockerClient(DockerCLICaller):
             You can also use this system to call Docker with sudo with `client_call=["sudo", "docker"]`
             (note that it won't ask for your password, so sudo should be passwordless during the python
             program execution).
-        client_binary: Deprecated, use `client_call`. If you used before `client_binary="podman"`, now use
-            `client_call=["podman"]`.
+        client_binary: Deprecated, use `client_call`. If you used before `client_binary="docker"`, now use
+            `client_call=["docker"]`.
         client_type: The kind of client that is called by the Python process. It allows PyDocker to
             adapt to the client's behavior if two client have a different behavior. The `client_call` is not
             enough for PyDocker to know what kind of client you're using. For example, if you use
             a symlink to call Docker, PyDocker will not know that you're using Docker.
             Default is "unknown". If at some point, PyDocker has to choose
             a behavior and `client_type` is `"unknown"`, it will raise an exception and ask you to specify
-            what kind of client you're working with. Valid values are `"docker"`, `"podman"`, "`nerdctl"` and `"unknown"`.
+            what kind of client you're working with. Valid values are `"docker"`, `"nerdctl"` and `"unknown"`.
     """
 
     def __init__(
@@ -174,12 +173,12 @@ class DockerClient(DockerCLICaller):
         compose_compatibility: bool | None = None,
         client_binary: str = "docker",
         client_call: Sequence[str] = ("docker",),
-        client_type: Literal["docker", "podman", "nerdctl", "unknown"] = "unknown",
+        client_type: Literal["docker", "nerdctl", "unknown"] = "unknown",
     ) -> None:
         if client_binary != "docker":
             warnings.warn(
                 "The usage of client_binary is deprecated, use `client_call` instead. For "
-                "example if you used `client_binary='podman'`, now you should use `client_call=['podman']`.",
+                "example if you used `client_binary='docker'`, now you should use `client_call=['docker']`.",
                 stacklevel=2,
             )
             client_call = [client_binary]
@@ -218,7 +217,6 @@ class DockerClient(DockerCLICaller):
         self.network = NetworkCLI(self.client_config)
         self.node = NodeCLI(self.client_config)
         self.plugin = PluginCLI(self.client_config)
-        self.pod = PodCLI(self.client_config)
         self.secret = SecretCLI(self.client_config)
         self.service = ServiceCLI(self.client_config)
         self.stack = StackCLI(self.client_config)
@@ -261,7 +259,7 @@ class DockerClient(DockerCLICaller):
         self.stats = self.container.stats
         self.stop = self.container.stop
         self.tag = self.image.tag
-        self.top = self.container.stop
+        self.top = self.container.top
         self.unpause = self.container.unpause
         self.update = self.container.update
         self.wait = self.container.wait

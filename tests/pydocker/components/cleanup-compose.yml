@@ -1,0 +1,30 @@
+services:
+  my_service:
+    image: busybox:latest
+    command: sleep infinity
+    volumes:
+      - dodo:/dodo
+    networks:
+      - some-network
+      - other-network
+  network_service:
+    image: busybox:latest
+    command: sleep infinity
+    networks:
+      - app_net_1
+      - app_net_2
+      - app_net_3
+      - app_net_4
+      - app_net_5
+
+networks:
+  some-network: {}
+  other-network: {}
+  app_net_1: {}
+  app_net_2: {}
+  app_net_3: {}
+  app_net_4: {}
+  app_net_5: {}
+
+volumes:
+  dodo: {}

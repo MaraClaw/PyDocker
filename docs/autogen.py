@@ -55,6 +55,7 @@ pages: Final[dict[str, list[str]]] = {
     "objects/volumes.md": ["pywhales.Volume"],
     "objects/tasks.md": [],
     "user_guide/docker_run.md": [],
+    "user_guide/build_performance.md": [],
     "user_guide/generic_resources.md": [],
     "user_guide/running_pywhales_inside_a_container.md": [],
     "user_guide/exceptions.md": [],

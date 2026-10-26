@@ -1,0 +1,76 @@
+name: Release on merge
+
+on:
+  pull_request_target:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          persist-credentials: false
+      - name: Read project version
+        id: version
+        run: |
+          python3 -I - <<'PY'
+          import os
+          import tomllib
+
+          with open("pyproject.toml", "rb") as project_file:
+              version = tomllib.load(project_file)["project"]["version"]
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"version={version}", file=output)
+          PY
+      - name: Publish release if absent
+        uses: actions/github-script@v8
+        env:
+          RELEASE_TAG: v${{ steps.version.outputs.version }}
+          MERGE_COMMIT_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        with:
+          script: |
+            const tag = process.env.RELEASE_TAG;
+
+            async function releaseExists() {
+              for await (const { data } of github.paginate.iterator(
+                github.rest.repos.listReleases,
+                { ...context.repo, per_page: 100 },
+              )) {
+                if (data.some(existing => existing.tag_name === tag)) {
+                  return true;
+                }
+              }
+              return false;
+            }
+
+            if (await releaseExists()) {
+              core.info(`Release ${tag} already exists; skipping.`);
+              return;
+            }
+
+            try {
+              await github.rest.repos.createRelease({
+                ...context.repo,
+                tag_name: tag,
+                name: tag,
+                target_commitish: process.env.MERGE_COMMIT_SHA,
+                generate_release_notes: true,
+                draft: false,
+                prerelease: false,
+              });
+            } catch (error) {
+              if (error.status === 422 && await releaseExists()) {
+                core.info(`Release ${tag} was created concurrently; skipping.`);
+                return;
+              }
+              throw error;
+            }

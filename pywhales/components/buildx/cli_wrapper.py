@@ -5,7 +5,6 @@ import datetime as dt
 import json
 import tempfile
 from collections.abc import Mapping, Sequence
-from enum import Enum
 from pathlib import Path
 from types import MappingProxyType, TracebackType
 from typing import (
@@ -37,15 +36,11 @@ from pywhales.utils import (
     to_list,
 )
 
-
-class GetImageMethod(Enum):
-    TAG = 1
-    IIDFILE = 2
-
-
 type BakeResult = dict[str, dict[str, dict[str, JsonValue]]]
 type BuildxOptions = Mapping[str, str | Path]
 type BuildxProgress = Literal["auto", "none", "plain", "quiet", "rawjson", "tty", False]
+type BuildxCall = Literal["build", "check", "outline", "targets"]
+type BuildxReportCall = Literal["check", "outline", "targets"]
 _BAKE_RESULT_ADAPTER: Final = TypeAdapter(BakeResult)
 
 
@@ -164,6 +159,10 @@ class BuildxCLI(DockerCLICaller):
         metadata_file: ValidPath | None = None,
         stream_logs: Literal[False] = False,
         remote_definition: str | None = None,
+        *,
+        call: Literal["build"] | None = None,
+        jobs: int | str | None = None,
+        return_config: Literal[True] = True,
     ) -> BakeResult: ...
 
     @overload
@@ -174,7 +173,7 @@ class BuildxCLI(DockerCLICaller):
         files: ValidPath | Sequence[ValidPath] = (),
         load: bool = False,
         cache: bool = True,
-        print: Literal[False] = False,
+        print: bool = False,
         progress: BuildxProgress = "auto",
         pull: bool = False,
         push: bool = False,
@@ -184,6 +183,9 @@ class BuildxCLI(DockerCLICaller):
         *,
         stream_logs: Literal[True],
         remote_definition: str | None = None,
+        call: BuildxCall | None = None,
+        jobs: int | str | None = None,
+        return_config: bool = True,
     ) -> MappedProcessStream[str]: ...
 
     @overload
@@ -201,9 +203,105 @@ class BuildxCLI(DockerCLICaller):
         set: Mapping[str, str] = MappingProxyType({}),
         variables: Mapping[str, str] = MappingProxyType({}),
         metadata_file: ValidPath | None = None,
-        stream_logs: bool = False,
+        stream_logs: Literal[False] = False,
         remote_definition: str | None = None,
-    ) -> BakeResult | MappedProcessStream[str]: ...
+        *,
+        call: Literal["build"] | None = None,
+        jobs: int | str | None = None,
+        return_config: Literal[False],
+    ) -> None: ...
+
+    @overload
+    def bake(
+        self,
+        targets: str | Sequence[str] = (),
+        builder: ValidBuilder | None = None,
+        files: ValidPath | Sequence[ValidPath] = (),
+        load: bool = False,
+        cache: bool = True,
+        print: bool = False,
+        progress: BuildxProgress = "auto",
+        pull: bool = False,
+        push: bool = False,
+        set: Mapping[str, str] = MappingProxyType({}),
+        variables: Mapping[str, str] = MappingProxyType({}),
+        metadata_file: ValidPath | None = None,
+        stream_logs: Literal[False] = False,
+        remote_definition: str | None = None,
+        *,
+        call: BuildxReportCall,
+        jobs: int | str | None = None,
+        return_config: bool = True,
+    ) -> str: ...
+
+    @overload
+    def bake(
+        self,
+        targets: str | Sequence[str] = (),
+        builder: ValidBuilder | None = None,
+        files: ValidPath | Sequence[ValidPath] = (),
+        load: bool = False,
+        cache: bool = True,
+        print: bool = False,
+        progress: BuildxProgress = "auto",
+        pull: bool = False,
+        push: bool = False,
+        set: Mapping[str, str] = MappingProxyType({}),
+        variables: Mapping[str, str] = MappingProxyType({}),
+        metadata_file: ValidPath | None = None,
+        stream_logs: Literal[False] = False,
+        remote_definition: str | None = None,
+        *,
+        call: BuildxCall | None = None,
+        jobs: int | str | None = None,
+        return_config: Literal[True] = True,
+    ) -> BakeResult | str: ...
+
+    @overload
+    def bake(
+        self,
+        targets: str | Sequence[str] = (),
+        builder: ValidBuilder | None = None,
+        files: ValidPath | Sequence[ValidPath] = (),
+        load: bool = False,
+        cache: bool = True,
+        print: bool = False,
+        progress: BuildxProgress = "auto",
+        pull: bool = False,
+        push: bool = False,
+        set: Mapping[str, str] = MappingProxyType({}),
+        variables: Mapping[str, str] = MappingProxyType({}),
+        metadata_file: ValidPath | None = None,
+        stream_logs: Literal[False] = False,
+        remote_definition: str | None = None,
+        *,
+        call: BuildxCall | None = None,
+        jobs: int | str | None = None,
+        return_config: Literal[False],
+    ) -> str | None: ...
+
+    @overload
+    def bake(
+        self,
+        targets: str | Sequence[str],
+        builder: ValidBuilder | None,
+        files: ValidPath | Sequence[ValidPath],
+        load: bool,
+        cache: bool,
+        print: bool,
+        progress: BuildxProgress,
+        pull: bool,
+        push: bool,
+        set: Mapping[str, str],
+        variables: Mapping[str, str],
+        metadata_file: ValidPath | None,
+        stream_logs: Literal[True],
+        remote_definition: str | None = None,
+        *,
+        call: BuildxCall | None = None,
+        jobs: int | str | None = None,
+        return_config: bool = True,
+    ) -> MappedProcessStream[str]: ...
 
     def bake(
         self,
@@ -223,7 +321,11 @@ class BuildxCLI(DockerCLICaller):
         metadata_file: ValidPath | None = None,
         stream_logs: bool = False,
         remote_definition: str | None = None,
-    ) -> BakeResult | MappedProcessStream[str]:
+        *,
+        call: BuildxCall | None = None,
+        jobs: int | str | None = None,
+        return_config: bool = True,
+    ) -> BakeResult | str | MappedProcessStream[str] | None:
         """Bake is similar to make, it allows you to build things declared in a file.
 
         For example it allows you to build multiple docker image in parallel.
@@ -248,12 +350,22 @@ class BuildxCLI(DockerCLICaller):
                 hcl file. See <https://github.com/docker/buildx#hcl-variables-and-functions>
             metadata_file: Write build results metadata to the given file
             remote_definition: Remote context in which to find bake files
+            call: Frontend method to invoke. `None` and `"build"` build normally;
+                `"check"`, `"outline"` and `"targets"` return captured report text.
+                Requires a Buildx version supporting `--call`.
+            jobs: Target concurrency or execution mode, forwarded as `--jobs`.
+                Requires a Buildx version supporting this flag. Zero is forwarded.
+            return_config: When `False`, skip the extra configuration query after
+                a blocking build and return `None`. Reports and streams do not
+                query configuration. Cannot be combined with `print=True`.
 
         # Returns
-            The configuration used for the bake (files merged + override with
+            By default, the configuration used for the bake (files merged + override with
             the arguments used in the function). It's the loaded json you would
             obtain by running `docker buildx bake --print --load my_target` if
             your command was `docker buildx bake --load my_target`. Some example here.
+            Blocking report calls return captured text. Blocking builds with
+            `return_config=False` return `None`. Streaming returns an owned log stream.
 
 
         ```python
@@ -284,6 +396,17 @@ class BuildxCLI(DockerCLICaller):
         config = docker.buildx.bake(["my_target1", "my_target2"], load=True, print=True)
         ```
         """
+        report = call in ("check", "outline", "targets")
+        if print and stream_logs:
+            raise ValueError(
+                "Getting the config of the bake and streaming "
+                "logs at the same time is not possible."
+            )
+        if print and not return_config:
+            raise ValueError("print=True requires return_config=True.")
+        if print and report:
+            raise ValueError("print=True cannot be combined with a report call.")
+
         full_cmd = Command([*self.docker_cmd, "buildx", "bake"])
 
         full_cmd.add_flag("--no-cache", not cache)
@@ -292,6 +415,8 @@ class BuildxCLI(DockerCLICaller):
         full_cmd.add_flag("--pull", pull)
         full_cmd.add_flag("--push", push)
         full_cmd.add_flag("--print", print)
+        full_cmd.add_simple_arg("--call", call)
+        full_cmd.add_simple_arg("--jobs", jobs)
         if progress != "auto" and isinstance(progress, str):
             full_cmd += ["--progress", progress]
         for file in to_list(files):
@@ -304,21 +429,21 @@ class BuildxCLI(DockerCLICaller):
         targets = to_list(targets)
         env = dict(variables)
         if print:
-            if stream_logs:
-                ValueError(
-                    "Getting the config of the bake and streaming "
-                    "logs at the same time is not possible."
-                )
             return _BAKE_RESULT_ADAPTER.validate_json(
                 run([*full_cmd, *targets], env=env)
             )
         elif stream_logs:
             return stream_buildx_logs([*full_cmd, *targets], env=env)
         else:
-            run([*full_cmd, *targets], capture_stderr=progress is False, env=env)
-            return _BAKE_RESULT_ADAPTER.validate_json(
-                run([*full_cmd, "--print", *targets], env=env)
+            output = run(
+                [*full_cmd, *targets], capture_stderr=progress is False, env=env
             )
+            if report:
+                return output
+            if return_config:
+                return _BAKE_RESULT_ADAPTER.validate_json(
+                    run([*full_cmd, "--print", *targets], env=env)
+                )
 
     @overload
     def build(
@@ -350,6 +475,10 @@ class BuildxCLI(DockerCLICaller):
         tags: str | Sequence[str] = (),
         target: str | None = None,
         stream_logs: Literal[False] = False,
+        *,
+        call: Literal["build"] | None = None,
+        no_cache_filter: str | Sequence[str] | None = None,
+        annotations: str | Sequence[str] | None = None,
     ) -> pywhales.components.image.cli_wrapper.Image | None: ...
 
     @overload
@@ -383,6 +512,9 @@ class BuildxCLI(DockerCLICaller):
         target: str | None = None,
         *,
         stream_logs: Literal[True],
+        call: BuildxCall | None = None,
+        no_cache_filter: str | Sequence[str] | None = None,
+        annotations: str | Sequence[str] | None = None,
     ) -> MappedProcessStream[str]: ...
 
     @overload
@@ -414,10 +546,84 @@ class BuildxCLI(DockerCLICaller):
         ssh: str | None = None,
         tags: str | Sequence[str] = (),
         target: str | None = None,
-        stream_logs: bool = False,
-    ) -> (
-        pywhales.components.image.cli_wrapper.Image | MappedProcessStream[str] | None
-    ): ...
+        stream_logs: Literal[False] = False,
+        *,
+        call: BuildxReportCall,
+        no_cache_filter: str | Sequence[str] | None = None,
+        annotations: str | Sequence[str] | None = None,
+    ) -> str: ...
+
+    @overload
+    def build(
+        self,
+        context_path: ValidPath,
+        add_hosts: Mapping[str, str] = MappingProxyType({}),
+        allow: Sequence[str] = (),
+        attest: dict[str, str] | None = None,
+        build_args: Mapping[str, str] = MappingProxyType({}),
+        build_contexts: Mapping[str, str | ValidPath] = MappingProxyType({}),
+        builder: ValidBuilder | None = None,
+        cache: bool = True,
+        cache_from: str | BuildxOptions | builtins.list[BuildxOptions] | None = None,
+        cache_to: str | BuildxOptions | None = None,
+        file: ValidPath | None = None,
+        labels: Mapping[str, str] = MappingProxyType({}),
+        load: bool = False,
+        metadata_file: ValidPath | None = None,
+        network: str | None = None,
+        output: BuildxOptions = MappingProxyType({}),
+        platforms: builtins.list[str] | None = None,
+        progress: BuildxProgress = "auto",
+        provenance: bool | dict[str, str] | None = None,
+        pull: bool = False,
+        push: bool = False,
+        sbom: bool | dict[str, str] | None = None,
+        secrets: str | Sequence[str] = (),
+        ssh: str | None = None,
+        tags: str | Sequence[str] = (),
+        target: str | None = None,
+        stream_logs: Literal[False] = False,
+        *,
+        call: BuildxCall | None = None,
+        no_cache_filter: str | Sequence[str] | None = None,
+        annotations: str | Sequence[str] | None = None,
+    ) -> pywhales.components.image.cli_wrapper.Image | str | None: ...
+
+    @overload
+    def build(
+        self,
+        context_path: ValidPath,
+        add_hosts: Mapping[str, str],
+        allow: Sequence[str],
+        attest: dict[str, str] | None,
+        build_args: Mapping[str, str],
+        build_contexts: Mapping[str, str | ValidPath],
+        builder: ValidBuilder | None,
+        cache: bool,
+        cache_from: str | BuildxOptions | builtins.list[BuildxOptions] | None,
+        cache_to: str | BuildxOptions | None,
+        file: ValidPath | None,
+        labels: Mapping[str, str],
+        load: bool,
+        metadata_file: ValidPath | None,
+        network: str | None,
+        output: BuildxOptions,
+        platforms: builtins.list[str] | None,
+        progress: BuildxProgress,
+        provenance: bool | dict[str, str] | None,
+        pull: bool,
+        push: bool,
+        sbom: bool | dict[str, str] | None,
+        secrets: str | Sequence[str],
+        ssh: str | None,
+        tags: str | Sequence[str],
+        target: str | None,
+        stream_logs: Literal[True],
+        *,
+        call: BuildxCall | None = None,
+        no_cache_filter: str | Sequence[str] | None = None,
+        annotations: str | Sequence[str] | None = None,
+    ) -> MappedProcessStream[str]: ...
 
     def build(
         self,
@@ -429,7 +635,6 @@ class BuildxCLI(DockerCLICaller):
         build_contexts: Mapping[str, str | ValidPath] = MappingProxyType({}),
         builder: ValidBuilder | None = None,
         cache: bool = True,
-        # TODO: cache_filters
         cache_from: str | BuildxOptions | builtins.list[BuildxOptions] | None = None,
         cache_to: str | BuildxOptions | None = None,
         # TODO: cgroup_parent
@@ -454,7 +659,16 @@ class BuildxCLI(DockerCLICaller):
         target: str | None = None,
         # TODO: ulimit
         stream_logs: bool = False,
-    ) -> pywhales.components.image.cli_wrapper.Image | MappedProcessStream[str] | None:
+        *,
+        call: BuildxCall | None = None,
+        no_cache_filter: str | Sequence[str] | None = None,
+        annotations: str | Sequence[str] | None = None,
+    ) -> (
+        pywhales.components.image.cli_wrapper.Image
+        | str
+        | MappedProcessStream[str]
+        | None
+    ):
         """Build a Docker image with builkit as backend.
 
         Alias: `docker.build(...)`
@@ -479,17 +693,20 @@ class BuildxCLI(DockerCLICaller):
                 ex `build_contexts={"project2": "../path/to/project2/src", "qumu-src": "https://github.com/qemu/qemu.git"}`.
             builder: Specify which builder to use.
             cache: Whether or not to use the cache
-            cache_from: Works only with the container driver. Loads the cache
+            cache_from: Loads the cache
                 (if needed) from a registry `cache_from="user/app:cache"`  or
                 a directory on the client `cache_from="type=local,src=path/to/dir"`.
                 It's also possible to use a dict or list of dict form for this
                 argument. e.g.
                 `cache_from=dict(type="local", src="path/to/dir")`
-            cache_to: Works only with the container driver. Sends the resulting
+            cache_to: Sends the resulting
                 docker cache either to a registry `cache_to="user/app:cache"`,
                 or to a local directory `cache_to="type=local,dest=path/to/dir"`.
                 It's also possible to use a dict form for this argument. e.g.
                 `cache_to=dict(type="local", dest="path/to/dir", mode="max")`
+                Supported external cache backends with the Docker driver depend
+                on the containerd image store being enabled. For GitHub Actions
+                cache, `docker-container` is the conservative recommendation.
             file: The path of the Dockerfile
             labels: Dict of labels to add to the image.
                 `labels={"very-secure": "1", "needs-gpu": "0"}` for example.
@@ -524,11 +741,19 @@ class BuildxCLI(DockerCLICaller):
                 You can then read the logs as they arrive.
             metadata_file: Path where build metadata should be written. Equivalent
                 to the CLI flag `--metadata-file` and only used when provided.
+            call: Frontend method to invoke. `None` and `"build"` build normally;
+                `"check"`, `"outline"` and `"targets"` return captured report text
+                without image recovery. Requires Buildx support for `--call`.
+            no_cache_filter: Stage name(s) to rebuild without cache, passed as
+                repeated `--no-cache-filter` flags.
+            annotations: Image annotation(s), passed as repeated `--annotation`
+                flags. Requires a Buildx version supporting these flags.
 
         # Returns
             A `pywhales.Image` if a Docker image is loaded
             in the daemon after the build (the default behavior when
-            calling `docker.build(...)`). Otherwise, `None`.
+            calling `docker.build(...)`). Otherwise, `None`. Blocking report calls
+            return captured text instead. Streaming returns an owned log stream.
         """
         tags = to_list(tags)
         full_cmd = Command([*self.docker_cmd, "buildx", "build"])
@@ -586,6 +811,11 @@ class BuildxCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--network", network)
         full_cmd.add_flag("--no-cache", not cache)
         full_cmd.add_args_iterable_or_single("--tag", tags)
+        full_cmd.add_simple_arg("--call", call)
+        if no_cache_filter is not None:
+            full_cmd.add_args_iterable_or_single("--no-cache-filter", no_cache_filter)
+        if annotations is not None:
+            full_cmd.add_args_iterable_or_single("--annotation", annotations)
 
         if stream_logs:
             if progress in (False, "tty", "none", "quiet"):
@@ -600,13 +830,18 @@ class BuildxCLI(DockerCLICaller):
             full_cmd.append(context_path)
             return stream_buildx_logs(full_cmd)
 
+        if call in ("check", "outline", "targets"):
+            full_cmd.append(context_path)
+            return run(full_cmd, capture_stderr=progress is False)
+
         will_load_image = self._build_will_load_image(builder, push, load, output)
+        driver = None
+        if will_load_image is not False:
+            driver = self.inspect(builder).driver
+            if will_load_image is None:
+                will_load_image = driver == "docker"
         # very special_case, must be fixed https://github.com/docker/buildx/issues/420
-        if (
-            will_load_image
-            and not tags
-            and self.inspect(builder).driver == "docker-container"
-        ):
+        if will_load_image and not tags and driver == "docker-container":
             # we have no way of fetching the image because iidfile is wrong in this case.
             will_load_image = False
 
@@ -618,7 +853,7 @@ class BuildxCLI(DockerCLICaller):
         docker_image = pywhales.components.image.cli_wrapper.ImageCLI(
             self.client_config
         )
-        if self._method_to_get_image(builder) == GetImageMethod.TAG:
+        if driver != "docker":
             full_cmd.append(context_path)
             run(full_cmd, capture_stderr=progress is False)
             return docker_image.inspect(tags[0])
@@ -638,7 +873,7 @@ class BuildxCLI(DockerCLICaller):
         push: bool,
         load: bool,
         output: BuildxOptions,
-    ) -> bool:
+    ) -> bool | None:
         if load:
             return True
         if push:
@@ -646,16 +881,7 @@ class BuildxCLI(DockerCLICaller):
         if output != {}:
             return output.get("type") == "docker" and "dest" not in output
 
-        # now load push and output are not set.
-        return self.inspect(builder).driver == "docker"
-
-    def _method_to_get_image(self, builder: ValidBuilder | None) -> GetImageMethod:
-        """Getting around https://github.com/docker/buildx/issues/420"""
-        inspected_builder = self.inspect(builder)
-        if inspected_builder.driver == "docker":
-            return GetImageMethod.IIDFILE
-        else:
-            return GetImageMethod.TAG
+        return None
 
     def create(
         self,

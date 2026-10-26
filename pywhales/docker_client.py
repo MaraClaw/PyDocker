@@ -149,6 +149,16 @@ class DockerClient(DockerCLICaller):
             Default is "unknown". If at some point, PyWhales has to choose
             a behavior and `client_type` is `"unknown"`, it will raise an exception and ask you to specify
             what kind of client you're working with. Valid values are `"docker"`, `"nerdctl"` and `"unknown"`.
+        compose_dry_run: Preview Compose operations without applying changes. Commands
+            returning containers (`compose.ps()` and detached `compose.run()`) are
+            incompatible with this option and raise `ValueError` before execution.
+        compose_parallel: Limit concurrent Compose engine calls. `None` leaves the
+            CLI default unchanged; `-1` requests unlimited parallelism.
+        compose_progress: Compose progress format (`"auto"`, `"tty"`, `"plain"`,
+            `"json"` or `"quiet"`). `None` leaves the CLI default unchanged.
+            An explicit `compose.build(progress=...)` overrides this per call.
+            New Compose options require a plugin version that supports them;
+            PyWhales forwards them without version probes or fallback.
     """
 
     def __init__(
@@ -174,6 +184,11 @@ class DockerClient(DockerCLICaller):
         client_binary: str = "docker",
         client_call: Sequence[str] = ("docker",),
         client_type: Literal["docker", "nerdctl", "unknown"] = "unknown",
+        *,
+        compose_dry_run: bool = False,
+        compose_parallel: int | None = None,
+        compose_progress: Literal["auto", "tty", "plain", "json", "quiet"]
+        | None = None,
     ) -> None:
         if client_binary != "docker":
             warnings.warn(
@@ -204,6 +219,9 @@ class DockerClient(DockerCLICaller):
                 compose_compatibility=compose_compatibility,
                 client_call=list(client_call),
                 client_type=client_type,
+                compose_dry_run=compose_dry_run,
+                compose_parallel=compose_parallel,
+                compose_progress=compose_progress,
             )
         super().__init__(client_config)
 
@@ -229,7 +247,6 @@ class DockerClient(DockerCLICaller):
         # aliases
         self.attach = self.container.attach
         self.build = self.buildx.build
-        self.legacy_build = self.image.legacy_build
         self.commit = self.container.commit
         self.copy = self.container.copy
         self.create = self.container.create

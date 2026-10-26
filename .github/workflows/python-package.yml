@@ -103,6 +103,26 @@ jobs:
         run: |
           uv run --locked pytest -vv --no-runtime-skip --durations=10 --ignore=tests/pywhales/components/
 
+  build-linux-test-modern:
+    name: Compose and Buildx smoke tests
+    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.13.5"
+          python-version: "3.14.8"
+      - name: Install locked dependencies
+        run: uv sync --locked
+      - name: Install verified Linux amd64 plugins
+        run: ./scripts/download-docker-plugins.sh
+      - name: Run required real CLI smoke tests
+        run: >-
+          uv run --locked pytest -vv -rs --no-runtime-skip --durations=10
+          tests/pywhales/components/test_docker_modern_integration.py
+
   build-windows:
     runs-on: windows-latest
     steps:

@@ -1,20 +1,18 @@
 ## Some notes about the compose functions
 
-Behind the scenes, 
-the [Go implementation of Docker compose](https://github.com/docker/compose-cli)
-is called a.k.a. Compose v2, not the [Python implementation](https://github.com/docker/compose).
+PyWhales calls the [Go implementation of Docker Compose](https://github.com/docker/compose)
+through the `docker compose` CLI plugin. This includes the Compose v2 and v5
+release lines. The retired Python implementation was Compose v1, typically
+invoked as `docker-compose`. Plugin release numbers are separate from Compose
+file format versions; current projects use the [Compose Specification](https://docs.docker.com/reference/compose-file/).
 
 You can verify that `docker compose` is installed by running
 ```bash
 docker compose --help
 ```
-Be careful! it's different from `docker-compose --help`! Notice the `-` between 'docker' and 'compose'.
-Compose v2 has no `-` in the command.
-
-If that doesn't work, then [install the cli plugin](https://github.com/docker/compose-cli#compose-v2-aka-local-docker-compose).
-it's just a single binary to download.
-
-The Go implementation of compose is still experimental, so take the appropriate precautions.
+This is different from `docker-compose --help`. If the plugin is unavailable,
+follow Docker's [Compose installation instructions](https://docs.docker.com/compose/install/).
+Docker Desktop includes Compose; Docker Engine installations can install the CLI plugin.
 
 If you don't need to set any project-wide options, like the project name or 
 the compose file path, you can just import `docker` and start working.
@@ -43,6 +41,31 @@ docker.compose.down()
 
 You have multiple compose options available (like profiles, env_files, project name) when creating the Docker client. You can check them out 
 in the `DockerClient` [documentation](../docker_client.md#pywhales.docker_client.DockerClient).
+
+The client also accepts `compose_dry_run`, `compose_parallel`, and
+`compose_progress`. They emit no extra flags by default. Parallel limits Compose's
+concurrent Engine calls, not BuildKit's build-step concurrency. An explicit
+`compose.build(progress=...)` overrides the client's progress setting for that
+call without changing the client.
+
+`compose.build()` exposes `builder`, `check`, `print`, `provenance`, `sbom`,
+and `push` as keyword-only options. Blocking calls still return `None`,
+including `print=True`: the CLI prints its Bake definition to stdout. Use
+`stream_logs=True` to consume an owned output stream, including printed config.
+Dry-run output does not represent real containers and cannot be requested as
+resource objects.
+
+`compose.watch()` supports `no_up`, `quiet`, and `prune`, and returns an owned
+log stream directly. Unlike build/up, watch has no `stream_logs` switch.
+PyWhales defaults `prune=False` and explicitly sends `--prune=false`, unlike
+the CLI default, to avoid removing superseded images. Close a streaming watch
+with its context manager when stopping early. `compose.up()` also supports
+`watch`, `abort_on_container_failure`, and `exit_code_from`. Check the
+installed plugin's help for incompatible modes, especially detached operation.
+
+See [Build performance and measurement](../user_guide/build_performance.md)
+for watch rules, readiness, resource limits, cache trade-offs, compatibility,
+and a daemon-free wrapper overhead benchmark.
 
 #### About `docker.compose.images()`.
 

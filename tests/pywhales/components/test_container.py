@@ -1138,13 +1138,19 @@ def test_container_state(ctr_client: DockerClient) -> None:
 
 def test_restart(ctr_client: DockerClient) -> None:
     cmd = ["sleep", "infinity"]
-    containers = [ctr_client.run("busybox:1", cmd, detach=True) for _ in range(3)]
-    ctr_client.kill(containers)
+    with contextlib.ExitStack() as stack:
+        containers = [
+            stack.enter_context(ctr_client.run("busybox:1", cmd, detach=True))
+            for _ in range(3)
+        ]
+        ctr_client.kill(containers)
+        ctr_client.wait(containers)
 
-    ctr_client.restart(containers)
-    for container in containers:
-        assert container.state is not None
-        assert container.state.running is True
+        ctr_client.restart(containers)
+        for container in containers:
+            container.reload()
+            assert container.state is not None
+            assert container.state.running is True
 
 
 def test_execute(ctr_client: DockerClient) -> None:
@@ -1206,22 +1212,26 @@ def test_diff(ctr_client: DockerClient) -> None:
 
 
 def test_methods(ctr_client: DockerClient) -> None:
-    my_container = ctr_client.run("busybox:1", ["sleep", "infinity"], detach=True)
-    my_container.kill()
-    assert my_container.state is not None
-    assert my_container.state.running is not True
-    my_container.remove()
+    with ctr_client.run(
+        "busybox:1", ["sleep", "infinity"], detach=True
+    ) as my_container:
+        my_container.kill()
+        ctr_client.wait(my_container)
+        my_container.reload()
+        assert my_container.state is not None
+        assert my_container.state.running is not True
 
 
 def test_kill_signal(ctr_client: DockerClient) -> None:
-    my_container = ctr_client.run(
+    with ctr_client.run(
         "busybox:1", ["sleep", "infinity"], init=True, detach=True
-    )
-    my_container.kill(signal=signal.SIGINT)
-    assert my_container.state is not None
-    assert my_container.state.running is not True
-    assert my_container.state.exit_code == 130
-    my_container.remove()
+    ) as my_container:
+        my_container.kill(signal=signal.SIGINT)
+        assert ctr_client.wait(my_container) == 130
+        my_container.reload()
+        assert my_container.state is not None
+        assert my_container.state.running is not True
+        assert my_container.state.exit_code == 130
 
 
 def test_context_manager(ctr_client: DockerClient) -> None:
@@ -1378,8 +1388,12 @@ def test_pause_unpause(ctr_client: DockerClient) -> None:
         assert container.state is not None
         assert container.state.running is True
         container.pause()
-        assert container.state.paused is True
-        container.unpause()
+        try:
+            container.reload()
+            assert container.state.paused is True
+        finally:
+            container.unpause()
+        container.reload()
         assert container.state.paused is not True
         assert container.state.running is True
 
@@ -2059,7 +2073,7 @@ def test_create_always_pull_existent(
     base_image = docker_client.image.pull(base_image_name)
     base_image.tag(test_image_name)
     docker_client.push(test_image_name)
-    remote_id = base_image.id
+    remote_id = docker_client.image.pull(test_image_name).id
 
     (tmp_path / "dodo.txt").write_text("Hello world!")
     updated_image = base_image.copy_to(
@@ -2068,8 +2082,8 @@ def test_create_always_pull_existent(
     local_id = updated_image.id
 
     assert remote_id != local_id
-    docker_client.container.create(test_image_name, pull="always")
-    assert docker_client.image.inspect(test_image_name).id == remote_id
+    with docker_client.container.create(test_image_name, pull="always"):
+        assert docker_client.image.inspect(test_image_name).id == remote_id
 
 
 def test_run_always_pull_nonexistent(ctr_client: DockerClient) -> None:
@@ -2091,7 +2105,7 @@ def test_run_always_pull_existent(
     base_image = docker_client.image.pull(base_image_name)
     base_image.tag(test_image_name)
     docker_client.push(test_image_name)
-    remote_id = base_image.id
+    remote_id = docker_client.image.pull(test_image_name).id
 
     (tmp_path / "dodo.txt").write_text("Hello world!")
     updated_image = base_image.copy_to(
@@ -2100,8 +2114,8 @@ def test_run_always_pull_existent(
     local_id = updated_image.id
 
     assert remote_id != local_id
-    docker_client.container.run(test_image_name, pull="always")
-    assert docker_client.image.inspect(test_image_name).id == remote_id
+    with docker_client.container.run(test_image_name, pull="always", detach=True):
+        assert docker_client.image.inspect(test_image_name).id == remote_id
 
 
 def test_non_unicode_output(ctr_client: DockerClient) -> None:

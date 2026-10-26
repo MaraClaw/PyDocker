@@ -441,19 +441,25 @@ def test_use_builder() -> None:
 def test_buildx_build_single_tag(tmp_path: Path) -> None:
     (tmp_path / "Dockerfile").write_text(dockerfile_content1)
     image = docker.buildx.build(tmp_path, tags="hello1")
-    assert image is not None
-    assert image.repo_tags is not None
-    assert "hello1:latest" in image.repo_tags
+    try:
+        assert image is not None
+        assert image.repo_tags is not None
+        assert "hello1:latest" in image.repo_tags
+    finally:
+        docker.image.remove("hello1", force=True, prune=False)
 
 
 @pytest.mark.usefixtures("with_docker_driver")
 def test_buildx_build_multiple_tags(tmp_path: Path) -> None:
     (tmp_path / "Dockerfile").write_text(dockerfile_content1)
     image = docker.buildx.build(tmp_path, tags=["hello1", "hello2"])
-    assert image is not None
-    assert image.repo_tags is not None
-    assert "hello1:latest" in image.repo_tags
-    assert "hello2:latest" in image.repo_tags
+    try:
+        assert image is not None
+        assert image.repo_tags is not None
+        assert "hello1:latest" in image.repo_tags
+        assert "hello2:latest" in image.repo_tags
+    finally:
+        docker.image.remove(["hello1", "hello2"], force=True, prune=False)
 
 
 @pytest.mark.usefixtures("with_docker_driver")
@@ -461,14 +467,17 @@ def test_cache_invalidity(tmp_path: Path) -> None:
     (tmp_path / "Dockerfile").write_text(dockerfile_content1)
     with set_cache_validity_period(100):
         image = docker.buildx.build(tmp_path, tags=["hello1", "hello2"])
-        assert image is not None
-        docker.image.remove("hello1")
-        docker.pull("hello-world")
-        docker.tag("hello-world", "hello1")
-        image.reload()
-        assert image.repo_tags is not None
-        assert "hello1:latest" not in image.repo_tags
-        assert "hello2:latest" in image.repo_tags
+        try:
+            assert image is not None
+            docker.image.remove("hello1")
+            docker.pull("hello-world")
+            docker.tag("hello-world", "hello1")
+            image.reload()
+            assert image.repo_tags is not None
+            assert "hello1:latest" not in image.repo_tags
+            assert "hello2:latest" in image.repo_tags
+        finally:
+            docker.image.remove(["hello1", "hello2"], force=True, prune=False)
 
 
 @pytest.mark.usefixtures("with_docker_driver")

@@ -209,13 +209,13 @@ def test_list_filters_old_signature(docker_client: DockerClient) -> None:
 def test_correct_ipam_config(docker_client: DockerClient) -> None:
     """Test that we can create a network with a specific IPAM configuration."""
     with (
-        docker_client.network.create(random_name(), subnet="172.20.0.0/16") as net,
+        docker_client.network.create(random_name(), subnet="192.0.2.0/24") as net,
         docker_client.container.run(
             "busybox",
             ["sleep", "infinity"],
             detach=True,
             networks=[net],
-            ip="172.20.0.5",
+            ip="192.0.2.5",
         ) as ctr,
     ):
         inspect = docker_client.container.inspect(ctr)
@@ -223,7 +223,7 @@ def test_correct_ipam_config(docker_client: DockerClient) -> None:
         networks = inspect.network_settings.networks
         assert networks is not None
         assert net.name is not None
-        assert networks[net.name].ip_address == "172.20.0.5"
+        assert networks[net.name].ip_address == "192.0.2.5"
         assert networks[net.name].ipam_config == ContainerEndpointIPAMConfig(
-            ipv4_address="172.20.0.5", ipv6_address=None, link_local_ips=None
+            ipv4_address="192.0.2.5", ipv6_address=None, link_local_ips=None
         )

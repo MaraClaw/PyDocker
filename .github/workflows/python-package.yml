@@ -103,6 +103,25 @@ jobs:
         run: |
           uv run --locked pytest -vv --no-runtime-skip --durations=10 --ignore=tests/pywhales/components/
 
+  build-linux-test-coverage:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.13.5"
+          python-version: "3.14.8"
+      - name: Install locked dependencies
+        run: uv sync --locked
+      - name: Setup Docker
+        run: |
+          ./scripts/ci-setup.sh
+      - name: Run full strict suite with coverage
+        run: uv run --locked coverage run -m pytest -vv -ra --no-runtime-skip --durations=10
+      - name: Enforce coverage threshold
+        run: uv run --locked coverage report
+
   build-linux-test-modern:
     name: Compose and Buildx smoke tests
     timeout-minutes: 10

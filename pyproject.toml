@@ -4,16 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pywhales"
-version = "0.2.0"
+version = "0.2.1"
 description = "A Docker client for Python, designed to be fun and intuitive!"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.14.8"
-dynamic = ["dependencies"]
-
-[tool.setuptools.dynamic]
-dependencies = { file = ["requirements.txt"] }
+dependencies = [
+    "pydantic>=2.14.1",
+    "typing_extensions>=4.16.0",
+    "boto3>=1.43.118",
+    "s3transfer>=0.19.3",
+]
 
 [dependency-groups]
 dev = [

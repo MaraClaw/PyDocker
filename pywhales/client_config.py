@@ -79,6 +79,9 @@ class ClientConfig:
     client_call: list[str] = field(default_factory=lambda: ["docker"])
     client_type: Literal["docker", "nerdctl", "unknown"] = "unknown"
     _client_call_with_path: list[Path | str] | None = None
+    compose_dry_run: bool = False
+    compose_parallel: int | None = None
+    compose_progress: Literal["auto", "tty", "plain", "json", "quiet"] | None = None
 
     def get_client_call_with_path(self) -> list[Path | str]:
         if self._client_call_with_path is None:
@@ -137,6 +140,10 @@ class ClientConfig:
 
     @property
     def docker_compose_cmd(self) -> Command:
+        return self.get_compose_command()
+
+    def get_compose_command(self, *, progress: str | None = None) -> Command:
+        """Build Compose globals, optionally overriding progress for one command."""
         base_cmd = Command([*self.docker_cmd, "compose"])
         base_cmd.add_args_iterable_or_single("--file", self.compose_files)
         base_cmd.add_args_iterable_or_single("--profile", self.compose_profiles)
@@ -157,6 +164,11 @@ class ClientConfig:
         base_cmd.add_simple_arg("--project-name", self.compose_project_name)
         base_cmd.add_simple_arg("--project-directory", self.compose_project_directory)
         base_cmd.add_flag("--compatibility", self.compose_compatibility is True)
+        base_cmd.add_flag("--dry-run", self.compose_dry_run)
+        base_cmd.add_simple_arg("--parallel", self.compose_parallel)
+        base_cmd.add_simple_arg(
+            "--progress", self.compose_progress if progress is None else progress
+        )
         return base_cmd
 
 

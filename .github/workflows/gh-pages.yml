@@ -21,7 +21,6 @@ jobs:
         run: uv sync --locked
       - name: prepare
         run: |
-          ./scripts/ci-setup.sh
           uv run --locked python -m docs.autogen
           cp docs/mkdocs.yml mkdocs.yml
       - name: Deploy docs

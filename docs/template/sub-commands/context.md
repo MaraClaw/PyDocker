@@ -4,10 +4,10 @@ Docker contexts allow you to connect to docker daemons other than the local one.
 
 Contexts commands allow you to declare, save, list local and remote Docker daemons and Kubernetes endpoints that you have.
 
-An exemple here with pydocker:
+An exemple here with pywhales:
 
 ```python
-from pydocker import docker, DockerContextConfig
+from pywhales import docker, DockerContextConfig
 
 new_context = docker.context.create(
     "my_remote_ssh_server",
@@ -15,22 +15,22 @@ new_context = docker.context.create(
     description="my server ssh with a lot more power",
 )
 print(docker.context.list())
-# [pydocker.Context(name='default', endpoints={'docker': ContextEndpoint(host='unix:///var/run/docker.sock', skip_tls_verify=False)}),
-# pydocker.Context(name='my_remote_ssh_server', endpoints={'docker': ContextEndpoint(host='ssh://ubuntu@52.57.163.75', skip_tls_verify=False)})]
+# [pywhales.Context(name='default', endpoints={'docker': ContextEndpoint(host='unix:///var/run/docker.sock', skip_tls_verify=False)}),
+# pywhales.Context(name='my_remote_ssh_server', endpoints={'docker': ContextEndpoint(host='ssh://ubuntu@52.57.163.75', skip_tls_verify=False)})]
 new_context.use()
 # it's the same to use docker.context.use("my_remote_ssh_server") or docker.context.use(new_context)
 
 print(docker.ps())  # will list the containers in the remote server
-# [pydocker.Container(id=...), pydocker.Container(id=...)]
+# [pywhales.Container(id=...), pywhales.Container(id=...)]
 # return to the local docker daemon
 docker.context.use("default")
 print(docker.ps())  # will list the containers running locally
-# [pydocker.Container(id=...)]
+# [pywhales.Container(id=...)]
 ```
 
 Note that for this simple use case, it's equivalent to use the `-H` option of the Docker client like so:
 ```python
-from pydocker import DockerClient
+from pywhales import DockerClient
 
 docker = DockerClient(host="ssh://ubuntu@52.57.163.75")
 

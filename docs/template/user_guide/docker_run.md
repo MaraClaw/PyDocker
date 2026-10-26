@@ -4,7 +4,7 @@
 ## Simple call
 
 ```python
-from pydocker import docker
+from pywhales import docker
 
 stdout_as_str = docker.run("hello-world")
 print(stdout_as_str)
@@ -23,7 +23,7 @@ needs to run for a very long time for example, as you don't get the output in re
 ## Detach the container
 
 ```python
-from pydocker import docker
+from pywhales import docker
 from redis import Redis
 
 redis_container = docker.run("redis", detach=True, publish=[(6379, 6379)])
@@ -43,7 +43,7 @@ never stop.
 ## Detach with the context manager
 
 ```python
-from pydocker import docker
+from pywhales import docker
 from redis import Redis
 
 with docker.run("redis", detach=True, publish=[(6379, 6379)]) as redis_container:
@@ -75,7 +75,7 @@ in the context manager block, the container is still removed.
 ## Stream the output
 
 ```python
-from pydocker import docker
+from pywhales import docker
 
 output_generator = docker.run(
     "busybox", ["ping", "-c", "50", "www.google.com"], stream=True, name="box"

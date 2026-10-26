@@ -1,11 +1,11 @@
-# pydocker
+# PyWhales
 
 ------------------------------------------------------------------------
 
-[![Run tests](https://github.com/MaraClaw/PyDocker/actions/workflows/python-package.yml/badge.svg)](https://github.com/MaraClaw/PyDocker/actions/workflows/python-package.yml)
+[![Run tests](https://github.com/MaraClaw/PyWhales/actions/workflows/python-package.yml/badge.svg)](https://github.com/MaraClaw/PyWhales/actions/workflows/python-package.yml)
 [![Code style: Ruff](https://img.shields.io/badge/code%20style-Ruff-261230.svg)](https://docs.astral.sh/ruff/)
 [![Types: ty](https://img.shields.io/badge/types-ty-261230.svg)](https://docs.astral.sh/ty/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/MaraClaw/PyDocker/blob/HEAD/LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/MaraClaw/PyWhales/blob/HEAD/LICENSE)
 
 
 ------------------------------------------------------------------------
@@ -13,29 +13,28 @@ A Docker client for Python, designed to be fun and intuitive!
 
 Works on Linux, macOS and Windows, for Python 3.14.8 and above.
 
-* [Documentation](https://github.com/MaraClaw/PyDocker/tree/HEAD/docs)
-* [GitHub repository](https://github.com/MaraClaw/PyDocker)
-
-pydocker is derived from [Python on Whales](https://github.com/gabrieldemarmiesse/python-on-whales).
-The upstream project and contributors retain their attribution under the MIT license.
+* [Documentation](https://github.com/MaraClaw/PyWhales/tree/HEAD/docs)
+* [GitHub repository](https://github.com/MaraClaw/PyWhales)
 
 ------------------------------------------------------------------------
 
 ## How to install?
 
 ```bash
-uv pip install pydocker
+uv pip install pywhales
 ```
 
-See [the Docker CLI guide](https://github.com/MaraClaw/PyDocker/blob/HEAD/docs/template/docker_client.md#the-docker-cli)
+See [the Docker CLI guide](https://github.com/MaraClaw/PyWhales/blob/HEAD/docs/template/docker_client.md#the-docker-cli)
 for instructions on installing Docker.
 
 ## Some cool examples
 
 Start by doing
+
 ```python
-from pydocker import docker
+from pywhales import docker
 ```
+
 and then:
 
 * `docker run hello-world` -> `docker.run("hello-world")`
@@ -49,7 +48,7 @@ and then:
 You get the idea 🙂 it's the same as the CLI we all know and love.
 
 ```python
->>> from pydocker import docker
+>>> from pywhales import docker
 
 >>> output = docker.run("hello-world")
 >>> print(output)
@@ -60,9 +59,8 @@ This message shows that your installation appears to be working correctly.
 ...
 ```
 
-
 ```python
->>> from pydocker import docker
+>>> from pywhales import docker
 >>> print(docker.run("nvidia/cuda:11.0-base", ["nvidia-smi"], gpus="all"))
 +-----------------------------------------------------------------------------+
 | NVIDIA-SMI 450.51.06    Driver Version: 450.51.06    CUDA Version: 11.0     |
@@ -86,7 +84,7 @@ This message shows that your installation appears to be working correctly.
 ```
 
 ```python
->>> from pydocker import docker
+>>> from pywhales import docker
 >>> my_docker_image = docker.pull("ubuntu:20.04")
 20.04: Pulling from library/ubuntu
 e6ca3592b144: Downloading [=============>                                     ]  7.965MB/28.56MB
@@ -97,13 +95,13 @@ e6ca3592b144: Downloading [=============>                                     ] 
 ['ubuntu:20.04']
 
 >>> docker.image.list()
-[pydocker.Image(id='sha256:1a437e363abfa', tags=['ubuntu:20.04'])]
+[pywhales.Image(id='sha256:1a437e363abfa', tags=['ubuntu:20.04'])]
 
 >>> my_docker_image.remove()
 ```
 
 ```python
->>> from pydocker import docker
+>>> from pywhales import docker
 >>> my_image = docker.build(".", tags="some_name")  # uses Buildx/buildkit by default
 [+] Building 1.6s (17/17) FINISHED
 ...
@@ -116,7 +114,7 @@ docker run --name some-postgres -e POSTGRES_PASSWORD=mysecretpassword -d postgre
 ```
 becomes
 ```python
-from pydocker import docker
+from pywhales import docker
 
 docker.run(
     "postgres:9.6",
@@ -125,7 +123,7 @@ docker.run(
     detach=True,
 )
 print(docker.ps())
-# [pydocker.Container(id='f5fb939c409d', name='some-postgres')]
+# [pywhales.Container(id='f5fb939c409d', name='some-postgres')]
 ```
 
 -----
@@ -133,9 +131,11 @@ print(docker.ps())
 ```bash
 docker run -it --rm --network some-network postgres psql -h some-postgres -U postgres
 ```
+
 becomes
+
 ```python
-from pydocker import docker
+from pywhales import docker
 
 # since it's interactive, you'll be dropped into the psql shell. The python code
 # will continue only after you exit the shell.
@@ -156,7 +156,7 @@ docker run -d --name some-postgres -e POSTGRES_PASSWORD=mysecretpassword -e PGDA
 ```
 becomes
 ```python
-from pydocker import docker
+from pywhales import docker
 
 docker.run(
     "postgres:9.6",
@@ -178,7 +178,7 @@ docker.run(
 Any Docker object can be used as a context manager to ensure it's removed even if an exception occurs:
 
 ```python
-from pydocker import docker
+from pywhales import docker
 
 with docker.volume.create("random_name") as some_volume:
     docker.run(
@@ -226,4 +226,4 @@ context, the Docker object is removed automatically, even if an exception occurs
 
 It's a MIT license, so quite permissive.
 
-The license can be found [in the git repository](https://github.com/MaraClaw/PyDocker/blob/HEAD/LICENSE).
+The license can be found [in the git repository](https://github.com/MaraClaw/PyWhales/blob/HEAD/LICENSE).

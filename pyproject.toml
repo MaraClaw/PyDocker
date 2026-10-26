@@ -3,8 +3,8 @@ requires = ["setuptools>=84.2.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pydocker"
-version = "0.1.1"
+name = "pywhales"
+version = "0.2.0"
 description = "A Docker client for Python, designed to be fun and intuitive!"
 readme = "README.md"
 license = "MIT"
@@ -18,7 +18,7 @@ dependencies = { file = ["requirements.txt"] }
 [dependency-groups]
 dev = [
     "ruff>=0.17.2",
-    "ty>=0.0.91",
+    "ty>=0.0.92",
     "pytest>=9.1.1",
     "pytest-mock>=3.17.0",
     "pytz>=2026.5",
@@ -36,19 +36,19 @@ dev = [
 ]
 
 [project.urls]
-"Source" = "https://github.com/MaraClaw/PyDocker"
-"Documentation" = "https://github.com/MaraClaw/PyDocker"
-"Bug Tracker" = "https://github.com/MaraClaw/PyDocker/issues"
+"Source" = "https://github.com/MaraClaw/PyWhales"
+"Documentation" = "https://github.com/MaraClaw/PyWhales"
+"Bug Tracker" = "https://github.com/MaraClaw/PyWhales/issues"
 
 [project.scripts]
-pydocker = "pydocker.command_line_entrypoint:main"
+pywhales = "pywhales.command_line_entrypoint:main"
 
 [tool.setuptools.packages.find]
-include = ["pydocker*"]
+include = ["pywhales*"]
 exclude = ["tests*", "docs*"]
 
 [tool.setuptools.package-data]
-pydocker = ["py.typed"]
+pywhales = ["py.typed"]
 
 [tool.ruff]
 target-version = "py314"
@@ -85,7 +85,7 @@ error-on-warning = true
 respect-type-ignore-comments = false
 
 [tool.ty.src]
-include = ["pydocker", "tests", "docs"]
+include = ["pywhales", "tests", "docs"]
 exclude = ["docs/site"]
 
 [tool.pytest.ini_options]

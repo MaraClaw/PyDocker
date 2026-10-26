@@ -26,13 +26,13 @@ jobs:
         id: distribution
         run: |
           project_version=$(uv run --locked python -c "import pathlib, tomllib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
-          wheel="$PWD/dist/pydocker-${project_version}-py3-none-any.whl"
+          wheel="$PWD/dist/pywhales-${project_version}-py3-none-any.whl"
           printf 'version=%s\n' "$project_version" >> "$GITHUB_OUTPUT"
-          uv run --isolated --no-project --no-config --python 3.14.8 --with "$wheel" -- python -I -c "import importlib.metadata, importlib.util, sys; from importlib.resources import files; from pydocker import DockerClient; assert callable(DockerClient); assert importlib.metadata.version('pydocker') == sys.argv[1]; assert files('pydocker').joinpath('py.typed').is_file(); assert importlib.util.find_spec('python_on_whales') is None" "$project_version"
+          uv run --isolated --no-project --no-config --python 3.14.8 --with "$wheel" -- python -I -c "import importlib.metadata, importlib.util, sys; from importlib.resources import files; from pywhales import DockerClient; assert callable(DockerClient); assert importlib.metadata.version('pywhales') == sys.argv[1]; assert files('pywhales').joinpath('py.typed').is_file(); assert importlib.util.find_spec('python_on_whales') is None" "$project_version"
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
       - name: Smoke check the published version
         env:
           PROJECT_VERSION: ${{ steps.distribution.outputs.version }}
         run: |
-          uv run --isolated --no-project --no-config --no-cache --python 3.14.8 --default-index https://pypi.org/simple --with "pydocker==$PROJECT_VERSION" -- python -I -c "import importlib.metadata, importlib.util, sys; from importlib.resources import files; from pydocker import DockerClient; assert callable(DockerClient); assert importlib.metadata.version('pydocker') == sys.argv[1]; assert files('pydocker').joinpath('py.typed').is_file(); assert importlib.util.find_spec('python_on_whales') is None" "$PROJECT_VERSION"
+          uv run --isolated --no-project --no-config --no-cache --python 3.14.8 --default-index https://pypi.org/simple --with "pywhales==$PROJECT_VERSION" -- python -I -c "import importlib.metadata, importlib.util, sys; from importlib.resources import files; from pywhales import DockerClient; assert callable(DockerClient); assert importlib.metadata.version('pywhales') == sys.argv[1]; assert files('pywhales').joinpath('py.typed').is_file(); assert importlib.util.find_spec('python_on_whales') is None" "$PROJECT_VERSION"

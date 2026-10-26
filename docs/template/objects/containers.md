@@ -2,7 +2,7 @@
 
 Don't use the constructor directly. Instead use 
 ```python
-from pydocker import docker
+from pywhales import docker
 
 my_container = docker.container.inspect("my-container-name")
 
@@ -13,7 +13,7 @@ if my_container.state.running:
 For type hints, use this
 
 ```python
-from pydocker import Container
+from pywhales import Container
 
 
 def print_dodo(container: Container):
@@ -32,7 +32,7 @@ An example is worth many lines of descriptions.
 
 
 ```
-In [1]: from pydocker import docker
+In [1]: from pywhales import docker
 
 In [2]: container = docker.run("ubuntu", ["sleep", "infinity"], detach=True)
 

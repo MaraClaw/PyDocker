@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType, TracebackType
-from typing import Any, Self, overload, override
+from typing import Any, Self, assert_never, overload, override
 
 from pydocker.client_config import (
     ClientConfig,
@@ -14,6 +14,7 @@ from pydocker.client_config import (
     DockerCLICaller,
     ReloadableObjectFromJson,
 )
+from pydocker.components._swarm_inspect import parse_swarm_inspect_results
 from pydocker.components.config.models import (
     ConfigInspectResult,
     ConfigSpec,
@@ -124,10 +125,24 @@ class ConfigCLI(DockerCLICaller):
             A `pydocker.Config` if a string was passed as argument. A
             `List[pydocker.Config]` if a list of strings was passed as argument.
         """
-        if isinstance(x, str):
-            return Config(self.client_config, x)
-        else:
-            return [Config(self.client_config, reference) for reference in x]
+        references = to_list(x)
+        if not references:
+            return []
+        json_str = run([*self.docker_cmd, "config", "inspect", *references])
+        parser = Config(self.client_config, references[0], is_immutable_id=True)
+        snapshots = parse_swarm_inspect_results(parser, json_str, references)
+        resources = []
+        for identity, snapshot in snapshots:
+            resource = Config(self.client_config, identity, is_immutable_id=True)
+            resource._set_inspect_result(snapshot)
+            resources.append(resource)
+        match x:
+            case str():
+                return resources[0]
+            case builtins.list():
+                return resources
+            case unreachable:
+                assert_never(unreachable)
 
     def list(
         self, filters: Mapping[str, str] = MappingProxyType({})

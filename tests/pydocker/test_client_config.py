@@ -1,14 +1,219 @@
 import json
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
+from subprocess import CompletedProcess
+from unittest.mock import patch
 
 import pytest
 from pytest_mock import MockerFixture
 
-from pydocker import DockerClient, docker
+from pydocker import Config, DockerClient, Node, Secret, Service, docker
 from pydocker.client_config import ClientConfig, ParsingError
 from pydocker.utils import PROJECT_ROOT
+
+
+@pytest.mark.parametrize("component", ["service", "node", "config", "secret"])
+@pytest.mark.parametrize("explicit_reload", [False, True], ids=["expired", "explicit"])
+def test_swarm_batch_reload_retains_originating_configuration(
+    component: str, explicit_reload: bool
+) -> None:
+    client = DockerClient(context="inventory-context", host="inventory-host", tls=True)
+    client.client_config._client_call_with_path = ["docker-test", "--custom-wrapper"]
+    api = {
+        "service": client.service,
+        "node": client.node,
+        "config": client.config,
+        "secret": client.secret,
+    }[component]
+    snapshot = {
+        "ID": "a" * 27,
+        "Spec": {"Name": "named", "Labels": {"version": "before"}},
+        "Description": {"Hostname": "named"},
+    }
+    with (
+        patch(
+            "subprocess.run",
+            return_value=CompletedProcess([], 0, json.dumps([snapshot]).encode(), b""),
+        ) as command,
+        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+    ):
+        resource = api.inspect(["named"])[0]
+        assert resource.spec is not None
+        assert resource.spec.labels == {"version": "before"}
+        initial = resource._get_inspect_result()
+        assert resource.client_config is client.client_config
+        command.assert_called_once()
+        snapshot["Spec"]["Labels"] = {"version": "after"}
+        command.return_value = CompletedProcess(
+            [], 0, json.dumps([snapshot]).encode(), b""
+        )
+
+        if explicit_reload:
+            resource.reload()
+        else:
+            resource._last_refreshed_time = datetime.min
+        refreshed = resource._get_inspect_result()
+
+        assert refreshed is not initial
+        assert resource.spec is not None
+        assert resource.spec.labels == {"version": "after"}
+        assert command.call_count == 2
+        assert command.call_args.args[0] == [
+            "docker-test",
+            "--custom-wrapper",
+            "--context",
+            "inventory-context",
+            "--host",
+            "inventory-host",
+            "--tls",
+            component,
+            "inspect",
+            "a" * 27,
+        ]
+
+
+@pytest.mark.parametrize("component", ["service", "node", "config", "secret"])
+@pytest.mark.parametrize(
+    ("references", "payload"),
+    [
+        (["shared", "other"], [{"ID": "shared-one"}, {"ID": "shared-two"}]),
+        (
+            ["named", "named"],
+            [
+                {
+                    "ID": "one",
+                    "Spec": {"Name": "named"},
+                    "Description": {"Hostname": "named"},
+                },
+                {
+                    "ID": "two",
+                    "Spec": {"Name": "named"},
+                    "Description": {"Hostname": "named"},
+                },
+            ],
+        ),
+        (["one", "one"], [{"ID": "one"}, {"ID": "two"}]),
+        (["one", "two", "two"], [{"ID": "one"}, {"ID": "one"}, {"ID": "two"}]),
+        (
+            ["one", "one"],
+            [
+                {"ID": "one", "Spec": {"Name": "before"}},
+                {"ID": "one", "Spec": {"Name": "after"}},
+            ],
+        ),
+        (["", "two"], [{"ID": "one"}, {"ID": "two"}]),
+    ],
+    ids=[
+        "ambiguous-prefix",
+        "ambiguous-duplicate-name",
+        "unrequested-identity",
+        "wrong-multiplicity",
+        "conflicting-snapshot",
+        "empty-reference",
+    ],
+)
+def test_swarm_batch_rejects_ambiguous_or_mismatched_identities_before_hydration(
+    component: str,
+    references: list[str],
+    payload: list[dict[str, str | dict[str, str]]],
+) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    api = {
+        "service": client.service,
+        "node": client.node,
+        "config": client.config,
+        "secret": client.secret,
+    }[component]
+    resource_type = {
+        "service": Service,
+        "node": Node,
+        "config": Config,
+        "secret": Secret,
+    }[component]
+    with (
+        patch(
+            "subprocess.run",
+            return_value=CompletedProcess([], 0, json.dumps(payload).encode(), b""),
+        ) as command,
+        patch.object(resource_type, "_set_inspect_result") as hydrate,
+        pytest.raises(ParsingError),
+    ):
+        api.inspect(references)
+    command.assert_called_once()
+    hydrate.assert_not_called()
+
+
+@pytest.mark.parametrize("component", ["service", "node", "config", "secret"])
+@pytest.mark.parametrize("batch", [False, True], ids=["scalar", "reordered-batch"])
+@pytest.mark.parametrize(
+    "collision",
+    [
+        ("a" * 8, "a" * 8, "other"),
+        ("b" * 27, "selected", "b" * 27),
+    ],
+    ids=["name-over-prefix", "full-id-over-name"],
+)
+def test_swarm_inspect_uses_docker_identity_precedence(
+    component: str, batch: bool, collision: tuple[str, str, str]
+) -> None:
+    reference, selected_name, other_name = collision
+    client = DockerClient(host="inventory-host")
+    client.client_config._client_call_with_path = ["docker-test"]
+    api = {
+        "service": client.service,
+        "node": client.node,
+        "config": client.config,
+        "secret": client.secret,
+    }[component]
+    selected = {
+        "ID": "b" * 27,
+        "Spec": {"Name": selected_name, "Labels": {"match": "selected"}},
+        "Description": {"Hostname": selected_name},
+    }
+    other = {
+        "ID": "a" * 27,
+        "Spec": {"Name": other_name, "Labels": {"match": "other"}},
+        "Description": {"Hostname": other_name},
+    }
+    references = [reference, "a" * 27, reference] if batch else [reference]
+    payload = [other, selected, selected] if batch else [selected]
+    with (
+        patch(
+            "subprocess.run",
+            return_value=CompletedProcess([], 0, json.dumps(payload).encode(), b""),
+        ) as command,
+        patch("pydocker.client_config.CACHE_VALIDITY_PERIOD", 3600),
+    ):
+        resources = api.inspect(references) if batch else [api.inspect(reference)]
+
+        assert [resource.id for resource in resources] == (
+            ["b" * 27, "a" * 27, "b" * 27] if batch else ["b" * 27]
+        )
+        assert [
+            resource.spec.labels for resource in resources if resource.spec is not None
+        ] == (
+            [{"match": "selected"}, {"match": "other"}, {"match": "selected"}]
+            if batch
+            else [{"match": "selected"}]
+        )
+        assert all(
+            resource.client_config is client.client_config for resource in resources
+        )
+        if batch:
+            assert resources[0] is not resources[2]
+        command.assert_called_once()
+        assert command.call_args.args[0] == [
+            "docker-test",
+            "--host",
+            "inventory-host",
+            component,
+            "inspect",
+            *references,
+        ]
+
 
 fake_json_message = {
     "CreatedAt": "2020-10-08T18:32:55Z",

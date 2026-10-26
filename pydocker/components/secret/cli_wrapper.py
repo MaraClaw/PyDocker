@@ -8,6 +8,7 @@ from typing import (
     Any,
     Literal,
     Self,
+    assert_never,
     overload,
     override,
 )
@@ -18,8 +19,9 @@ from pydocker.client_config import (
     DockerCLICaller,
     ReloadableObjectFromJson,
 )
+from pydocker.components._swarm_inspect import parse_swarm_inspect_results
 from pydocker.components.secret.models import SecretInspectResult, SecretSpec
-from pydocker.utils import ValidPath, format_mapping_for_cli, run
+from pydocker.utils import ValidPath, format_mapping_for_cli, run, to_list
 
 type SecretListFilter = (
     tuple[Literal["id"], str]
@@ -116,10 +118,24 @@ class SecretCLI(DockerCLICaller):
         Parameters:
             x: One or more IDs/names.
         """
-        if isinstance(x, str):
-            return Secret(self.client_config, x)
-        else:
-            return [Secret(self.client_config, reference) for reference in x]
+        references = to_list(x)
+        if not references:
+            return []
+        json_str = run([*self.docker_cmd, "secret", "inspect", *references])
+        parser = Secret(self.client_config, references[0], is_immutable_id=True)
+        snapshots = parse_swarm_inspect_results(parser, json_str, references)
+        resources = []
+        for identity, snapshot in snapshots:
+            resource = Secret(self.client_config, identity, is_immutable_id=True)
+            resource._set_inspect_result(snapshot)
+            resources.append(resource)
+        match x:
+            case str():
+                return resources[0]
+            case Iterable():
+                return resources
+            case unreachable:
+                assert_never(unreachable)
 
     def list(
         self, filters: Iterable[SecretListFilter] | Mapping[str, Any] = ()

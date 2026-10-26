@@ -10,6 +10,7 @@ from typing import (
     Any,
     Literal,
     Self,
+    assert_never,
     overload,
     override,
 )
@@ -21,6 +22,7 @@ from pydocker.client_config import (
     DockerCLICaller,
     ReloadableObjectFromJson,
 )
+from pydocker.components._swarm_inspect import parse_swarm_inspect_results
 from pydocker.components.container.cli_wrapper import to_seconds
 from pydocker.components.service.models import (
     ServiceEndpoint,
@@ -285,10 +287,24 @@ class ServiceCLI(DockerCLICaller):
             `pydocker.exceptions.NoSuchService` if one of the services
             doesn't exists.
         """
-        if isinstance(x, str):
-            return Service(self.client_config, x)
-        else:
-            return [Service(self.client_config, a) for a in x]
+        references = to_list(x)
+        if not references:
+            return []
+        json_str = run([*self.docker_cmd, "service", "inspect", *references])
+        parser = Service(self.client_config, references[0], is_immutable_id=True)
+        snapshots = parse_swarm_inspect_results(parser, json_str, references)
+        resources = []
+        for identity, snapshot in snapshots:
+            resource = Service(self.client_config, identity, is_immutable_id=True)
+            resource._set_inspect_result(snapshot)
+            resources.append(resource)
+        match x:
+            case str():
+                return resources[0]
+            case builtins.list():
+                return resources
+            case unreachable:
+                assert_never(unreachable)
 
     def exists(self, x: str) -> bool:
         """Verify that a service exists.
@@ -420,7 +436,8 @@ class ServiceCLI(DockerCLICaller):
         if stream:
             return iterator
         else:
-            return "".join(x[1].decode() for x in iterator)
+            with iterator:
+                return "".join(x[1].decode() for x in iterator)
 
     def list(
         self, filters: Iterable[ServiceListFilter] | Mapping[str, Any] = ()

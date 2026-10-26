@@ -5,7 +5,7 @@ import json
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any, overload, override
+from typing import Any, assert_never, overload, override
 
 import pydocker.components.task.cli_wrapper
 from pydocker.client_config import (
@@ -14,6 +14,7 @@ from pydocker.client_config import (
     DockerCLICaller,
     ReloadableObjectFromJson,
 )
+from pydocker.components._swarm_inspect import parse_swarm_inspect_results
 from pydocker.components.node.models import (
     NodeDescription,
     NodeInspectResult,
@@ -140,10 +141,24 @@ class NodeCLI(DockerCLICaller):
         # Returns
             One or a list of `pydocker.Node`
         """
-        if isinstance(x, str):
-            return Node(self.client_config, x)
-        else:
-            return [Node(self.client_config, reference) for reference in x]
+        references = to_list(x)
+        if not references:
+            return []
+        json_str = run([*self.docker_cmd, "node", "inspect", *references])
+        parser = Node(self.client_config, references[0], is_immutable_id=True)
+        snapshots = parse_swarm_inspect_results(parser, json_str, references)
+        resources = []
+        for identity, snapshot in snapshots:
+            resource = Node(self.client_config, identity, is_immutable_id=True)
+            resource._set_inspect_result(snapshot)
+            resources.append(resource)
+        match x:
+            case str():
+                return resources[0]
+            case builtins.list():
+                return resources
+            case unreachable:
+                assert_never(unreachable)
 
     def list(self) -> builtins.list[Node]:
         """Returns the list of nodes in this swarm.

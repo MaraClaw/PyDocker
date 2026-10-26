@@ -7,9 +7,8 @@
 [![Types: ty](https://img.shields.io/badge/types-ty-261230.svg)](https://docs.astral.sh/ty/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/MaraClaw/PyWhales/blob/HEAD/LICENSE)
 
-
 ------------------------------------------------------------------------
-A Docker client for Python, designed to be fun and intuitive!
+The Docker and its composer client for Python, designed to be fun and intuitive!
 
 Works on Linux, macOS and Windows, for Python 3.14.8 and above.
 
@@ -45,8 +44,6 @@ and then:
 * `docker ps` -> `docker.ps()`
 * `docker cp` -> `docker.copy()`
 
-You get the idea 🙂 it's the same as the CLI we all know and love.
-
 ```python
 >>> from pywhales import docker
 
@@ -61,47 +58,6 @@ This message shows that your installation appears to be working correctly.
 
 ```python
 >>> from pywhales import docker
->>> print(docker.run("nvidia/cuda:11.0-base", ["nvidia-smi"], gpus="all"))
-+-----------------------------------------------------------------------------+
-| NVIDIA-SMI 450.51.06    Driver Version: 450.51.06    CUDA Version: 11.0     |
-|-------------------------------+----------------------+----------------------+
-| GPU  Name        Persistence-M| Bus-Id        Disp.A | Volatile Uncorr. ECC |
-| Fan  Temp  Perf  Pwr:Usage/Cap|         Memory-Usage | GPU-Util  Compute M. |
-|                               |                      |               MIG M. |
-|===============================+======================+======================|
-|   0  Tesla T4            On   | 00000000:00:1E.0 Off |                    0 |
-| N/A   34C    P8     9W /  70W |      0MiB / 15109MiB |      0%      Default |
-|                               |                      |                  N/A |
-+-------------------------------+----------------------+----------------------+
-
-+-----------------------------------------------------------------------------+
-| Processes:                                                                  |
-|  GPU   GI   CI        PID   Type   Process name                  GPU Memory |
-|        ID   ID                                                   Usage      |
-|=============================================================================|
-|  No running processes found                                                 |
-+-----------------------------------------------------------------------------+
-```
-
-```python
->>> from pywhales import docker
->>> my_docker_image = docker.pull("ubuntu:20.04")
-20.04: Pulling from library/ubuntu
-e6ca3592b144: Downloading [=============>                                     ]  7.965MB/28.56MB
-534a5505201d: Download complete
-990916bd23bb: Download complete
-
->>> print(my_docker_image.repo_tags)
-['ubuntu:20.04']
-
->>> docker.image.list()
-[pywhales.Image(id='sha256:1a437e363abfa', tags=['ubuntu:20.04'])]
-
->>> my_docker_image.remove()
-```
-
-```python
->>> from pywhales import docker
 >>> my_image = docker.build(".", tags="some_name")  # uses Buildx/buildkit by default
 [+] Building 1.6s (17/17) FINISHED
 ...
@@ -112,7 +68,9 @@ e6ca3592b144: Downloading [=============>                                     ] 
 ```bash
 docker run --name some-postgres -e POSTGRES_PASSWORD=mysecretpassword -d postgres
 ```
+
 becomes
+
 ```python
 from pywhales import docker
 
@@ -148,13 +106,15 @@ docker.run(
     remove=True,
 )
 ```
-----------
 
+----------
 
 ```bash
 docker run -d --name some-postgres -e POSTGRES_PASSWORD=mysecretpassword -e PGDATA=/var/lib/postgresql/data/pgdata -v /custom/mount:/var/lib/postgresql/data -v myvolume:/tmp/myvolume postgres -c shared_buffers=256MB -c max_connections=200
 ```
+
 becomes
+
 ```python
 from pywhales import docker
 

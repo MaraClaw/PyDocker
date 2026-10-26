@@ -697,7 +697,7 @@ wheels = [
 
 [[package]]
 name = "pywhales"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },
@@ -728,10 +728,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "boto3" },
+    { name = "boto3", specifier = ">=1.43.118" },
     { name = "pydantic", specifier = ">=2.14.1" },
-    { name = "s3transfer" },
-    { name = "typing-extensions" },
+    { name = "s3transfer", specifier = ">=0.19.3" },
+    { name = "typing-extensions", specifier = ">=4.16.0" },
 ]
 
 [package.metadata.requires-dev]

@@ -32,7 +32,7 @@ jobs:
               print(f"version={version}", file=output)
           PY
       - name: Publish release if absent
-        uses: actions/github-script@v8
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           RELEASE_TAG: v${{ steps.version.outputs.version }}
           MERGE_COMMIT_SHA: ${{ github.event.pull_request.merge_commit_sha }}

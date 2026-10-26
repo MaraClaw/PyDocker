@@ -1,0 +1,100 @@
+# Compose
+
+## Scope Files and Project
+
+Set Compose globals on a dedicated `DockerClient`, not on `compose.up()`.
+`compose_files` accepts an ordered sequence of files. Use
+`compose_env_files=[".env", ".env.local"]` for ordered environment files and
+`compose_profiles=["test"]` when those inputs exist and the task needs them.
+Don't change the user's active Docker context to select a Compose target.
+
+For the disposable example below, put this in `compose.yaml` in the working
+directory. For an existing project, use its actual files and service names.
+
+```yaml
+services:
+  app:
+    image: alpine:3.22
+    command: ["sleep", "300"]
+```
+
+```python
+from uuid import uuid4
+
+from pywhales import DockerClient
+
+client = DockerClient(
+    compose_files=["compose.yaml"],
+    compose_project_name=f"pywhales-demo-{uuid4().hex[:8]}",
+    client_type="docker",
+)
+try:
+    client.compose.up(["app"], detach=True, wait=True, wait_timeout=60)
+    print(client.compose.execute("app", ["echo", "ready"], tty=False))
+    print(client.compose.logs(["app"], tail="20"))
+finally:
+    client.compose.down()
+```
+
+This creates an isolated project and tears down its containers and networks.
+`down()` keeps volumes by default. Use this cleanup only for a project you own
+and are authorized to remove, not a shared stack. `volumes=True` also removes
+declared named volumes and attached anonymous volumes; request it only when
+deleting that data is part of the task. `remove_images` is another explicit
+deletion choice, not a default cleanup setting.
+
+## Output and Service Selection
+
+| Operation | Result |
+| --- | --- |
+| `client.compose.build(...)` | `None`; normal output is displayed |
+| `client.compose.up(...)` | `None`; it doesn't return containers or captured logs |
+| Either with `stream_logs=True` | Owned stream yielding `(source, bytes)` |
+| `client.compose.ps()` | `list[Container]` for the selected project |
+| `client.compose.logs(...)` | `str`; use `stream=True` for `(source, bytes)` |
+| `client.compose.execute(service, command, tty=False)` | `str`; detached or TTY execution returns `None` |
+| `client.compose.run(service, command, tty=False)` | `str`; `detach=True` returns `Container`, `stream=True` returns a tuple stream |
+
+`source` is `"stdout"` or `"stderr"`, never `"stdin"`. These streams own local
+CLI processes and support context-manager cleanup; drain them to observe
+failures. Closing them doesn't tear down the project.
+
+For `build` and `up`, `services=None` means all services while `services=[]`
+means no work. Don't replace one with the other in a translation. Keep
+dependencies enabled unless the original command requests otherwise.
+`quiet=True` is incompatible with `stream_logs=True`.
+
+## One-Off Commands and TTY Defaults
+
+Both `compose.run` and `compose.execute` default to `tty=True`. Set `tty=False`
+for captured output and unattended jobs. `compose.run` also rejects TTY plus
+streaming, TTY plus detach, and detach plus streaming.
+
+With the client and disposable Compose file above, a one-off job is:
+
+```python
+output = client.compose.run(
+    "app", ["echo", "job complete"], tty=False, remove=True, dependencies=False
+)
+print(output)
+```
+
+`remove=True` removes that job container after exit; it doesn't clean up any
+separately started service containers. Use `execute` for a command in an
+already-running service. Collect logs separately from `up`; `follow=True` is
+potentially unbounded, so use `stream=True` with a deliberate stop boundary.
+
+## Plugin Features and Previews
+
+`wait=True` waits for running/healthy services and implies detached mode in
+Compose. Newer options, such as build `check`/`print` and up `watch` or
+`exit_code_from`, require a supporting plugin. PyWhales forwards flags without
+version probing or automatic downgrade. Blocking `compose.build(print=True)`
+still returns `None`; stream it if the output must be consumed.
+
+Preview mode is the client global `compose_dry_run=True`, not an `up()` keyword.
+Use a separate preview client with the same files/project settings. It still
+invokes the Compose plugin, and not every command supports dry run.
+`compose.ps()` and detached `compose.run()` reject this mode before execution
+because preview output cannot supply real container objects. Don't treat it
+as an offline validator or disable the preview silently to make a call work.

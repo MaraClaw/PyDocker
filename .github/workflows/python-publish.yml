@@ -1,20 +1,64 @@
 name: Upload Python Package
 
 on:
-  release:
-    types: [created]
+  workflow_run:
+    workflows: ['Run tests']
+    types: [completed]
+    branches: [main]
 
 jobs:
+  eligibility:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    if: >-
+      ${{ github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_branch == 'main' &&
+          github.event.workflow_run.head_repository.full_name == github.repository }}
+    outputs:
+      eligible: ${{ steps.check.outputs.eligible }}
+    steps:
+      - id: check
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const headSha = context.payload.workflow_run.head_sha;
+            const pullRequests = await github.paginate(
+              github.rest.repos.listPullRequestsAssociatedWithCommit,
+              { owner, repo, commit_sha: headSha, per_page: 100 }
+            );
+            for (const pullRequest of pullRequests) {
+              const { data: pull } = await github.rest.pulls.get({
+                owner, repo, pull_number: pullRequest.number
+              });
+              if (pull.merged === true &&
+                  pull.base.ref === 'main' &&
+                  pull.base.repo.full_name === `${owner}/${repo}` &&
+                  pull.merge_commit_sha === headSha) {
+                core.setOutput('eligible', 'true');
+                return;
+              }
+            }
+            core.setOutput('eligible', 'false');
+
   deploy:
+    needs: eligibility
+    if: ${{ needs.eligibility.outputs.eligible == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
       - name: Setup uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.13.5"
           python-version: "3.14.8"
@@ -30,7 +74,9 @@ jobs:
           printf 'version=%s\n' "$project_version" >> "$GITHUB_OUTPUT"
           uv run --isolated --no-project --no-config --python 3.14.8 --with "$wheel" -- python -I -c "import importlib.metadata, importlib.util, sys; from importlib.resources import files; from pywhales import DockerClient; assert callable(DockerClient); assert importlib.metadata.version('pywhales') == sys.argv[1]; assert files('pywhales').joinpath('py.typed').is_file(); assert importlib.util.find_spec('python_on_whales') is None" "$project_version"
       - name: Publish package distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          password: ${{ secrets.PYPI_PUBLISH_PACKAGE_TOKEN }}
       - name: Smoke check the published version
         env:
           PROJECT_VERSION: ${{ steps.distribution.outputs.version }}

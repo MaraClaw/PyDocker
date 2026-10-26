@@ -1,11 +1,22 @@
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
 from typing import assert_type
 
-from pydocker import Container, DockerClient, Image, Network, Volume
+from pydocker import (
+    Config,
+    Container,
+    DockerClient,
+    Image,
+    Network,
+    Node,
+    Secret,
+    Service,
+    Volume,
+)
 from pydocker.components.buildx.cli_wrapper import BakeResult
 from pydocker.components.buildx.imagetools.models import Manifest
 from pydocker.components.compose.models import ComposeEvent
+from pydocker.components.image.streams import EmptyImageStream, ImageStream
 from pydocker.components.system.models import DockerEvent
 from pydocker.components.top import ComposeTopResult, ContainerTopResult
 from pydocker.utils import MappedProcessStream, ProcessStream, stream_stdout_and_stderr
@@ -24,6 +35,15 @@ def _check_resource_inspection_contracts(client: DockerClient) -> None:
     assert_type(client.volume.inspect("volume"), Volume)
     assert_type(client.volume.inspect(["volume"]), list[Volume])
     assert_type(client.volume.inspect(iter(["volume"])), list[Volume])
+    assert_type(client.service.inspect("service"), Service)
+    assert_type(client.service.inspect(["service"]), list[Service])
+    assert_type(client.node.inspect("node"), Node)
+    assert_type(client.node.inspect(["node"]), list[Node])
+    assert_type(client.config.inspect("config"), Config)
+    assert_type(client.config.inspect(["config"]), list[Config])
+    assert_type(client.secret.inspect("secret"), Secret)
+    assert_type(client.secret.inspect(["secret"]), list[Secret])
+    assert_type(client.secret.inspect(iter(["secret"])), list[Secret])
 
 
 def _check_process_contracts(client: DockerClient, raw: bool) -> None:
@@ -53,19 +73,25 @@ def _check_image_return_contracts(
 ) -> None:
     assert_type(client.pull("busybox"), Image)
     assert_type(client.pull(["busybox"]), list[Image])
-    assert_type(client.pull("busybox", stream_logs=True), Iterable[tuple[str, bytes]])
-    assert_type(client.pull("busybox", False, True), Iterable[tuple[str, bytes]])
+    assert_type(client.pull("busybox", stream_logs=True), ImageStream)
+    assert_type(client.pull("busybox", False, True), ImageStream)
     assert_type(
         client.pull("busybox", stream_logs=stream),
-        Image | Iterable[tuple[str, bytes]],
+        Image | ImageStream,
     )
     assert_type(
         client.pull(["busybox"], stream_logs=stream),
-        list[Image] | Iterable[tuple[str, bytes]],
+        list[Image] | ImageStream | EmptyImageStream,
     )
     assert_type(client.push("busybox"), None)
-    assert_type(client.push("busybox", stream_logs=True), Iterable[tuple[str, bytes]])
-    assert_type(client.push([], stream_logs=True), Iterable[tuple[str, bytes]] | None)
+    assert_type(client.push("busybox", stream_logs=True), ImageStream)
+    assert_type(client.push([], stream_logs=True), ImageStream | None)
+    with client.pull("busybox", stream_logs=True) as logs:
+        assert_type(next(logs), tuple[str, bytes])
+        assert_type(logs.close(), None)
+    with client.push("busybox", stream_logs=True) as logs:
+        assert_type(next(logs), tuple[str, bytes])
+        assert_type(logs.close(), None)
     assert_type(client.image.save("busybox"), Iterator[bytes])
     assert_type(client.image.save("busybox", output=Path("image.tar")), None)
     assert_type(client.image.save("busybox", output=output), Iterator[bytes] | None)

@@ -1,16 +1,691 @@
 import contextlib
 import json
-from collections.abc import Generator
+import sys
+from collections.abc import Callable, Generator
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
+from queue import Queue
 from subprocess import CompletedProcess
+from threading import Barrier, Event, Thread
+from typing import Literal
 from unittest.mock import ANY, MagicMock, Mock, patch
 
 import pytest
 
 from pydocker import DockerClient, Image, docker
+from pydocker.client_config import Command
 from pydocker.components.image.models import ImageInspectResult
+from pydocker.components.image.streams import MultiImageStream
 from pydocker.exceptions import DockerException, NoSuchImage
 from pydocker.test_utils import get_all_jsons, random_name
+from pydocker.utils import MappedProcessStream, ProcessStream, stream_stdout_and_stderr
+
+
+def _assert_image_process_released(stream: ProcessStream) -> None:
+    assert stream._process.poll() is not None
+    assert all(not thread.is_alive() for thread in stream._threads)
+    assert all(
+        pipe.closed
+        for pipe in (stream.stdin, stream._process.stdout, stream._process.stderr)
+        if pipe is not None
+    )
+
+
+class _ImageCommands:
+    def __init__(self, stack: contextlib.ExitStack) -> None:
+        self.stack = stack
+        self.client = DockerClient()
+        self.client.client_config._client_call_with_path = ["docker-test"]
+        self.children: dict[str, ProcessStream] = {}
+        self.closed: dict[str, Event] = {}
+        self.started: Queue[str] = Queue()
+        self.output = True
+
+    def start(self, command: Command) -> ProcessStream:
+        name = str(command[-1])
+        code = "import os, sys; "
+        if self.output:
+            code += (
+                "os.write(1, b'out0\\nout1\\ntail'); os.write(2, b'err0\\nerr1\\n'); "
+            )
+        code += "status = int(input()); sys.exit(status)"
+        child = self.stack.enter_context(
+            stream_stdout_and_stderr(
+                [sys.executable, "-c", code, name], pipe_stdin=True
+            )
+        )
+        self.children[name] = child
+        closed = self.closed[name] = Event()
+        close = child.close
+
+        def close_and_signal() -> None:
+            close()
+            if all(not thread.is_alive() for thread in child._threads):
+                closed.set()
+
+        self.stack.enter_context(
+            patch.object(child, "close", side_effect=close_and_signal)
+        )
+        self.started.put(name)
+        return child
+
+    def stream(
+        self, operation: Literal["pull", "push"], names: list[str]
+    ) -> MultiImageStream:
+        method = (
+            self.client.image.pull if operation == "pull" else self.client.image.push
+        )
+        result = method(names, stream_logs=True)
+        assert isinstance(result, MultiImageStream)
+        return result
+
+    def finish(self, name: str, status: int = 0) -> None:
+        stdin = self.children[name].stdin
+        assert stdin is not None
+        stdin.write(f"{status}\n".encode())
+        stdin.flush()
+
+    def release_children(self) -> None:
+        for child in tuple(self.children.values()):
+            child.close()
+
+
+@pytest.fixture
+def image_commands() -> Generator[_ImageCommands]:
+    with contextlib.ExitStack() as stack:
+        commands = _ImageCommands(stack)
+        stack.enter_context(
+            patch.object(commands.client.image, "inspect", return_value=[])
+        )
+        stack.enter_context(
+            patch(
+                "pydocker.components.image.cli_wrapper.stream_stdout_and_stderr",
+                side_effect=commands.start,
+            )
+        )
+        yield commands
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+def test_multiple_image_stream_cancels_active_and_queued_commands(
+    operation: Literal["pull", "push"], image_commands: _ImageCommands
+) -> None:
+    names = [f"image:{number}" for number in range(8)]
+    stream = image_commands.stream(operation, names)
+    closer = Thread(target=stream.close, daemon=True)
+    try:
+        next(stream)
+        started = [image_commands.started.get(timeout=3) for _ in range(4)]
+        assert set(started) == set(names[:4])
+        executor = stream._executor
+        assert executor is not None
+        assert len(executor._threads) == 4
+
+        closer.start()
+        closer.join(timeout=3)
+
+        assert not closer.is_alive()
+        assert all(not worker.is_alive() for worker in executor._threads)
+        assert set(image_commands.children) == set(names[:4])
+        assert list(stream) == []
+        for child in image_commands.children.values():
+            _assert_image_process_released(child)
+    finally:
+        image_commands.release_children()
+        stream.close()
+        if closer.ident is not None:
+            closer.join(timeout=3)
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+def test_multiple_image_stream_rejects_running_but_unadmitted_worker_after_close(
+    operation: Literal["pull", "push"], image_commands: _ImageCommands
+) -> None:
+    names = [f"image:{number}" for number in range(6)]
+    stream = image_commands.stream(operation, names)
+    running = Event()
+    admit = Event()
+    consume = stream._consume
+
+    def gated_consume(name: str) -> None:
+        if name == names[4]:
+            running.set()
+            assert admit.wait(timeout=3)
+        consume(name)
+
+    closer = Thread(target=stream.close, daemon=True)
+    with patch.object(stream, "_consume", side_effect=gated_consume):
+        try:
+            next(stream)
+            for _ in range(4):
+                image_commands.started.get(timeout=3)
+            image_commands.finish(names[0])
+            assert running.wait(timeout=3)
+
+            closer.start()
+            assert image_commands.closed[names[1]].wait(timeout=3)
+            admit.set()
+            closer.join(timeout=3)
+
+            assert not closer.is_alive()
+            assert set(image_commands.children) == set(names[:4])
+            for child in image_commands.children.values():
+                _assert_image_process_released(child)
+        finally:
+            admit.set()
+            image_commands.release_children()
+            stream.close()
+            if closer.ident is not None:
+                closer.join(timeout=3)
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+def test_multiple_image_stream_close_wakes_blocked_consumer(
+    operation: Literal["pull", "push"], image_commands: _ImageCommands
+) -> None:
+    image_commands.output = False
+    stream = image_commands.stream(operation, ["one", "two"])
+    waiting = Event()
+    finished = Event()
+    output: list[tuple[str, bytes]] = []
+    get = stream._queue.get
+
+    def get_and_signal() -> tuple[str, bytes] | None:
+        waiting.set()
+        return get()
+
+    def consume() -> None:
+        try:
+            output.extend(stream)
+        finally:
+            finished.set()
+
+    consumer = Thread(target=consume, daemon=True)
+    with patch.object(stream._queue, "get", side_effect=get_and_signal):
+        try:
+            consumer.start()
+            assert waiting.wait(timeout=3)
+            for _ in range(2):
+                image_commands.started.get(timeout=3)
+
+            stream.close()
+
+            assert finished.wait(timeout=3)
+            consumer.join(timeout=3)
+            assert output == []
+            for child in image_commands.children.values():
+                _assert_image_process_released(child)
+        finally:
+            image_commands.release_children()
+            stream.close()
+            consumer.join(timeout=3)
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+@pytest.mark.parametrize("explicit_close", [False, True])
+def test_multiple_image_failure_cancels_siblings_while_consumer_is_paused(
+    operation: Literal["pull", "push"],
+    explicit_close: bool,
+    image_commands: _ImageCommands,
+) -> None:
+    names = [f"image:{number}" for number in range(6)]
+    stream = image_commands.stream(operation, names)
+    try:
+        next(stream)
+        for _ in range(4):
+            image_commands.started.get(timeout=3)
+
+        image_commands.finish(names[0], status=7)
+
+        for name in names[:4]:
+            assert image_commands.closed[name].wait(timeout=3)
+        executor = stream._executor
+        assert executor is not None
+        for worker in executor._threads:
+            worker.join(timeout=3)
+            assert not worker.is_alive()
+        assert stream._remaining == 0
+        error = stream._error
+        assert isinstance(error, DockerException)
+        assert error.return_code == 7
+        assert set(image_commands.children) == set(names[:4])
+        if explicit_close:
+            stream.close()
+        with pytest.raises(DockerException) as raised:
+            next(stream)
+        assert raised.value is error
+        assert list(stream) == []
+        for child in image_commands.children.values():
+            _assert_image_process_released(child)
+    finally:
+        image_commands.release_children()
+        stream.close()
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+def test_multiple_image_stream_keeps_first_original_worker_error(
+    operation: Literal["pull", "push"], image_commands: _ImageCommands
+) -> None:
+    stream = image_commands.stream(operation, ["one", "two"])
+    failures = Barrier(2)
+    first_recorded = Event()
+    second_recorded = Event()
+    errors: dict[str, DockerException] = {}
+    worker_done = stream._worker_done
+
+    def ordered_failures(future: Future[None]) -> None:
+        error = future.exception()
+        assert isinstance(error, DockerException)
+        name = error.docker_command[-1]
+        errors[name] = error
+        failures.wait(timeout=3)
+        if name == "two":
+            assert first_recorded.wait(timeout=3)
+        worker_done(future)
+        if name == "one":
+            first_recorded.set()
+        else:
+            second_recorded.set()
+
+    with patch.object(stream, "_worker_done", side_effect=ordered_failures):
+        try:
+            next(stream)
+            for _ in range(2):
+                image_commands.started.get(timeout=3)
+            image_commands.finish("one", status=7)
+            image_commands.finish("two", status=9)
+            assert second_recorded.wait(timeout=3)
+
+            stream.close()
+
+            with pytest.raises(DockerException) as raised:
+                next(stream)
+            assert raised.value is errors["one"]
+            assert raised.value.return_code == 7
+            assert list(stream) == []
+            for child in image_commands.children.values():
+                _assert_image_process_released(child)
+        finally:
+            failures.abort()
+            first_recorded.set()
+            image_commands.release_children()
+            stream.close()
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+def test_multiple_image_stream_exhaustion_preserves_tags_bytes_and_pipe_order(
+    operation: Literal["pull", "push"], image_commands: _ImageCommands
+) -> None:
+    names = [f"image:{number}" for number in range(6)]
+    stream = image_commands.stream(operation, [*names, names[0], names[-1]])
+    try:
+        output = [next(stream)]
+        for _ in range(4):
+            image_commands.finish(image_commands.started.get(timeout=3))
+        for _ in range(2):
+            image_commands.finish(image_commands.started.get(timeout=3))
+
+        output.extend(stream)
+
+        assert set(image_commands.children) == set(names)
+        for name in names:
+            lines = [line for tag, line in output if tag == name]
+            assert [line for line in lines if not line.startswith(b"err")] == [
+                b"out0\n",
+                b"out1\n",
+                b"tail",
+            ]
+            assert [line for line in lines if line.startswith(b"err")] == [
+                b"err0\n",
+                b"err1\n",
+            ]
+        assert len(output) == 5 * len(names)
+        for child in image_commands.children.values():
+            _assert_image_process_released(child)
+    finally:
+        image_commands.release_children()
+        stream.close()
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+def test_multiple_image_stream_concurrent_close_waits_for_cleanup(
+    operation: Literal["pull", "push"], image_commands: _ImageCommands
+) -> None:
+    stream = image_commands.stream(operation, ["one", "two"])
+    entered = Event()
+    release = Event()
+    waiting = Event()
+    finished = Event()
+    first = Thread(target=stream.close, daemon=True)
+
+    def close_again() -> None:
+        stream.close()
+        finished.set()
+
+    second = Thread(target=close_again, daemon=True)
+    try:
+        next(stream)
+        for _ in range(2):
+            image_commands.started.get(timeout=3)
+        child = image_commands.children["one"]
+        close = child.close
+        wait = stream._cleanup_done.wait
+
+        def gated_close() -> None:
+            entered.set()
+            assert release.wait(timeout=3)
+            close()
+
+        def wait_and_signal() -> bool:
+            waiting.set()
+            return wait()
+
+        with (
+            patch.object(child, "close", side_effect=gated_close),
+            patch.object(stream._cleanup_done, "wait", side_effect=wait_and_signal),
+        ):
+            first.start()
+            assert entered.wait(timeout=3)
+            second.start()
+            assert waiting.wait(timeout=3)
+            assert not finished.is_set()
+
+            release.set()
+            first.join(timeout=3)
+            second.join(timeout=3)
+
+            assert not first.is_alive()
+            assert not second.is_alive()
+            assert finished.is_set()
+        for child in image_commands.children.values():
+            _assert_image_process_released(child)
+    finally:
+        release.set()
+        image_commands.release_children()
+        stream.close()
+        for closer in (first, second):
+            if closer.ident is not None:
+                closer.join(timeout=3)
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+def test_multiple_image_stream_child_startup_failure_closes_sibling(
+    operation: Literal["pull", "push"], image_commands: _ImageCommands
+) -> None:
+    error = OSError("cannot start image CLI")
+    stream = image_commands.stream(operation, ["one", "two", "three"])
+    start = image_commands.start
+
+    def start_or_fail(command: Command) -> ProcessStream:
+        if command[-1] == "two":
+            raise error
+        return start(command)
+
+    with patch(
+        "pydocker.components.image.cli_wrapper.stream_stdout_and_stderr",
+        side_effect=start_or_fail,
+    ):
+        try:
+            with pytest.raises(OSError) as raised:
+                list(stream)
+
+            assert raised.value is error
+            assert "two" not in image_commands.children
+            for child in image_commands.children.values():
+                _assert_image_process_released(child)
+        finally:
+            image_commands.release_children()
+            stream.close()
+
+
+@pytest.mark.parametrize("phase", ["constructor", "submission"])
+def test_multiple_image_stream_executor_startup_failure_releases_resources(
+    phase: Literal["constructor", "submission"], image_commands: _ImageCommands
+) -> None:
+    stream = image_commands.stream("pull", ["one", "two"])
+    error = RuntimeError("executor startup failed")
+    submit = ThreadPoolExecutor.submit
+    submissions = 0
+
+    def submit_or_fail(
+        executor: ThreadPoolExecutor, callback: Callable[[str], None], name: str
+    ) -> Future[None]:
+        nonlocal submissions
+        submissions += 1
+        if submissions == 2:
+            raise error
+        return submit(executor, callback, name)
+
+    target = (
+        patch("pydocker.components.image.streams.ThreadPoolExecutor", side_effect=error)
+        if phase == "constructor"
+        else patch.object(
+            ThreadPoolExecutor, "submit", autospec=True, side_effect=submit_or_fail
+        )
+    )
+    with target, pytest.raises(RuntimeError) as raised:
+        next(stream)
+
+    assert raised.value is error
+    stream.close()
+    assert list(stream) == []
+    for child in image_commands.children.values():
+        _assert_image_process_released(child)
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+def test_multiple_image_context_preserves_body_exception_after_worker_failure(
+    operation: Literal["pull", "push"], image_commands: _ImageCommands
+) -> None:
+    stream = image_commands.stream(operation, ["one", "two"])
+    body_error = RuntimeError("consumer body failed")
+    try:
+        next(stream)
+        for _ in range(2):
+            image_commands.started.get(timeout=3)
+        image_commands.finish("one", status=7)
+        assert image_commands.closed["two"].wait(timeout=3)
+        worker_error = stream._error
+
+        with pytest.raises(RuntimeError) as raised, stream:
+            raise body_error
+
+        assert raised.value is body_error
+        with pytest.raises(DockerException) as failure:
+            next(stream)
+        assert failure.value is worker_error
+        for child in image_commands.children.values():
+            _assert_image_process_released(child)
+    finally:
+        image_commands.release_children()
+        stream.close()
+
+
+@pytest.mark.parametrize("stream_logs", [False, True])
+def test_empty_image_operations_keep_existing_result_shapes(
+    stream_logs: bool, image_commands: _ImageCommands
+) -> None:
+    result = image_commands.client.image.pull([], stream_logs=stream_logs)
+
+    assert isinstance(result, Generator) if stream_logs else isinstance(result, list)
+    assert list(result) == []
+    assert image_commands.client.image.push([], stream_logs=stream_logs) is None
+    assert image_commands.children == {}
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+def test_duplicate_single_image_stream_keeps_eager_owned_child(
+    operation: Literal["pull", "push"], image_commands: _ImageCommands
+) -> None:
+    method = (
+        image_commands.client.image.pull
+        if operation == "pull"
+        else image_commands.client.image.push
+    )
+    stream = method(["one", "one"], stream_logs=True)
+    assert isinstance(stream, MappedProcessStream)
+
+    stream.close()
+
+    assert list(image_commands.children) == ["one"]
+    _assert_image_process_released(image_commands.children["one"])
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+@pytest.mark.parametrize("multiple", [False, True])
+def test_nonstream_image_operations_keep_eager_results_and_deduplication(
+    operation: Literal["pull", "push"], multiple: bool, image_commands: _ImageCommands
+) -> None:
+    names = ["one", "two", "one"] if multiple else "one"
+    method = (
+        image_commands.client.image.pull
+        if operation == "pull"
+        else image_commands.client.image.push
+    )
+    with patch(
+        "pydocker.components.image.cli_wrapper.run",
+        return_value=b'[{"Id": "sha256:test"}]',
+    ) as run:
+        result = method(names)
+
+    assert image_commands.children == {}
+    assert sorted(
+        call.args[0][-1] for call in run.call_args_list if call.args[0][2] == operation
+    ) == (["one", "two"] if multiple else ["one"])
+    if operation == "push":
+        assert result is None
+    elif multiple:
+        assert isinstance(result, list)
+        assert all(isinstance(image, Image) for image in result)
+        assert len(result) == 2
+    else:
+        assert isinstance(result, Image)
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+def test_multiple_image_stream_has_lazy_owned_lifecycle(
+    operation: Literal["pull", "push"],
+) -> None:
+    client = DockerClient()
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        patch(
+            "pydocker.components.image.cli_wrapper.stream_stdout_and_stderr"
+        ) as start,
+    ):
+        method = client.image.pull if operation == "pull" else client.image.push
+        result = method(["one", "two"], stream_logs=True)
+        assert result is not None
+        assert isinstance(result, MultiImageStream)
+        with result as entered:
+            assert entered is result
+        result.close()
+        assert list(result) == []
+        start.assert_not_called()
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+@pytest.mark.parametrize("consume", [False, True])
+def test_single_image_stream_owns_idle_child(
+    operation: Literal["pull", "push"], consume: bool
+) -> None:
+    client = DockerClient()
+    child = stream_stdout_and_stderr(
+        [sys.executable, "-c", "print('ready', flush=True); input()"], pipe_stdin=True
+    )
+    with (
+        child,
+        patch.object(client.image, "inspect", return_value=[]),
+        patch(
+            "pydocker.components.image.cli_wrapper.stream_stdout_and_stderr",
+            return_value=child,
+        ),
+    ):
+        method = client.image.pull if operation == "pull" else client.image.push
+        result = method("sample:v1", stream_logs=True)
+        assert isinstance(result, MappedProcessStream)
+        if consume:
+            assert next(result) == ("sample:v1", b"ready\n")
+
+        result.close()
+        result.close()
+
+        assert list(result) == []
+        _assert_image_process_released(child)
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+def test_single_image_stream_context_preserves_body_error(
+    operation: Literal["pull", "push"],
+) -> None:
+    client = DockerClient()
+    error = RuntimeError("consumer failed")
+    with (
+        stream_stdout_and_stderr(
+            [sys.executable, "-c", "input()"], pipe_stdin=True
+        ) as child,
+        patch.object(client.image, "inspect", return_value=[]),
+        patch(
+            "pydocker.components.image.cli_wrapper.stream_stdout_and_stderr",
+            return_value=child,
+        ),
+    ):
+        method = client.image.pull if operation == "pull" else client.image.push
+        result = method("sample:v1", stream_logs=True)
+        assert isinstance(result, MappedProcessStream)
+
+        with pytest.raises(RuntimeError) as raised, result as entered:
+            assert entered is result
+            raise error
+
+        assert raised.value is error
+        _assert_image_process_released(child)
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_single_image_stream_exhaustion_keeps_bytes_and_command_failure(
+    operation: Literal["pull", "push"], exit_code: int
+) -> None:
+    client = DockerClient()
+    with (
+        stream_stdout_and_stderr(
+            [
+                sys.executable,
+                "-c",
+                "import os, sys; os.write(1, b'first\\nsecond\\ntail'); "
+                "os.write(2, b'No such image: missing\\n'); sys.exit(int(sys.argv[1]))",
+                str(exit_code),
+            ]
+        ) as child,
+        patch.object(client.image, "inspect", return_value=[]),
+        patch(
+            "pydocker.components.image.cli_wrapper.stream_stdout_and_stderr",
+            return_value=child,
+        ),
+    ):
+        method = client.image.pull if operation == "pull" else client.image.push
+        result = method("sample:v1", stream_logs=True)
+        assert isinstance(result, MappedProcessStream)
+        output: list[tuple[str, bytes]] = []
+
+        if exit_code:
+            with pytest.raises(NoSuchImage) as raised:
+                output.extend(result)
+            assert raised.value.return_code == exit_code
+        else:
+            output.extend(result)
+
+        assert all(tag == "sample:v1" for tag, _ in output)
+        assert [
+            line for _, line in output if not line.startswith(b"No such image")
+        ] == [
+            b"first\n",
+            b"second\n",
+            b"tail",
+        ]
+        assert ("sample:v1", b"No such image: missing\n") in output
+        _assert_image_process_released(child)
 
 
 def test_batch_inspect_image_aliases_and_typed_snapshot() -> None:

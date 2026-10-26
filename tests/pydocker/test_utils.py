@@ -11,10 +11,23 @@ import pytest
 import pydocker.utils
 from pydocker.exceptions import NoSuchContainer
 from pydocker.utils import (
+    MappedProcessStream,
     ProcessStream,
     format_cpuset,
     stream_stdout_and_stderr,
 )
+
+
+def test_mapped_process_stream_owns_unstarted_mapping() -> None:
+    child = stream_stdout_and_stderr([sys.executable, "-c", "input()"], pipe_stdin=True)
+    stream = MappedProcessStream(child, (line for _, line in child))
+
+    with stream as entered:
+        assert entered is stream
+
+    stream.close()
+    assert list(stream) == []
+    _assert_process_released(child)
 
 
 def test_format_cpuset_none() -> None:

@@ -5,12 +5,9 @@ import json
 import warnings
 from collections import OrderedDict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from concurrent.futures.thread import ThreadPoolExecutor
 from datetime import datetime
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
-from queue import Empty as EmptyQueue
-from queue import Queue
 from subprocess import PIPE, Popen
 from types import TracebackType
 from typing import (
@@ -39,8 +36,19 @@ from pydocker.components.image.models import (
     ImageInspectResult,
     ImageRootFS,
 )
+from pydocker.components.image.streams import (
+    EmptyImageStream,
+    ImageStream,
+    MultiImageStream,
+)
 from pydocker.exceptions import DockerException, NoSuchImage
-from pydocker.utils import ValidPath, run, stream_stdout_and_stderr, to_list
+from pydocker.utils import (
+    MappedProcessStream,
+    ValidPath,
+    run,
+    stream_stdout_and_stderr,
+    to_list,
+)
 
 type ImageListFilter = (
     tuple[Literal["id"], str]
@@ -609,21 +617,40 @@ class ImageCLI(DockerCLICaller):
     @overload
     def pull(
         self,
-        x: str | Iterable[str],
+        x: str,
         quiet: bool = False,
         *,
         stream_logs: Literal[True],
         platform: str | None = None,
-    ) -> Iterable[tuple[str, bytes]]: ...
+    ) -> ImageStream: ...
 
     @overload
     def pull(
         self,
-        x: str | Iterable[str],
+        x: str,
         quiet: bool,
         stream_logs: Literal[True],
         platform: str | None = None,
-    ) -> Iterable[tuple[str, bytes]]: ...
+    ) -> ImageStream: ...
+
+    @overload
+    def pull(
+        self,
+        x: Iterable[str],
+        quiet: bool = False,
+        *,
+        stream_logs: Literal[True],
+        platform: str | None = None,
+    ) -> ImageStream | EmptyImageStream: ...
+
+    @overload
+    def pull(
+        self,
+        x: Iterable[str],
+        quiet: bool,
+        stream_logs: Literal[True],
+        platform: str | None = None,
+    ) -> ImageStream | EmptyImageStream: ...
 
     @overload
     def pull(
@@ -632,7 +659,7 @@ class ImageCLI(DockerCLICaller):
         quiet: bool = False,
         stream_logs: bool = False,
         platform: str | None = None,
-    ) -> Image | Iterable[tuple[str, bytes]]: ...
+    ) -> Image | ImageStream: ...
 
     @overload
     def pull(
@@ -641,7 +668,7 @@ class ImageCLI(DockerCLICaller):
         quiet: bool = False,
         stream_logs: bool = False,
         platform: str | None = None,
-    ) -> builtins.list[Image] | Iterable[tuple[str, bytes]]: ...
+    ) -> builtins.list[Image] | ImageStream | EmptyImageStream: ...
 
     def pull(
         self,
@@ -649,7 +676,7 @@ class ImageCLI(DockerCLICaller):
         quiet: bool = False,
         stream_logs: bool = False,
         platform: str | None = None,
-    ) -> Image | builtins.list[Image] | Iterable[tuple[str, bytes]]:
+    ) -> Image | builtins.list[Image] | ImageStream | EmptyImageStream:
         """Pull one or more docker image(s)
 
         Alias: `docker.pull(...)`
@@ -665,6 +692,10 @@ class ImageCLI(DockerCLICaller):
                 The second element is the log statement related to pull progress, as `bytes`.
                 You'll need to call `.decode()` if you want the logs as `str`.
             platform: If you want to enforce a platform.
+
+        Nonempty streamed results own their local CLI processes. Use `close()`
+        or a context manager to cancel early; a bare loop break does not close
+        them. Empty streamed input returns an empty generator.
         """
         if quiet and stream_logs:
             raise ValueError(
@@ -713,7 +744,7 @@ class ImageCLI(DockerCLICaller):
         quiet: bool,
         stream_logs: bool = False,
         platform: str | None = None,
-    ) -> builtins.list[Image] | Iterable[tuple[str, bytes]]:
+    ) -> builtins.list[Image] | ImageStream:
         if stream_logs:
             return self._pull_multiple_tags_stream(
                 image_names=image_names,
@@ -740,38 +771,13 @@ class ImageCLI(DockerCLICaller):
         quiet: bool,
         stream_logs: bool = False,
         platform: str | None = None,
-    ) -> Iterator[tuple[str, bytes]]:
-        queue: Queue[tuple[str, bytes] | None] = Queue()
+    ) -> MultiImageStream:
+        def start(image_name: str) -> MappedProcessStream[tuple[str, bytes]]:
+            child = self._pull_single_tag(image_name, quiet, True, platform)
+            assert child is not None
+            return child
 
-        def _pull_and_queue_logs(image_name: str) -> None:
-            try:
-                generator = self._pull_single_tag(
-                    image_name, quiet, stream_logs, platform
-                )
-                if generator is not None:
-                    for value in generator:
-                        queue.put(value)
-            finally:
-                queue.put(None)  # Signal completion
-
-        with ThreadPoolExecutor(4) as executor:
-            futures = [
-                executor.submit(_pull_and_queue_logs, image_name)
-                for image_name in image_names
-            ]
-
-            completed = 0
-            while completed < len(image_names):
-                try:
-                    item = queue.get(timeout=0.1)
-                    if item is not None:
-                        yield item
-                    else:
-                        completed += 1
-                except EmptyQueue:
-                    continue
-
-            [future.result() for future in futures]
+        return MultiImageStream(image_names, start)
 
     def _pull_single_tag(
         self,
@@ -779,7 +785,7 @@ class ImageCLI(DockerCLICaller):
         quiet: bool,
         stream_logs: bool = False,
         platform: str | None = None,
-    ) -> Iterable[tuple[str, bytes]] | None:
+    ) -> MappedProcessStream[tuple[str, bytes]] | None:
         full_cmd = Command([*self.docker_cmd, "image", "pull"])
 
         if quiet:
@@ -791,8 +797,9 @@ class ImageCLI(DockerCLICaller):
         full_cmd.append(image_name)
 
         if stream_logs:
-            return (
-                (image_name, line) for _, line in stream_stdout_and_stderr(full_cmd)
+            stream = stream_stdout_and_stderr(full_cmd)
+            return MappedProcessStream(
+                stream, ((image_name, line) for _, line in stream)
             )
         else:
             run(full_cmd, capture_stdout=quiet, capture_stderr=quiet)
@@ -813,7 +820,7 @@ class ImageCLI(DockerCLICaller):
         quiet: bool = False,
         *,
         stream_logs: Literal[True],
-    ) -> Iterable[tuple[str, bytes]]: ...
+    ) -> ImageStream: ...
 
     @overload
     def push(
@@ -821,7 +828,24 @@ class ImageCLI(DockerCLICaller):
         x: str,
         quiet: bool,
         stream_logs: Literal[True],
-    ) -> Iterable[tuple[str, bytes]]: ...
+    ) -> ImageStream: ...
+
+    @overload
+    def push(
+        self,
+        x: Iterable[str],
+        quiet: bool = False,
+        *,
+        stream_logs: Literal[True],
+    ) -> ImageStream | None: ...
+
+    @overload
+    def push(
+        self,
+        x: Iterable[str],
+        quiet: bool,
+        stream_logs: Literal[True],
+    ) -> ImageStream | None: ...
 
     @overload
     def push(
@@ -829,14 +853,14 @@ class ImageCLI(DockerCLICaller):
         x: str | Iterable[str],
         quiet: bool = False,
         stream_logs: bool = False,
-    ) -> Iterable[tuple[str, bytes]] | None: ...
+    ) -> ImageStream | None: ...
 
     def push(
         self,
         x: str | Iterable[str],
         quiet: bool = False,
         stream_logs: bool = False,
-    ) -> Iterable[tuple[str, bytes]] | None:
+    ) -> ImageStream | None:
         """Push a tag or a repository to a registry
 
         Alias: `docker.push(...)`
@@ -851,6 +875,10 @@ class ImageCLI(DockerCLICaller):
                 corresponds to the image or repository name that a push is being done for.
                 The second element is the log statement related to push progress, as `bytes`.
                 You'll need to call `.decode()` if you want the logs as `str`.
+
+        Nonempty streamed results own their local CLI processes. Use `close()`
+        or a context manager to cancel early; a bare loop break does not close
+        them. Empty input returns `None`.
 
         # Raises
             `pydocker.exceptions.NoSuchImage` if one of the images does not exist.
@@ -887,7 +915,7 @@ class ImageCLI(DockerCLICaller):
         tags_or_repos: builtins.list[str],
         quiet: bool,
         stream_logs: bool,
-    ) -> Iterable[tuple[str, bytes]] | None:
+    ) -> ImageStream | None:
         if stream_logs:
             return self._push_multiple_tags_stream(
                 tags_or_repos=tags_or_repos,
@@ -911,49 +939,27 @@ class ImageCLI(DockerCLICaller):
         tags_or_repos: builtins.list[str],
         quiet: bool,
         stream_logs: bool,
-    ) -> Iterator[tuple[str, bytes]]:
-        queue: Queue[tuple[str, bytes] | None] = Queue()
+    ) -> MultiImageStream:
+        def start(tag_or_repo: str) -> MappedProcessStream[tuple[str, bytes]]:
+            child = self._push_single_tag(tag_or_repo, quiet, True)
+            assert child is not None
+            return child
 
-        def _push_and_queue_logs(tag_or_repo: str) -> None:
-            try:
-                generator = self._push_single_tag(tag_or_repo, quiet, stream_logs)
-                if generator is not None:
-                    for value in generator:
-                        queue.put(value)
-            finally:
-                queue.put(None)  # Signal completion
-
-        with ThreadPoolExecutor(4) as executor:
-            futures = [
-                executor.submit(_push_and_queue_logs, tag_or_repo)
-                for tag_or_repo in tags_or_repos
-            ]
-
-            completed = 0
-            while completed < len(tags_or_repos):
-                try:
-                    item = queue.get(timeout=0.1)
-                    if item is not None:
-                        yield item
-                    else:
-                        completed += 1
-                except EmptyQueue:
-                    continue
-
-            [future.result() for future in futures]
+        return MultiImageStream(tags_or_repos, start)
 
     def _push_single_tag(
         self,
         tag_or_repo: str,
         quiet: bool,
         stream_logs: bool,
-    ) -> Iterable[tuple[str, bytes]] | None:
+    ) -> MappedProcessStream[tuple[str, bytes]] | None:
         full_cmd = Command([*self.docker_cmd, "image", "push"])
         full_cmd.add_flag("--quiet", quiet)
         full_cmd.append(tag_or_repo)
         if stream_logs:
-            return (
-                (tag_or_repo, line) for _, line in stream_stdout_and_stderr(full_cmd)
+            stream = stream_stdout_and_stderr(full_cmd)
+            return MappedProcessStream(
+                stream, ((tag_or_repo, line) for _, line in stream)
             )
         else:
             run(full_cmd, capture_stdout=quiet, capture_stderr=quiet)

@@ -31,6 +31,7 @@ from pywhales.client_config import (
     ParsingError,
     ReloadableObjectFromJson,
 )
+from pywhales.components._cleanup import resource_cleanup
 from pywhales.components.container.models import (
     ContainerConfig,
     ContainerGraphDriver,
@@ -110,24 +111,19 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        try:
-            host_config = self.host_config
-            state = self.state
-            assert host_config is not None
-            assert state is not None
-            autoremove = host_config.auto_remove
-            if state.running is True:
-                self.stop()
-            if autoremove is not True:
-                self.remove(volumes=True)
-        except NoSuchContainer:
-            return
-        except BaseException as cleanup_error:
-            if exc_val is None:
-                raise
-            raise BaseExceptionGroup(
-                "Container body and cleanup both failed", [exc_val, cleanup_error]
-            ) from None
+        with resource_cleanup(exc_val, "Container body and cleanup both failed"):
+            try:
+                host_config = self.host_config
+                state = self.state
+                assert host_config is not None
+                assert state is not None
+                autoremove = host_config.auto_remove
+                if state.running is True:
+                    self.stop()
+                if autoremove is not True:
+                    self.remove(volumes=True)
+            except NoSuchContainer:
+                return
 
     @override
     def _fetch_inspect_result_json(self, reference: str) -> dict[str, Any]:

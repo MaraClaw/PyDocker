@@ -8,7 +8,13 @@ import pytest
 from pywhales import DockerClient, Network
 from pywhales.components.container.models import ContainerEndpointIPAMConfig
 from pywhales.components.network.cli_wrapper import NetworkInspectResult
-from pywhales.exceptions import DockerException, NoSuchNetwork
+from pywhales.exceptions import (
+    DockerException,
+    NoSuchContainer,
+    NoSuchImage,
+    NoSuchNetwork,
+    NoSuchVolume,
+)
 from pywhales.test_utils import get_all_jsons, random_name
 
 
@@ -54,6 +60,40 @@ def test_network_cleanup_preserves_removal(missing: bool) -> None:
             pytest.raises(NoSuchNetwork),
         ):
             network.remove()
+
+
+@pytest.mark.parametrize(
+    ("stderr", "error_type"),
+    [
+        pytest.param(b"permission denied", DockerException, id="command-failure"),
+        pytest.param(b"No such container: resource", NoSuchContainer, id="container"),
+        pytest.param(b"No such image: resource", NoSuchImage, id="image"),
+        pytest.param(b"No such volume: resource", NoSuchVolume, id="volume"),
+    ],
+)
+def test_network_cleanup_propagates_unrelated_cli_failures(
+    stderr: bytes, error_type: type[DockerException]
+) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    network = Network(client.client_config, "resource", is_immutable_id=True)
+    with (
+        patch(
+            "subprocess.run", return_value=CompletedProcess([], 17, b"output", stderr)
+        ) as command,
+        pytest.raises(DockerException) as raised,
+        network,
+    ):
+        pass
+
+    expected = ["docker-test", "network", "remove", "resource"]
+    command.assert_called_once()
+    assert command.call_args.args[0] == expected
+    assert type(raised.value) is error_type
+    assert raised.value.docker_command == expected
+    assert raised.value.return_code == 17
+    assert raised.value.stdout == "output"
+    assert raised.value.stderr == stderr.decode()
 
 
 @pytest.mark.parametrize("json_file", get_all_jsons("networks"))
@@ -169,13 +209,13 @@ def test_list_filters_old_signature(docker_client: DockerClient) -> None:
 def test_correct_ipam_config(docker_client: DockerClient) -> None:
     """Test that we can create a network with a specific IPAM configuration."""
     with (
-        docker_client.network.create(random_name(), subnet="172.20.0.0/16") as net,
+        docker_client.network.create(random_name(), subnet="192.0.2.0/24") as net,
         docker_client.container.run(
             "busybox",
             ["sleep", "infinity"],
             detach=True,
             networks=[net],
-            ip="172.20.0.5",
+            ip="192.0.2.5",
         ) as ctr,
     ):
         inspect = docker_client.container.inspect(ctr)
@@ -183,7 +223,7 @@ def test_correct_ipam_config(docker_client: DockerClient) -> None:
         networks = inspect.network_settings.networks
         assert networks is not None
         assert net.name is not None
-        assert networks[net.name].ip_address == "172.20.0.5"
+        assert networks[net.name].ip_address == "192.0.2.5"
         assert networks[net.name].ipam_config == ContainerEndpointIPAMConfig(
-            ipv4_address="172.20.0.5", ipv6_address=None, link_local_ips=None
+            ipv4_address="192.0.2.5", ipv6_address=None, link_local_ips=None
         )

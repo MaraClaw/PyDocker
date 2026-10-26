@@ -1,12 +1,17 @@
+import json
 import re
+import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, call, patch
+from uuid import uuid4
 
 import pytest
 
 from pywhales import DockerClient, Image
+from pywhales.components.container.models import PortBinding
 from pywhales.components.top import ContainerTopResult
 from pywhales.exceptions import DockerException
 
@@ -87,53 +92,152 @@ def test_version(ctr_client: DockerClient) -> None:
     assert re.match(r"\d+\.\d+", version_info.server.version)
 
 
-def test_login_logout(
-    docker_client: DockerClient, docker_registry_without_login: str
+def _isolated_auth_client(
+    docker_client: DockerClient, config_dir: Path, registry: str
+) -> DockerClient:
+    current_context = docker_client.context.inspect()
+    storage = current_context.storage
+    assert storage is not None
+    assert storage.metadata_path is not None
+    if storage.metadata_path != "<IN MEMORY>":
+        (config_dir / "contexts").symlink_to(
+            Path(storage.metadata_path).parent.parent, target_is_directory=True
+        )
+    (config_dir / "config.json").write_text(
+        json.dumps({"currentContext": current_context.name, "auths": {registry: {}}})
+    )
+    return DockerClient(
+        client_config=replace(docker_client.client_config, config=config_dir)
+    )
+
+
+@patch("pywhales.components.context.cli_wrapper.run")
+def test_auth_config_preserves_selected_context_without_credentials(
+    run_mock: Mock, tmp_path: Path
 ) -> None:
+    source = tmp_path / "source"
+    metadata_path = source / "contexts" / "meta" / "context-id"
+    metadata_path.mkdir(parents=True)
+    source_config = json.dumps(
+        {"currentContext": "remote", "auths": {"private.invalid": {"auth": "secret"}}}
+    )
+    (source / "config.json").write_text(source_config)
+    run_mock.return_value = json.dumps(
+        [{"Name": "remote", "Storage": {"MetadataPath": str(metadata_path)}}]
+    )
+    client = DockerClient(config=source, client_call=[sys.executable, "engine"])
+    auth_dir = tmp_path / "auth"
+    auth_dir.mkdir()
+
+    auth_client = _isolated_auth_client(client, auth_dir, "registry.invalid")
+
+    assert json.loads((auth_dir / "config.json").read_text()) == {
+        "currentContext": "remote",
+        "auths": {"registry.invalid": {}},
+    }
+    assert (auth_dir / "contexts").resolve() == source / "contexts"
+    assert auth_client.client_config.config == auth_dir
+    assert client.client_config.config == source
+    assert (source / "config.json").read_text() == source_config
+
+
+@patch("pywhales.components.context.cli_wrapper.run")
+def test_auth_config_preserves_explicit_endpoint_options_when_context_is_in_memory(
+    run_mock: Mock, tmp_path: Path
+) -> None:
+    run_mock.return_value = json.dumps(
+        [{"Name": "default", "Storage": {"MetadataPath": "<IN MEMORY>"}}]
+    )
+    client = DockerClient(
+        config=tmp_path / "source",
+        client_call=[sys.executable, "engine"],
+        host="tcp://remote.invalid:2376",
+        tls=True,
+        tlsverify=True,
+        tlscacert=tmp_path / "ca.pem",
+        tlscert=tmp_path / "cert.pem",
+        tlskey=tmp_path / "key.pem",
+    )
+    auth_dir = tmp_path / "auth"
+    auth_dir.mkdir()
+
+    auth_client = _isolated_auth_client(client, auth_dir, "registry.invalid")
+
+    assert auth_client.client_config == replace(client.client_config, config=auth_dir)
+    assert client.client_config.config == tmp_path / "source"
+    assert not (auth_dir / "contexts").exists()
+
+
+def test_login_logout(
+    docker_client: DockerClient, docker_registry_without_login: str, tmp_path: Path
+) -> None:
+    auth_client = _isolated_auth_client(
+        docker_client, tmp_path, docker_registry_without_login
+    )
+    config_path = tmp_path / "config.json"
     busybox_image = docker_client.pull("busybox")
     assert isinstance(busybox_image, Image)
     busybox_image.tag(f"{docker_registry_without_login}/my_busybox")
     with pytest.raises(DockerException):
-        docker_client.push(f"{docker_registry_without_login}/my_busybox")
-    docker_client.login(
-        docker_registry_without_login, username="my_user", password="my_password"
-    )
-    assert (
-        docker_registry_without_login
-        in (Path.home() / ".docker" / "config.json").read_text()
-    )
-    docker_client.push(f"{docker_registry_without_login}/my_busybox")
-    docker_client.push(
-        [f"{docker_registry_without_login}/my_busybox" for _ in range(2)]
-    )
-    docker_client.pull(f"{docker_registry_without_login}/my_busybox")
-    docker_client.logout(docker_registry_without_login)
-    assert (
-        docker_registry_without_login
-        not in (Path.home() / ".docker" / "config.json").read_text()
-    )
-
-
-@pytest.mark.skipif(True, reason="It doesn't work in the ci")
-def test_docker_client_options(docker_client: DockerClient) -> None:
-    if docker_client.container.exists("test_dind_container"):
-        docker_client.container.remove("test_dind_container", force=True, volumes=True)
-
-    with docker_client.run(
-        "docker:20.10.16-dind",
-        ["dockerd", "--host=tcp://0.0.0.0:2375", "--tls=false"],
-        remove=True,
-        privileged=True,
-        publish=[(2380, 2375)],
-        detach=True,
-        name="test_dind_container",
-    ):
-        time.sleep(10)
-        dind_client = DockerClient(host="tcp://localhost:2380")
-        assert dind_client.image.list() == []
-        assert "Hello from Docker!" in dind_client.run("hello-world")
-
-        dind_client = DockerClient(
-            client_call=["docker", "--host=tcp://localhost:2380"]
+        auth_client.push(f"{docker_registry_without_login}/my_busybox")
+    try:
+        auth_client.login(
+            docker_registry_without_login, username="my_user", password="my_password"
         )
-        assert "Hello from Docker!" in dind_client.run("hello-world")
+        assert docker_registry_without_login in config_path.read_text()
+        auth_client.push(f"{docker_registry_without_login}/my_busybox")
+        auth_client.push(
+            [f"{docker_registry_without_login}/my_busybox" for _ in range(2)]
+        )
+        auth_client.pull(f"{docker_registry_without_login}/my_busybox")
+    finally:
+        auth_client.logout(docker_registry_without_login)
+    assert docker_registry_without_login not in config_path.read_text()
+
+
+def test_docker_client_options(docker_client: DockerClient) -> None:
+    engine = docker_client.container.create(
+        "docker:29-dind",
+        ["dockerd", "--host=tcp://0.0.0.0:2375", "--tls=false"],
+        envs={"DOCKER_TLS_CERTDIR": ""},
+        privileged=True,
+        publish=[("127.0.0.1::2375",)],
+        name=f"pywhales-options-{uuid4().hex}",
+    )
+    try:
+        engine.start()
+        network_settings = engine.network_settings
+        assert network_settings is not None
+        assert network_settings.ports is not None
+        binding = PortBinding.model_validate(network_settings.ports["2375/tcp"][0])
+        assert binding.host_ip == "127.0.0.1"
+        assert binding.host_port is not None
+        endpoint = f"tcp://127.0.0.1:{binding.host_port}"
+        client_call = docker_client.client_config.client_call
+        dind_client = DockerClient(host=endpoint, client_call=client_call)
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                subprocess.run(
+                    [*(str(arg) for arg in dind_client.docker_cmd), "version"],
+                    capture_output=True,
+                    check=True,
+                    timeout=2,
+                )
+            except subprocess.CalledProcessError, subprocess.TimeoutExpired:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.25)
+            else:
+                break
+        version_info = dind_client.version()
+        assert version_info.server is not None
+        assert version_info.server.version is not None
+        assert version_info.server.version.startswith("29.")
+        assert dind_client.image.list() == []
+        caller_client = DockerClient(client_call=[*client_call, f"--host={endpoint}"])
+        assert caller_client.image.list() == []
+        assert "Hello from Docker!" in dind_client.run("hello-world", remove=True)
+        assert "Hello from Docker!" in caller_client.run("hello-world", remove=True)
+    finally:
+        engine.remove(force=True, volumes=True)

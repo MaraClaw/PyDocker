@@ -570,10 +570,13 @@ def test_resource_cleanup_exception_matrix(
         assert remove_command[-1] == "resource"
 
 
-@pytest.mark.parametrize("running", [False, True])
-@pytest.mark.parametrize("auto_remove", [False, True])
+@pytest.mark.parametrize("running", [False, True, None])
+@pytest.mark.parametrize("auto_remove", [False, True, None])
+@pytest.mark.parametrize("body_error_type", [None, ValueError])
 def test_container_cleanup_preserves_stop_and_removal(
-    running: bool, auto_remove: bool
+    running: bool | None,
+    auto_remove: bool | None,
+    body_error_type: type[ValueError] | None,
 ) -> None:
     client = DockerClient()
     client.client_config._client_call_with_path = ["docker-test"]
@@ -582,9 +585,16 @@ def test_container_cleanup_preserves_stop_and_removal(
     )
     snapshot = {
         "Id": "resource",
-        "HostConfig": {"AutoRemove": auto_remove},
-        "State": {"Running": running},
+        "HostConfig": {} if auto_remove is None else {"AutoRemove": auto_remove},
+        "State": {} if running is None else {"Running": running},
     }
+    body_error = body_error_type("body") if body_error_type is not None else None
+
+    def use_container() -> None:
+        with container:
+            if body_error is not None:
+                raise body_error
+
     with (
         patch(
             "subprocess.run",
@@ -595,32 +605,39 @@ def test_container_cleanup_preserves_stop_and_removal(
             ],
         ) as command,
         patch("pywhales.client_config.CACHE_VALIDITY_PERIOD", 3600),
-        container,
     ):
-        pass
+        if body_error is None:
+            use_container()
+        else:
+            with pytest.raises(ValueError) as raised:
+                use_container()
+            assert raised.value is body_error
     expected = [["docker-test", "container", "inspect", "resource"]]
-    if running:
+    if running is True:
         expected.append(["docker-test", "container", "stop", "resource"])
-    if not auto_remove:
+    if auto_remove is not True:
         expected.append(["docker-test", "container", "rm", "--volumes", "resource"])
     assert [call.args[0] for call in command.call_args_list] == expected
 
 
 @pytest.mark.parametrize(
-    ("phase", "auto_remove"),
+    "failure_phase",
     [
-        ("inspect", False),
-        ("stop", False),
-        ("rm", False),
-        ("inspect", True),
-        ("stop", True),
+        pytest.param(("inspect", False), id="inspect-explicit-remove"),
+        pytest.param(("stop", False), id="stop-explicit-remove"),
+        pytest.param(("rm", False), id="remove"),
+        pytest.param(("inspect", True), id="inspect-auto-remove"),
+        pytest.param(("stop", True), id="stop-auto-remove"),
     ],
 )
-@pytest.mark.parametrize("missing", [False, True], ids=["failure", "missing"])
-@pytest.mark.parametrize("body_outcome", ["success", "error", "interrupt"])
+@pytest.mark.parametrize(
+    "cleanup_outcome", ["missing", "error", "wrong-missing", "interrupt", "exit"]
+)
+@pytest.mark.parametrize("body_outcome", ["success", "error", "interrupt", "exit"])
 def test_container_cleanup_disappearance_races(
-    phase: str, auto_remove: bool, missing: bool, body_outcome: str
+    failure_phase: tuple[str, bool], cleanup_outcome: str, body_outcome: str
 ) -> None:
+    phase, auto_remove = failure_phase
     client = DockerClient()
     client.client_config._client_call_with_path = ["docker-test"]
     container = pywhales.Container(
@@ -630,7 +647,20 @@ def test_container_cleanup_disappearance_races(
         "success": None,
         "error": ValueError("body"),
         "interrupt": KeyboardInterrupt("body"),
+        "exit": SystemExit("body"),
     }[body_outcome]
+    cleanup_error = {
+        "interrupt": KeyboardInterrupt("cleanup"),
+        "exit": SystemExit("cleanup"),
+    }.get(cleanup_outcome)
+    stderr = {
+        "missing": b"No such container: resource",
+        "error": b"permission denied",
+        "wrong-missing": b"No such image: resource",
+        "interrupt": b"",
+        "exit": b"",
+    }[cleanup_outcome]
+    missing = cleanup_outcome == "missing"
     snapshot = json.dumps(
         [
             {
@@ -643,12 +673,9 @@ def test_container_cleanup_disappearance_races(
 
     def response(command: list[str], **kwargs: object) -> CompletedProcess[bytes]:
         if command[2] == phase:
-            return CompletedProcess(
-                command,
-                1,
-                b"",
-                b"No such container: resource" if missing else b"permission denied",
-            )
+            if cleanup_error is not None:
+                raise cleanup_error
+            return CompletedProcess(command, 1, b"", stderr)
         return CompletedProcess(command, 0, snapshot, b"")
 
     def use_resource() -> None:
@@ -667,13 +694,32 @@ def test_container_cleanup_disappearance_races(
                 use_resource()
             if missing:
                 assert raised.value is body_error
-            elif body_error is None:
-                assert isinstance(raised.value, DockerException)
-                assert raised.value.stderr == "permission denied"
             else:
-                assert isinstance(raised.value, BaseExceptionGroup)
-                assert raised.value.exceptions[0] is body_error
-                assert isinstance(raised.value.exceptions[1], DockerException)
+                if body_error is None:
+                    cleanup_failure = raised.value
+                else:
+                    assert isinstance(raised.value, BaseExceptionGroup)
+                    assert (
+                        raised.value.message == "Container body and cleanup both failed"
+                    )
+                    assert len(raised.value.exceptions) == 2
+                    assert raised.value.exceptions[0] is body_error
+                    assert raised.value.__cause__ is None
+                    assert raised.value.__suppress_context__ is True
+                    cleanup_failure = raised.value.exceptions[1]
+                if cleanup_error is not None:
+                    assert cleanup_failure is cleanup_error
+                else:
+                    expected_type = (
+                        NoSuchImage
+                        if cleanup_outcome == "wrong-missing"
+                        else DockerException
+                    )
+                    assert isinstance(cleanup_failure, DockerException)
+                    assert type(cleanup_failure) is expected_type
+                    assert cleanup_failure.stderr == stderr.decode()
+                    assert cleanup_failure.return_code == 1
+                    assert cleanup_failure.docker_command == command.call_args.args[0]
         phases = [call.args[0][2] for call in command.call_args_list]
         assert (
             phases
@@ -1092,13 +1138,19 @@ def test_container_state(ctr_client: DockerClient) -> None:
 
 def test_restart(ctr_client: DockerClient) -> None:
     cmd = ["sleep", "infinity"]
-    containers = [ctr_client.run("busybox:1", cmd, detach=True) for _ in range(3)]
-    ctr_client.kill(containers)
+    with contextlib.ExitStack() as stack:
+        containers = [
+            stack.enter_context(ctr_client.run("busybox:1", cmd, detach=True))
+            for _ in range(3)
+        ]
+        ctr_client.kill(containers)
+        ctr_client.wait(containers)
 
-    ctr_client.restart(containers)
-    for container in containers:
-        assert container.state is not None
-        assert container.state.running is True
+        ctr_client.restart(containers)
+        for container in containers:
+            container.reload()
+            assert container.state is not None
+            assert container.state.running is True
 
 
 def test_execute(ctr_client: DockerClient) -> None:
@@ -1160,22 +1212,26 @@ def test_diff(ctr_client: DockerClient) -> None:
 
 
 def test_methods(ctr_client: DockerClient) -> None:
-    my_container = ctr_client.run("busybox:1", ["sleep", "infinity"], detach=True)
-    my_container.kill()
-    assert my_container.state is not None
-    assert my_container.state.running is not True
-    my_container.remove()
+    with ctr_client.run(
+        "busybox:1", ["sleep", "infinity"], detach=True
+    ) as my_container:
+        my_container.kill()
+        ctr_client.wait(my_container)
+        my_container.reload()
+        assert my_container.state is not None
+        assert my_container.state.running is not True
 
 
 def test_kill_signal(ctr_client: DockerClient) -> None:
-    my_container = ctr_client.run(
+    with ctr_client.run(
         "busybox:1", ["sleep", "infinity"], init=True, detach=True
-    )
-    my_container.kill(signal=signal.SIGINT)
-    assert my_container.state is not None
-    assert my_container.state.running is not True
-    assert my_container.state.exit_code == 130
-    my_container.remove()
+    ) as my_container:
+        my_container.kill(signal=signal.SIGINT)
+        assert ctr_client.wait(my_container) == 130
+        my_container.reload()
+        assert my_container.state is not None
+        assert my_container.state.running is not True
+        assert my_container.state.exit_code == 130
 
 
 def test_context_manager(ctr_client: DockerClient) -> None:
@@ -1332,8 +1388,12 @@ def test_pause_unpause(ctr_client: DockerClient) -> None:
         assert container.state is not None
         assert container.state.running is True
         container.pause()
-        assert container.state.paused is True
-        container.unpause()
+        try:
+            container.reload()
+            assert container.state.paused is True
+        finally:
+            container.unpause()
+        container.reload()
         assert container.state.paused is not True
         assert container.state.running is True
 
@@ -2013,7 +2073,7 @@ def test_create_always_pull_existent(
     base_image = docker_client.image.pull(base_image_name)
     base_image.tag(test_image_name)
     docker_client.push(test_image_name)
-    remote_id = base_image.id
+    remote_id = docker_client.image.pull(test_image_name).id
 
     (tmp_path / "dodo.txt").write_text("Hello world!")
     updated_image = base_image.copy_to(
@@ -2022,8 +2082,8 @@ def test_create_always_pull_existent(
     local_id = updated_image.id
 
     assert remote_id != local_id
-    docker_client.container.create(test_image_name, pull="always")
-    assert docker_client.image.inspect(test_image_name).id == remote_id
+    with docker_client.container.create(test_image_name, pull="always"):
+        assert docker_client.image.inspect(test_image_name).id == remote_id
 
 
 def test_run_always_pull_nonexistent(ctr_client: DockerClient) -> None:
@@ -2045,7 +2105,7 @@ def test_run_always_pull_existent(
     base_image = docker_client.image.pull(base_image_name)
     base_image.tag(test_image_name)
     docker_client.push(test_image_name)
-    remote_id = base_image.id
+    remote_id = docker_client.image.pull(test_image_name).id
 
     (tmp_path / "dodo.txt").write_text("Hello world!")
     updated_image = base_image.copy_to(
@@ -2054,8 +2114,8 @@ def test_run_always_pull_existent(
     local_id = updated_image.id
 
     assert remote_id != local_id
-    docker_client.container.run(test_image_name, pull="always")
-    assert docker_client.image.inspect(test_image_name).id == remote_id
+    with docker_client.container.run(test_image_name, pull="always", detach=True):
+        assert docker_client.image.inspect(test_image_name).id == remote_id
 
 
 def test_non_unicode_output(ctr_client: DockerClient) -> None:

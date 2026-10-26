@@ -99,11 +99,15 @@ def _docker_registry(docker_client: DockerClient, login: bool = True) -> Generat
             registry.copy_to(htpasswd_file, "/tmp/htpasswd")
             registry.start()
             time.sleep(1.5)
-            if login:
-                docker_client.login(
-                    "localhost:5000", username="my_user", password="my_password"
-                )
-            yield "localhost:5000"
+            try:
+                if login:
+                    docker_client.login(
+                        "localhost:5000", username="my_user", password="my_password"
+                    )
+                yield "localhost:5000"
+            finally:
+                if login:
+                    docker_client.logout("localhost:5000")
 
 
 @pytest.fixture(scope="function")

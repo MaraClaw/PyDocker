@@ -35,6 +35,7 @@ dev = [
     "mkdocstrings==1.0.8",
     "mkdocstrings-python==2.0.10",
     "pymdown-extensions==12.3",
+    "coverage>=7.17.0",
 ]
 
 [project.urls]
@@ -51,6 +52,15 @@ exclude = ["tests*", "docs*"]
 
 [tool.setuptools.package-data]
 pywhales = ["py.typed"]
+
+[tool.coverage.run]
+source = ["pywhales"]
+relative_files = true
+
+[tool.coverage.report]
+fail_under = 90
+precision = 2
+show_missing = true
 
 [tool.ruff]
 target-version = "py314"

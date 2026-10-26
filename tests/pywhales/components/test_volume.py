@@ -8,7 +8,13 @@ import pytest
 
 from pywhales import DockerClient, Volume
 from pywhales.components.volume.models import VolumeInspectResult
-from pywhales.exceptions import NoSuchVolume
+from pywhales.exceptions import (
+    DockerException,
+    NoSuchContainer,
+    NoSuchImage,
+    NoSuchNetwork,
+    NoSuchVolume,
+)
 from pywhales.test_utils import get_all_jsons, random_name
 
 
@@ -58,6 +64,40 @@ def test_volume_cleanup_preserves_removal(missing: bool) -> None:
             pytest.raises(NoSuchVolume),
         ):
             volume.remove()
+
+
+@pytest.mark.parametrize(
+    ("stderr", "error_type"),
+    [
+        pytest.param(b"permission denied", DockerException, id="command-failure"),
+        pytest.param(b"No such container: resource", NoSuchContainer, id="container"),
+        pytest.param(b"No such image: resource", NoSuchImage, id="image"),
+        pytest.param(b"network resource not found", NoSuchNetwork, id="network"),
+    ],
+)
+def test_volume_cleanup_propagates_unrelated_cli_failures(
+    stderr: bytes, error_type: type[DockerException]
+) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    volume = Volume(client.client_config, "resource", is_immutable_id=True)
+    with (
+        patch(
+            "subprocess.run", return_value=CompletedProcess([], 17, b"output", stderr)
+        ) as command,
+        pytest.raises(DockerException) as raised,
+        volume,
+    ):
+        pass
+
+    expected = ["docker-test", "volume", "remove", "resource"]
+    command.assert_called_once()
+    assert command.call_args.args[0] == expected
+    assert type(raised.value) is error_type
+    assert raised.value.docker_command == expected
+    assert raised.value.return_code == 17
+    assert raised.value.stdout == "output"
+    assert raised.value.stderr == stderr.decode()
 
 
 @pytest.mark.parametrize("json_file", get_all_jsons("volumes"))

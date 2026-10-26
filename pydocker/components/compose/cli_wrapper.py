@@ -524,7 +524,8 @@ class ComposeCLI(DockerCLICaller):
         if stream:
             return iterator
         else:
-            return "".join(x[1].decode() for x in iterator)
+            with iterator:
+                return "".join(x[1].decode() for x in iterator)
 
     def pause(self, services: str | list[str] | None = None) -> None:
         """Pause one or more services

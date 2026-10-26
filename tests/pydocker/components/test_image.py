@@ -334,15 +334,17 @@ def test_push_duplicate_images(ctr_client: DockerClient) -> None:
         ctr_client.image.remove("busybox:1", force=True)
     images = ["busybox:1", "busybox:1", "busybox:1"]
     with (
-        patch("pydocker.components.image.cli_wrapper.Image") as image,
+        patch.object(ctr_client.image, "inspect") as inspect_images,
         patch.object(ctr_client.image, "_push_single_tag") as push_single_tag,
         patch.object(ctr_client.image, "_push_multiple_tags") as push_multiple_tags,
     ):
-        image.return_value = MagicMock()
         push_single_tag.return_value = None
         ctr_client.image.push(images, quiet=True)
+        inspect_images.assert_called_once_with(["busybox:1"])
         push_multiple_tags.assert_not_called()
-        push_single_tag.assert_called_once()
+        push_single_tag.assert_called_once_with(
+            tag_or_repo="busybox:1", quiet=True, stream_logs=False
+        )
 
 
 def test_push_not_quiet_multiple_images_break(ctr_client: DockerClient) -> None:

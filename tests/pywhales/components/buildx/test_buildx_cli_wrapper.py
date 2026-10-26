@@ -573,14 +573,14 @@ def test_bake_with_load(only_print: bool) -> None:
                 "dockerfile": "Dockerfile",
                 "tags": ["pretty_image1:1.0.0"],
                 "target": "out1",
-                "output": ["type=docker"],
+                "output": [{"type": "docker"}],
             },
             "my_out2": {
                 "context": ".",
                 "dockerfile": "Dockerfile",
                 "tags": ["pretty_image2:1.0.0"],
                 "target": "out2",
-                "output": ["type=docker"],
+                "output": [{"type": "docker"}],
             },
         },
     }

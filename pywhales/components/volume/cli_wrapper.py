@@ -27,6 +27,7 @@ from pywhales.client_config import (
     ParsingError,
     ReloadableObjectFromJson,
 )
+from pywhales.components._cleanup import resource_cleanup
 from pywhales.components.volume.models import VolumeInspectResult
 from pywhales.exceptions import NoSuchVolume
 from pywhales.test_utils import random_name
@@ -60,16 +61,11 @@ class Volume(ReloadableObjectFromJson[VolumeInspectResult]):
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        try:
-            self.remove()
-        except NoSuchVolume:
-            return
-        except BaseException as cleanup_error:
-            if exc_val is None:
-                raise
-            raise BaseExceptionGroup(
-                "Volume body and cleanup both failed", [exc_val, cleanup_error]
-            ) from None
+        with resource_cleanup(exc_val, "Volume body and cleanup both failed"):
+            try:
+                self.remove()
+            except NoSuchVolume:
+                return
 
     @override
     def _fetch_inspect_result_json(self, reference: str) -> dict[str, Any]:

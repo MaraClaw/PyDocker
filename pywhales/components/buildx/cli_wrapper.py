@@ -25,6 +25,7 @@ from pywhales.client_config import (
     DockerCLICaller,
     ReloadableObject,
 )
+from pywhales.components._cleanup import resource_cleanup
 from pywhales.components.buildx.imagetools.cli_wrapper import ImagetoolsCLI
 from pywhales.components.buildx.models import BuilderInspectResult, BuilderNode
 from pywhales.utils import (
@@ -62,14 +63,8 @@ class Builder(ReloadableObject[BuilderInspectResult]):
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        try:
+        with resource_cleanup(exc_val, "Builder body and cleanup both failed"):
             self.remove()
-        except BaseException as cleanup_error:
-            if exc_val is None:
-                raise
-            raise BaseExceptionGroup(
-                "Builder body and cleanup both failed", [exc_val, cleanup_error]
-            ) from None
 
     @override
     def _fetch_and_parse_inspect_result(self, reference: str) -> BuilderInspectResult:

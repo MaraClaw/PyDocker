@@ -16,7 +16,13 @@ from pywhales import DockerClient, Image, docker
 from pywhales.client_config import Command
 from pywhales.components.image.models import ImageInspectResult
 from pywhales.components.image.streams import MultiImageStream
-from pywhales.exceptions import DockerException, NoSuchImage
+from pywhales.exceptions import (
+    DockerException,
+    NoSuchContainer,
+    NoSuchImage,
+    NoSuchNetwork,
+    NoSuchVolume,
+)
 from pywhales.test_utils import get_all_jsons, random_name
 from pywhales.utils import MappedProcessStream, ProcessStream, stream_stdout_and_stderr
 
@@ -770,6 +776,40 @@ def test_image_cleanup_forces_removal(missing: bool) -> None:
     if missing:
         with patch("subprocess.run", return_value=response), pytest.raises(NoSuchImage):
             image.remove(force=True)
+
+
+@pytest.mark.parametrize(
+    ("stderr", "error_type"),
+    [
+        pytest.param(b"permission denied", DockerException, id="command-failure"),
+        pytest.param(b"No such container: resource", NoSuchContainer, id="container"),
+        pytest.param(b"network resource not found", NoSuchNetwork, id="network"),
+        pytest.param(b"No such volume: resource", NoSuchVolume, id="volume"),
+    ],
+)
+def test_image_cleanup_propagates_unrelated_cli_failures(
+    stderr: bytes, error_type: type[DockerException]
+) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    image = Image(client.client_config, "resource", is_immutable_id=True)
+    with (
+        patch(
+            "subprocess.run", return_value=CompletedProcess([], 17, b"output", stderr)
+        ) as command,
+        pytest.raises(DockerException) as raised,
+        image,
+    ):
+        pass
+
+    expected = ["docker-test", "image", "rm", "--force", "resource"]
+    command.assert_called_once()
+    assert command.call_args.args[0] == expected
+    assert type(raised.value) is error_type
+    assert raised.value.docker_command == expected
+    assert raised.value.return_code == 17
+    assert raised.value.stdout == "output"
+    assert raised.value.stderr == stderr.decode()
 
 
 @pytest.mark.parametrize("json_file", get_all_jsons("images"))

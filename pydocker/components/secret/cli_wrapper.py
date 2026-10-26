@@ -46,7 +46,14 @@ class Secret(ReloadableObjectFromJson[SecretInspectResult]):
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        self.remove()
+        try:
+            self.remove()
+        except BaseException as cleanup_error:
+            if exc_val is None:
+                raise
+            raise BaseExceptionGroup(
+                "Secret body and cleanup both failed", [exc_val, cleanup_error]
+            ) from None
 
     @override
     def _fetch_inspect_result_json(self, reference: str) -> dict[str, Any]:

@@ -67,7 +67,14 @@ class Builder(ReloadableObject[BuilderInspectResult]):
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        self.remove()
+        try:
+            self.remove()
+        except BaseException as cleanup_error:
+            if exc_val is None:
+                raise
+            raise BaseExceptionGroup(
+                "Builder body and cleanup both failed", [exc_val, cleanup_error]
+            ) from None
 
     @override
     def _fetch_and_parse_inspect_result(self, reference: str) -> BuilderInspectResult:

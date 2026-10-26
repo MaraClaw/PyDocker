@@ -16,9 +16,6 @@ Works on Linux, macOS and Windows, for Python 3.14.8 and above.
 * [Documentation](https://github.com/MaraClaw/PyWhales/tree/HEAD/docs)
 * [GitHub repository](https://github.com/MaraClaw/PyWhales)
 
-pywhales is derived from [Python on Whales](https://github.com/gabrieldemarmiesse/python-on-whales).
-The upstream project and contributors retain their attribution under the MIT license.
-
 ------------------------------------------------------------------------
 
 ## How to install?
@@ -33,9 +30,11 @@ for instructions on installing Docker.
 ## Some cool examples
 
 Start by doing
+
 ```python
 from pywhales import docker
 ```
+
 and then:
 
 * `docker run hello-world` -> `docker.run("hello-world")`
@@ -59,7 +58,6 @@ This message shows that your installation appears to be working correctly.
 
 ...
 ```
-
 
 ```python
 >>> from pywhales import docker
@@ -133,7 +131,9 @@ print(docker.ps())
 ```bash
 docker run -it --rm --network some-network postgres psql -h some-postgres -U postgres
 ```
+
 becomes
+
 ```python
 from pywhales import docker
 

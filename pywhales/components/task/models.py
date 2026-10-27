@@ -1,3 +1,5 @@
+"""Typed Swarm task inspection snapshots, status, and scheduling configuration."""
+
 from datetime import datetime
 from typing import Annotated
 

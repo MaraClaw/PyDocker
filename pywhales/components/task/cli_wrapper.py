@@ -1,3 +1,5 @@
+"""Swarm task handles and inspection through the configured manager daemon."""
+
 from __future__ import annotations
 
 import builtins
@@ -26,6 +28,8 @@ from pywhales.utils import custom_parse_object_as, run
 
 
 class Task(ReloadableObjectFromJson[TaskInspectResult]):
+    """Reloadable Swarm task handle retaining its originating client settings."""
+
     def __init__(
         self, client_config: ClientConfig, reference: str, is_immutable_id: bool = False
     ) -> None:
@@ -100,11 +104,13 @@ class Task(ReloadableObjectFromJson[TaskInspectResult]):
 
 
 class TaskCLI(DockerCLICaller):
-    def list(self) -> builtins.list[Task]:
-        """Returns all tasks in the swarm
+    """Task-inspection commands retaining the originating client configuration."""
 
-        # Returns
-            `List[pywhales.Task]`
+    def list(self) -> builtins.list[Task]:
+        """List tasks associated with the services listed in the Swarm.
+
+        Returns:
+            Task handles from a service-list call followed by service ps.
         """
         service_cli = pywhales.components.service.cli_wrapper.ServiceCLI(
             self.client_config
@@ -118,7 +124,22 @@ class TaskCLI(DockerCLICaller):
     def inspect(self, x: builtins.list[str]) -> builtins.list[Task]: ...
 
     def inspect(self, x: str | builtins.list[str]) -> Task | builtins.list[Task]:
-        """Returns a `pywhales.Task` object from its ID."""
+        """Inspect one or more Swarm tasks.
+
+        Args:
+            x: One task ID or a list of references. An empty list returns without
+                invoking the CLI.
+
+        Returns:
+            One handle for a string, otherwise handles in request order. Batch
+            inspection preserves duplicates as distinct handles and validates all
+            snapshots before hydration. Full IDs must match exactly; aliases use
+            positional association.
+
+        Raises:
+            ParsingError: If batch shape, task identities, or duplicate snapshot
+                consistency is invalid.
+        """
         if isinstance(x, str):
             return Task(self.client_config, x)
         else:
@@ -136,5 +157,9 @@ class TaskCLI(DockerCLICaller):
             return tasks
 
     def logs(self) -> None:
-        """Not Yet implemented"""
+        """Reject task log requests because this operation is not implemented.
+
+        Raises:
+            NotImplementedError: Always.
+        """
         raise NotImplementedError

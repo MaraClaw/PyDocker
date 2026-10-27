@@ -1,3 +1,4 @@
+from . import enums
 from .client_config import ClientNotFoundError
 from .components.buildx.cli_wrapper import Builder
 from .components.config.cli_wrapper import Config
@@ -45,4 +46,5 @@ __all__ = [
     "Task",
     "Version",
     "Volume",
+    "enums",
 ]

@@ -1,3 +1,5 @@
+"""Volume inspection snapshots whose mount paths refer to the selected daemon."""
+
 from datetime import datetime
 from pathlib import Path
 

@@ -43,7 +43,8 @@ class Secret(ReloadableObjectFromJson[SecretInspectResult]):
     def __init__(
         self, client_config: ClientConfig, reference: str, is_immutable_id: bool = False
     ) -> None:
-        print("reference: ", reference)
+        if client_config.raw_diagnostics:
+            print("reference: ", reference)
         super().__init__(client_config, "id", reference, is_immutable_id)
 
     def __enter__(self) -> Self:

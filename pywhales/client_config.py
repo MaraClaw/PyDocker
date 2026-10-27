@@ -280,7 +280,12 @@ class ReloadableObjectFromJson[InspectResultT, ReferenceT: str | None = str](
 
     @override
     def _fetch_and_parse_inspect_result(self, reference: ReferenceT) -> InspectResultT:
-        json_object = self._fetch_inspect_result_json(reference)
+        try:
+            json_object = self._fetch_inspect_result_json(reference)
+        except pydantic.ValidationError:
+            if self.client_config.raw_diagnostics:
+                raise
+            raise ParsingError("Invalid inspect JSON response") from None
         return self._parse_inspect_result(json_object)
 
     def _parse_inspect_results(
@@ -291,7 +296,9 @@ class ReloadableObjectFromJson[InspectResultT, ReferenceT: str | None = str](
                 json_str
             )
         except pydantic.ValidationError as err:
-            raise ParsingError("Invalid batch inspect JSON response") from err
+            if self.client_config.raw_diagnostics:
+                raise ParsingError("Invalid batch inspect JSON response") from err
+            raise ParsingError("Invalid batch inspect JSON response") from None
         if len(json_objects) != len(references):
             raise ParsingError(
                 f"Expected {len(references)} inspect results, received {len(json_objects)}"
@@ -301,9 +308,15 @@ class ReloadableObjectFromJson[InspectResultT, ReferenceT: str | None = str](
         for reference, result in zip(references, results, strict=True):
             identity = getattr(result, self._id_in_inspect)
             if not isinstance(identity, str) or not identity:
-                raise ParsingError(f"Missing inspect identity for {reference!r}")
+                detail = (
+                    f" for {reference!r}" if self.client_config.raw_diagnostics else ""
+                )
+                raise ParsingError(f"Missing inspect identity{detail}")
             if reference in resolved and resolved[reference] != identity:
-                raise ParsingError(f"Inconsistent inspect identity for {reference!r}")
+                detail = (
+                    f" for {reference!r}" if self.client_config.raw_diagnostics else ""
+                )
+                raise ParsingError(f"Inconsistent inspect identity{detail}")
             resolved[reference] = identity
         return results
 
@@ -311,6 +324,12 @@ class ReloadableObjectFromJson[InspectResultT, ReferenceT: str | None = str](
         try:
             return self._parse_json_object(json_object)
         except pydantic.ValidationError as err:
+            if not self.client_config.raw_diagnostics:
+                raise ParsingError(
+                    "There was an error parsing the JSON response from the Docker daemon. "
+                    "This is a bug with pywhales itself. Response details are withheld; "
+                    "enable raw_diagnostics on a troubleshooting client for details."
+                ) from None
             fd, json_response_file = tempfile.mkstemp(suffix=".json", text=True)
             with os.fdopen(fd, "w") as f:
                 json.dump(json_object, f, indent=2)

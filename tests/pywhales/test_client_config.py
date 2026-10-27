@@ -1,5 +1,6 @@
 import json
 import sys
+import traceback
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from datetime import datetime
@@ -10,7 +11,7 @@ from unittest.mock import patch
 import pytest
 from pytest_mock import MockerFixture
 
-from pywhales import Config, DockerClient, Node, Secret, Service, docker
+from pywhales import Config, DockerClient, Node, Secret, Service, Volume
 from pywhales._execution_policy import get_execution_policy
 from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.utils import PROJECT_ROOT
@@ -35,6 +36,44 @@ def test_general_stream_budget_preserves_independent_image_override(
     assert config.stream_buffer_bytes == budget
     assert config.image_stream_buffer_bytes is None
     assert config.raw_diagnostics is False
+
+
+@pytest.mark.parametrize("raw", [False, True])
+def test_inspect_validation_suppresses_dump_and_chain_unless_raw(
+    raw: bool, tmp_path: Path
+) -> None:
+    secret = "inspect-secret-sentinel"
+    payload = {**fake_json_message, "Driver": [secret]}
+    client = DockerClient(raw_diagnostics=raw)
+    with (
+        patch(
+            "pywhales.components.volume.cli_wrapper.Volume._fetch_inspect_result_json",
+            return_value=payload,
+        ),
+        patch("pywhales.client_config.tempfile.tempdir", str(tmp_path)),
+        pytest.raises(ParsingError) as raised,
+    ):
+        client.volume.inspect("volume")
+
+    assert (secret in "".join(traceback.format_exception(raised.value))) is raw
+    dumps = list(tmp_path.glob("*.json"))
+    assert bool(dumps) is raw
+    if raw:
+        assert json.loads(dumps[0].read_text()) == payload
+
+
+@pytest.mark.parametrize("raw", [False, True])
+def test_batch_inspect_invalid_json_exposes_validation_chain_only_in_raw_mode(
+    raw: bool,
+) -> None:
+    resource = Volume(ClientConfig(raw_diagnostics=raw), "volume", is_immutable_id=True)
+    secret = "batch-inspect-secret-sentinel"
+    payload = json.dumps([secret])
+
+    with pytest.raises(ParsingError) as raised:
+        resource._parse_inspect_results(payload, ["volume"])
+
+    assert (secret in "".join(traceback.format_exception(raised.value))) is raw
 
 
 def test_docker_command_policy_does_not_replace_cached_executable_prefix() -> None:
@@ -296,7 +335,7 @@ def test_pretty_exception_message_and_report(mocker: MockerFixture) -> None:
         lambda x, y: fake_json_message,
     )
     with pytest.raises(ParsingError) as err:
-        docker.volume.inspect("random_volume")
+        DockerClient(raw_diagnostics=True).volume.inspect("random_volume")
     error_message = str(err.value)
 
     assert "This is a bug with pywhales itself" in error_message
@@ -309,6 +348,7 @@ def test_pretty_exception_message_and_report(mocker: MockerFixture) -> None:
         raise IndexError
 
     assert Path(word).read_text() == json.dumps(fake_json_message, indent=2)
+    Path(word).unlink()
 
 
 def test_compose_env_file() -> None:

@@ -68,6 +68,45 @@ def test_inspect_mismatched_reference_renders_values_only_in_raw_mode(
     assert list(tmp_path.iterdir()) == []
 
 
+@pytest.mark.parametrize("component", ["config", "node", "secret", "service"])
+@pytest.mark.parametrize("conflicting", [False, True], ids=["reference", "snapshot"])
+@pytest.mark.parametrize("raw", [False, True])
+def test_swarm_inspect_renders_reference_and_snapshot_values_only_in_raw_mode(
+    component: str,
+    conflicting: bool,
+    raw: bool,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret = "swarm-diagnostic-sentinel"
+    client = DockerClient(raw_diagnostics=raw)
+    client.client_config._client_call_with_path = ["mock-cli"]
+    api = {
+        "config": client.config,
+        "node": client.node,
+        "secret": client.secret,
+        "service": client.service,
+    }[component]
+    snapshots: list[dict[str, JsonValue]] = [{"ID": "unrelated"}]
+    references = [secret]
+    if conflicting:
+        snapshots = [{"ID": secret, "Version": {"Index": index}} for index in (1, 2)]
+        references = [secret, secret]
+    payload = json.dumps(snapshots).encode()
+
+    with (
+        patch("subprocess.run", return_value=CompletedProcess([], 0, payload, b"")),
+        patch("pywhales.client_config.tempfile.tempdir", str(tmp_path)),
+        pytest.raises(ParsingError) as raised,
+    ):
+        api.inspect(references)
+
+    assert (secret in "".join(traceback.format_exception(raised.value))) is raw
+    if not raw:
+        assert secret not in capsys.readouterr().out
+    assert list(tmp_path.iterdir()) == []
+
+
 @pytest.mark.parametrize(
     "resource_type",
     [

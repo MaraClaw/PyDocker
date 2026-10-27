@@ -48,7 +48,11 @@ def parse_swarm_inspect_results[InspectResultT: SwarmInspectResult](
         if identity is None or identity == "":
             raise ParsingError("Missing Swarm inspect identity")
         if identity in snapshots and snapshots[identity] != result:
-            raise ParsingError(f"Inconsistent inspect snapshot for {identity!r}")
+            raise ParsingError(
+                f"Inconsistent inspect snapshot for {identity!r}"
+                if parser.client_config.raw_diagnostics
+                else "Inconsistent inspect snapshot"
+            )
         snapshots[identity] = result
         identities.append(identity)
 
@@ -71,6 +75,8 @@ def parse_swarm_inspect_results[InspectResultT: SwarmInspectResult](
         if len(matches) != 1:
             raise ParsingError(
                 f"Expected one inspect identity for {reference!r}, received {len(matches)}"
+                if parser.client_config.raw_diagnostics
+                else f"Expected one inspect identity for the requested reference, received {len(matches)}"
             )
         resolved.append(matches[0])
     if Counter(identity for identity, _ in resolved) != Counter(identities):

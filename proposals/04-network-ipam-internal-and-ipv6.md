@@ -1,6 +1,6 @@
 # Network IPAM, internal mode, and IPv6
 
-Status: Future (not approved or implemented)
+Status: Implemented (offline validation only; live scenario BLOCKED; support not qualified)
 Tier: P1. Owner: SDK maintainer and network operator.
 
 ## Objective
@@ -10,9 +10,17 @@ and multiple IPAM pools while preserving existing calls and their defaults.
 
 ## Current evidence
 
-- [`NetworkCLI.create`](../pywhales/components/network/cli_wrapper.py) accepts
-  one `subnet` and `gateway`, plus driver, attachability, labels, and driver
-  options. It returns a handle using the ID from the create command.
+The creation API is exercised by local Python fake CLI children in
+[`test_network_create.py`](../tests/pywhales/components/test_network_create.py)
+and static contracts in [`test_network_types.py`](../tests/pywhales/test_network_types.py).
+No live daemon or topology has been tested. CLI v28.0.0 is a reference for
+[containment association and unordered inspect configuration](https://github.com/docker/cli/blob/f9ced58158d5e0b358052432244b483774a1983d/cli/command/network/create.go#L144-L265)
+and [first-equals mapping parsing](https://github.com/docker/cli/blob/f9ced58158d5e0b358052432244b483774a1983d/opts/opts.go#L158-L170),
+not a support qualification. Only argv order is promised.
+
+- [`NetworkCLI.create`](../pywhales/components/network/cli_wrapper.py) retains
+  singular `subnet` and `gateway` and adds keyword-only IPAM pool controls.
+  It returns a handle using the ID from the create command.
 - The same wrapper exposes `Network.internal`, `enable_ipv6`, and `ipam`
   inspection properties. [`NetworkIPAM`](../pywhales/components/network/models.py)
   contains a driver, configuration list, and options.
@@ -20,7 +28,7 @@ and multiple IPAM pools while preserving existing calls and their defaults.
   retains zero and false values, and emits valueless flags only when true.
 - [`test_network.py`](../tests/pywhales/components/test_network.py) includes
   create/remove, labels, a subnet with a fixed IPv4 address, and batch inspect
-  tests. Several use Docker fixtures; the tests were read, not run.
+  tests. The Docker-dependent cases were not run.
 
 ## Proposed contract
 
@@ -64,7 +72,7 @@ address allocation across environments, or cross-host reachability guarantees.
    `None`, explicit `False`, and zero follow the documented selected-CLI
    representation or rejection. Seam: argv and static type tests. Surface:
    compare calls through the configured fake CLI.
-4. Effective configuration: on separately authorized infrastructure, inspect a
+4. **BLOCKED** Effective configuration: on separately authorized infrastructure, inspect a
    created network and compare internal, IPv6, driver, and pool fields with the
    request. Seam: disposable integration test. Surface: Docker inspect on the
    created network, followed by verified removal.
@@ -78,4 +86,4 @@ Multi-host packet-path testing requires separate infrastructure authorization.
 
 The network operator must select address pools, desired driver, IPv6 and
 internal behavior; this blocks an effective deployment profile. The maintainer
-must settle supported CLI versions and pool option encoding before implementation.
+must settle supported CLI versions before qualification.

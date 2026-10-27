@@ -1,3 +1,10 @@
+"""Installed Compose and Buildx capability smoke tests against real Docker.
+
+These check pinned plugin versions, configuration, dry runs, and build reports.
+The selected Docker runtime and plugins must be available; fixture projects live
+in temporary directories but use the selected daemon and default builder.
+"""
+
 import json
 import re
 import subprocess
@@ -16,6 +23,12 @@ type CLIRun = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 
 @pytest.fixture
 def cli_run(docker_client: DockerClient) -> CLIRun:
+    """Return a direct CLI runner with captured text and a 120-second timeout.
+
+    Use the session fixture's executable prefix. Each invocation starts a real
+    process and raises on a nonzero exit or timeout.
+    """
+
     def invoke(arguments: Sequence[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [*docker_client.client_config.client_call, *arguments],
@@ -37,6 +50,19 @@ def smoke_image() -> str:
 def smoke_project(
     tmp_path: Path, smoke_image: str, monkeypatch: pytest.MonkeyPatch
 ) -> Path:
+    """Write a minimal build project and make it the process working directory.
+
+    Pytest owns the temporary files and restores the previous working directory
+    at teardown. Preparing the project does not run Docker or build its image.
+
+    Args:
+        tmp_path: Temporary root for Dockerfile, Compose, and Bake definitions.
+        smoke_image: Unique image tag inserted into the Compose definition.
+        monkeypatch: Scopes the process-wide working-directory change.
+
+    Returns:
+        The project root, also selected as the current working directory.
+    """
     (tmp_path / "Dockerfile").write_text(
         "# syntax=docker/dockerfile:1\nFROM scratch AS smoke\n"
         "ARG SMOKE_VALUE=expected\nLABEL smoke.value=$SMOKE_VALUE\n"

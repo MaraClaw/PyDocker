@@ -1,0 +1,53 @@
+# Image Component Guide
+
+## Local Navigation
+
+- `cli_wrapper.py`: `Image`, `ImageCLI`, batch inspection, transfers, copy helpers, and archives.
+- `models.py`: inspect snapshots; `config` and `container_config` reuse `ContainerConfig`,
+  while `ImageGraphDriver.data` accepts arbitrary JSON values, including scalars and null.
+- `streams.py`: `MultiImageStream`, plus the `ImageStream` and `EmptyImageStream` type aliases.
+
+## Pull And Push Contracts
+
+- Deduplicate iterable references in first-seen order before choosing single or multiple transfers.
+  An iterable pull still returns a list without streaming, even with one unique reference.
+- `quiet=True` with `stream_logs=True` raises `ValueError` for both pull and push.
+- Nonstreamed transfers are eager; multiple unique references use a four-worker `ThreadPool`.
+  Pull returns `Image` for a string or an ordered list for an iterable; push returns `None`.
+- `pull([])` returns `[]`, or an empty generator with `stream_logs=True`; no child CLI starts.
+  `push([])` returns `None` even with streaming enabled. Preserve this asymmetry.
+- Push batch-inspects deduplicated references before starting any transfer, including streamed ones.
+
+## Multi-Image Streams
+
+- `MultiImageStream` starts workers on first consumption, not construction or context entry.
+  It owns active child streams and admits at most four concurrent transfers.
+- A single unique reference uses an eager `MappedProcessStream`, including duplicate-only input.
+- Records are `(image_reference, bytes)`; don't promise global ordering across images or pipes.
+- The first worker error stops sibling work and queued transfers without waiting for consumption.
+  Deliver that original error once through iteration, including after explicit `close()`.
+- Forward the selected client's `image_stream_buffer_bytes` to child streams and the group.
+  A record exceeding the configured budget raises `BufferError`.
+
+## Inspection, Copy, And Archives
+
+- Batch inspect must verify each snapshot's ID or normalized tag/digest aliases against its request.
+  Positional pairing alone isn't identity validation; mismatches raise `ParsingError`.
+- Normalization handles Docker Hub/library prefixes, implicit `:latest`, and tagged digest references.
+  Keep typed inspect snapshots on returned images instead of fetching them again immediately.
+- `copy_from()` copies through a temporary container; `copy_to()` copies into one and commits it,
+  returning a new `Image` with optional `new_tag`. Both forward `pull`, defaulting to `"missing"`.
+- `save()` rejects empty input and inspects references before saving. An output path returns `None`;
+  omitted output returns an iterator of archive bytes. Don't treat it as a progress-log stream.
+
+## Test Navigation
+
+- `tests/pywhales/test_container_image_enum_json.py`: nested config and graph-driver JSON contracts.
+- `tests/pywhales/components/test_image.py` contains mocked CLI and real child-process stream tests:
+  `test_empty_image_operations_keep_existing_result_shapes`,
+  `test_multiple_image_stream_has_lazy_owned_lifecycle`,
+  `test_multiple_image_stream_keeps_first_original_error`,
+  `test_batch_inspect_image_aliases_and_typed_snapshot`.
+- The same component file covers copy policy forwarding with `test_copy_from_pull` and
+  `test_copy_to_pull`; archive integration coverage includes `test_save_load` and
+  `test_save_iterator_bytes`. Read fixtures before choosing daemon-free selections.

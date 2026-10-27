@@ -1,3 +1,11 @@
+"""Subprocess execution, owned output adapters, and Docker value conversions.
+
+Execution snapshots the originating client's policy before stringifying argv.
+Safe automatic diagnostics omit command, environment, and captured payload
+values, but returned data, raw exception attributes, and uncaptured terminal
+output remain outside that boundary.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -37,10 +45,30 @@ LOGGER = logging.getLogger(__name__)
 
 
 def custom_parse_object_as[T](type_: type[T], obj: object) -> T:
+    """Parse a Python value using Pydantic's adapter for the requested type.
+
+    Args:
+        type_: Target model or type accepted by Pydantic's TypeAdapter.
+        obj: Value to validate and convert.
+
+    Returns:
+        The parsed value using the target type's validation rules.
+
+    Raises:
+        pydantic.ValidationError: If the input cannot satisfy the target type.
+    """
     return pydantic.TypeAdapter(type_).validate_python(obj)
 
 
 def title_if_necessary(string: str) -> str:
+    """Return all-uppercase text unchanged, otherwise apply title casing.
+
+    Args:
+        string: Name segment whose existing acronym capitalization is preserved.
+
+    Returns:
+        The unchanged uppercase segment or its title-cased form.
+    """
     if string.isupper():
         return string
     else:
@@ -48,6 +76,15 @@ def title_if_necessary(string: str) -> str:
 
 
 def to_docker_camel(string: str) -> str:
+    """Convert a field name to its Docker JSON alias with acronym exceptions.
+
+    Args:
+        string: Python field name, normally using underscore-separated words.
+
+    Returns:
+        The explicit Docker spelling for a known exception, or joined title-
+        cased segments preserving segments that are already uppercase.
+    """
     try:
         special_cases = {
             "exec_ids": "ExecIDs",
@@ -87,6 +124,12 @@ def to_docker_camel(string: str) -> str:
 
 
 class DockerCamelModel(pydantic.BaseModel):
+    """Metadata model accepting Python field names and generated Docker aliases.
+
+    Alias generation preserves Docker-specific acronym spellings. Pydantic
+    model building is deferred until needed.
+    """
+
     model_config = pydantic.ConfigDict(
         populate_by_name=True,
         alias_generator=to_docker_camel,
@@ -95,6 +138,14 @@ class DockerCamelModel(pydantic.BaseModel):
 
 
 def validate_timeout(timeout: float | None) -> None:
+    """Require a positive, finite timeout or no deadline.
+
+    Args:
+        timeout: Duration in seconds; ``None`` disables the deadline.
+
+    Raises:
+        ValueError: If the value is boolean, nonfinite, zero, or negative.
+    """
     if timeout is not None and (
         isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0
     ):
@@ -102,6 +153,11 @@ def validate_timeout(timeout: float | None) -> None:
 
 
 def _debug_enabled() -> bool:
+    """Return whether the selected debug environment variable is exactly 1.
+
+    PYDOCKER_DEBUG takes precedence whenever set, including an empty value or
+    ``0``. PYTHON_ON_WHALES_DEBUG is only a fallback when it is unset.
+    """
     # PYDOCKER_DEBUG wins whenever it is set, even to "0"; the legacy variable is a fallback.
     debug_value = os.environ.get("PYDOCKER_DEBUG")
     if debug_value is None:
@@ -112,6 +168,15 @@ def _debug_enabled() -> bool:
 def _log_command(
     args: Sequence[str], env: Mapping[str, str], *, raw_diagnostics: bool
 ) -> None:
+    """Emit command diagnostics without exposing values unless opted in.
+
+    Args:
+        args: Stringified arguments used for raw output or a safe argument count.
+        env: Launch environment included only in raw debug printing.
+        raw_diagnostics: Per-launch permission to expose confidential values.
+            Debug environment variables enable printing but do not grant this
+            permission; logger output follows the same value policy.
+    """
     if _debug_enabled():
         print("------------------------------")
         if raw_diagnostics:
@@ -169,6 +234,46 @@ def run(
     *,
     timeout: float | None = None,
 ) -> str | tuple[str, str]:
+    """Run a command synchronously and return decoded captured output.
+
+    Snapshot the originating execution policy before converting arguments to
+    strings. A timeout uses a monotonic deadline established immediately before
+    launch, kills and reaps a still-running local CLI on expiry, and retains
+    captured details on DockerTimeout. It does not guarantee cancellation of
+    daemon-side work. Without a timeout, wait for completion without a deadline.
+
+    Args:
+        args: Executable and arguments, optionally retaining a policy carrier as
+            the first item. Values are stringified without invoking a shell.
+        capture_stdout: Capture stdout when true; otherwise inherit output.
+            Ignored when tty is true.
+        capture_stderr: Capture stderr when true; otherwise inherit output.
+            Ignored when tty is true.
+        input: Bytes to send through child stdin; ``None`` inherits stdin.
+        return_stderr: Return both decoded streams when true instead of stdout
+            alone. Uncaptured streams are represented by empty strings.
+        env: Environment overrides merged with the current process environment.
+        tty: Route output to current sys.stdout and sys.stderr instead of
+            capturing it. This option does not allocate a pseudo-terminal.
+        pass_fds: Additional descriptors to keep open in the child, subject to
+            the platform's subprocess support.
+        timeout: Positive finite seconds from launch, or ``None`` for no
+            deadline. Booleans are rejected before launching.
+
+    Returns:
+        Captured stdout, or ``(stdout, stderr)`` when return_stderr is true.
+        Decode with replacement and remove at most one trailing newline from
+        each captured stream. Uncaptured streams become empty strings.
+
+    Raises:
+        ValueError: If timeout is boolean, nonfinite, zero, or negative.
+        OSError: If the executable cannot be launched.
+        DockerException: If the command exits unsuccessfully, with a subtype
+            selected from captured stderr when available.
+        DockerTimeout: If the local CLI is still running when its deadline
+            expires. Raw command and output attributes remain confidential
+            regardless of the automatic diagnostic-text policy.
+    """
     validate_timeout(timeout)
     policy = get_execution_policy(args)
     args = [str(x) for x in args]
@@ -261,6 +366,15 @@ def run(
 
 
 def post_process_stream(stream: bytes | None) -> str:
+    """Decode captured bytes and remove at most one trailing newline.
+
+    Args:
+        stream: Captured payload; ``None`` represents uncaptured output.
+
+    Returns:
+        Text decoded with replacement for invalid bytes, or an empty string
+        when no captured payload is supplied.
+    """
     if stream is None:
         return ""
     return stream.decode(errors="replace").removesuffix("\n")
@@ -289,6 +403,15 @@ def to_list[T](x: T) -> list[T]: ...
 
 
 def to_list(x: object) -> list[object]:
+    """Normalize a scalar or iterable to a new list.
+
+    Args:
+        x: Input value. Strings and bytes remain single items; other iterables
+            are consumed. Scalars, including ``None``, become single-item lists.
+
+    Returns:
+        A newly created list in input iteration order, or containing the scalar.
+    """
     if isinstance(x, str | bytes):
         return [x]
     if isinstance(x, Iterable):
@@ -297,23 +420,54 @@ def to_list(x: object) -> list[object]:
 
 
 class MappedProcessStream[T](Iterator[T]):
-    """Carry process ownership through decoding, filtering or event parsing."""
+    """Output adapter preserving ownership of an already-running process stream.
+
+    Mapping begins on iteration, not construction. Exhaustion closes the owned
+    stream and checks recorded terminal failures; mapper errors also trigger
+    cleanup. Use a context manager or close() when stopping early, including
+    before the first iteration. A bare break does not close the adapter.
+    Cleanup affects only the local CLI, not daemon-managed resources.
+    """
 
     def __init__(self, stream: ProcessStream, iterator: Iterator[T]) -> None:
+        """Retain a process stream and the iterator transforming its output.
+
+        Args:
+            stream: Already-running stream whose cleanup this adapter owns.
+            iterator: Lazy output transformation consumed by this adapter.
+        """
         self._stream = stream
         self._iterator = iterator
 
     def _on_failure(
         self, callback: Callable[[OSError | BufferError | DockerException], None]
     ) -> None:
+        """Register an owner callback on the underlying process stream.
+
+        Args:
+            callback: Nonblocking failure notification, including replay of an
+                already recorded process failure.
+        """
         self._stream._on_failure(callback)
 
     @override
     def __iter__(self) -> Self:
+        """Return this mapped, process-owning iterator."""
         return self
 
     @override
     def __next__(self) -> T:
+        """Return the next transformed value and clean up on termination.
+
+        Returns:
+            The next value produced by the mapping iterator.
+
+        Raises:
+            StopIteration: After mapping exhaustion and underlying cleanup.
+            DockerException: If the owned stream delivers a process failure.
+            DockerTimeout: If the owned stream's launch deadline expires.
+            BufferError: If the owned stream exceeds a retained-output bound.
+        """
         yielded = False
         try:
             result = next(self._iterator)
@@ -327,11 +481,17 @@ class MappedProcessStream[T](Iterator[T]):
                 self.close()
 
     def close(self) -> None:
-        """Release the process independently of whether mapping has started."""
+        """Close the local process stream and discard the mapping iterator.
+
+        Work even before mapping starts and wait for owned process cleanup.
+        Repeated calls are safe; recorded process failures remain available to
+        a subsequent clean context exit rather than being raised here.
+        """
         self._stream.close()
         self._iterator = iter(())
 
     def __enter__(self) -> Self:
+        """Return this adapter without starting iteration or another process."""
         return self
 
     def __exit__(
@@ -340,6 +500,15 @@ class MappedProcessStream[T](Iterator[T]):
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
+        """Close the process and discard mapping state on context exit.
+
+        Deliver recorded process errors only when no body exception is active.
+
+        Args:
+            exc_type: Active context-body exception type, or ``None``.
+            exc_value: Active body exception passed through to stream cleanup.
+            traceback: Context-body traceback supplied by the context protocol.
+        """
         try:
             self._stream.__exit__(exc_type, exc_value, traceback)
         finally:
@@ -355,7 +524,29 @@ def _start_process(
     timeout: float | None = None,
     buffer_bytes: int | BufferDefault | None = DEFAULT_BUFFER,
 ) -> ProcessStream:
-    """Start a subprocess and wire up reader threads for stdout/stderr."""
+    """Launch a process immediately with owned readers and a deadline watchdog.
+
+    Args:
+        full_cmd: Executable and arguments, retaining any originating policy
+            carrier until its settings have been snapshotted.
+        env: Environment overrides merged with the current environment; ``None``
+            inherits the environment directly.
+        pass_fds: Additional descriptors to preserve in the child.
+        pipe_stdin: Open a writable stdin pipe when true; otherwise inherit stdin.
+        timeout: Positive finite seconds from launch, or ``None`` for no deadline.
+        buffer_bytes: Positive byte budget. Omission inherits the current client
+            budget; explicit ``None`` is unbounded even if the client has a limit.
+
+    Returns:
+        An already-running owned stream of ``(source, bytes)`` records. Its
+        deadline advances independently of iteration; early consumers must
+        close it or use its context manager.
+
+    Raises:
+        ValueError: If timeout or the selected byte budget is invalid, including
+            boolean values. Validation occurs before process launch.
+        OSError: If the executable cannot be launched.
+    """
     validate_timeout(timeout)
     policy = get_execution_policy(full_cmd)
     if buffer_bytes is DEFAULT_BUFFER:
@@ -403,12 +594,40 @@ def stream_stdout_and_stderr(
     timeout: float | None = None,
     buffer_bytes: int | BufferDefault | None = DEFAULT_BUFFER,
 ) -> ProcessStream:
-    """Stream stdout/stderr from a subprocess.
+    """Launch a subprocess and return its owned stdout/stderr record stream.
 
-    Always returns a :class:`ProcessStream`.  When *pipe_stdin* is
-    ``True`` the subprocess is started with ``stdin=PIPE`` so that
-    ``result.stdin`` is available for writing.  Otherwise ``result.stdin``
-    is ``None``.
+    Start work at this call, not on iteration or context entry. Iteration blocks
+    for records and terminal status. Deadlines continue while consumption pauses
+    or never begins. Exhaustion reaps the child; early exit requires a context
+    manager or close(), because a bare break does not clean up. Closure or
+    timeout kills only the local CLI, not daemon-managed resources.
+
+    Args:
+        full_cmd: Executable and arguments; an originating policy carrier is
+            read before converting arguments to strings.
+        env: Environment overrides, or ``None`` to inherit the current environment.
+        pass_fds: Additional descriptors kept open in the child, subject to
+            platform support.
+        pipe_stdin: Make result.stdin writable when true; otherwise it is None
+            and the child inherits stdin.
+        timeout: Positive finite seconds from launch, or ``None`` for no deadline.
+        buffer_bytes: Positive byte budget; omitted means inherit the client's
+            budget, while explicit ``None`` means unbounded. Queue payload,
+            unfinished records, and stderr history have separate limits rather
+            than one total-memory cap. Producers wait for queue capacity without
+            dropping output; oversized records or stderr history fail iteration.
+
+    Returns:
+        An owned ProcessStream yielding ``(source, payload)`` pairs labelled
+        ``stdout`` or ``stderr``. Payloads retain newlines and may include an
+        unterminated final record. Terminal failures are delivered through
+        iteration or, when already recorded, clean context exit.
+
+    Raises:
+        ValueError: Before launch if timeout or the selected budget is invalid;
+            booleans are rejected.
+        OSError: If process launch fails. Later read errors, BufferError,
+            DockerException, and DockerTimeout are delivered by the stream.
     """
     return _start_process(
         full_cmd, env, pass_fds, pipe_stdin, timeout=timeout, buffer_bytes=buffer_bytes
@@ -418,10 +637,35 @@ def stream_stdout_and_stderr(
 def format_mapping_for_cli(
     mapping: Mapping[str, object], separator: str = "="
 ) -> list[str]:
+    """Format mapping entries as CLI values in mapping iteration order.
+
+    Args:
+        mapping: Keys and values to stringify without shell quoting or escaping.
+        separator: Text joining each key to its value; defaults to ``=``.
+
+    Returns:
+        One formatted string per mapping entry.
+    """
     return [f"{key}{separator}{value}" for key, value in mapping.items()]
 
 
 def read_env_file(env_file: Path) -> dict[str, str]:
+    """Read simple environment assignments without shell or dotenv expansion.
+
+    Strip each line and everything after its first ``#``, skip blank lines, and
+    split remaining assignments at the first ``=``. Quotes and escapes have no
+    special meaning; keys and values are not stripped separately after splitting.
+
+    Args:
+        env_file: Text file containing assignments; later duplicate keys win.
+
+    Returns:
+        Parsed assignment values without quote removal or interpolation.
+
+    Raises:
+        OSError: If the file cannot be read.
+        ValueError: If a nonblank, noncomment line contains no equals sign.
+    """
     result_dict: dict[str, str] = {}
     for line in env_file.read_text().splitlines():
         line = line.strip()
@@ -440,6 +684,19 @@ def read_env_file(env_file: Path) -> dict[str, str]:
 
 
 def read_env_files(env_files: list[Path]) -> dict[str, str]:
+    """Merge simple environment files in the supplied order.
+
+    Args:
+        env_files: Files parsed by read_env_file; later assignments override
+            earlier values. Empty input produces an empty mapping.
+
+    Returns:
+        The combined environment assignments.
+
+    Raises:
+        OSError: If any file cannot be read.
+        ValueError: If any file contains an assignment without an equals sign.
+    """
     result_dict: dict[str, str] = {}
     for file in env_files:
         result_dict.update(read_env_file(file))
@@ -447,6 +704,14 @@ def read_env_files(env_files: list[Path]) -> dict[str, str]:
 
 
 def format_time_arg(time_object: datetime | timedelta | None) -> str | None:
+    """Format a Docker time argument while preserving omission.
+
+    Args:
+        time_object: Timestamp or duration, or ``None`` to omit the argument.
+
+    Returns:
+        An ISO timestamp, duration in seconds with an ``s`` suffix, or ``None``.
+    """
     if time_object is None:
         return None
     else:
@@ -454,12 +719,31 @@ def format_time_arg(time_object: datetime | timedelta | None) -> str | None:
 
 
 def format_time_for_docker(time_object: datetime | timedelta) -> str:
+    """Format a timestamp or duration for a Docker CLI time option.
+
+    Args:
+        time_object: Timestamp to preserve as ISO text or duration in seconds.
+
+    Returns:
+        The timestamp's isoformat result or total seconds followed by ``s``.
+    """
     if isinstance(time_object, datetime):
         return time_object.isoformat()
     return f"{time_object.total_seconds()}s"
 
 
 def format_signal_arg(signal_object: int | str | None) -> str | None:
+    """Format a Docker signal argument while preserving omission.
+
+    Args:
+        signal_object: Signal number or name, or ``None`` to omit the option.
+
+    Returns:
+        The normalized signal spelling, or ``None`` for omitted input.
+
+    Raises:
+        ValueError: If a signal number is not recognized on this platform.
+    """
     if signal_object is None:
         return None
     else:
@@ -467,6 +751,20 @@ def format_signal_arg(signal_object: int | str | None) -> str | None:
 
 
 def format_signal_for_docker(signal_object: int | str) -> str:
+    """Convert a signal number or abbreviated name to Docker CLI text.
+
+    Args:
+        signal_object: Platform signal number, abbreviated name such as TERM,
+            or text passed through unchanged when no prefixed name exists.
+
+    Returns:
+        The platform's signal name, a recognized ``SIG``-prefixed name, or the
+        original string. Arbitrary string values are not validated here.
+
+    Raises:
+        ValueError: If a numeric signal is not recognized on this platform.
+        TypeError: If called with a value that is neither an integer nor text.
+    """
     if isinstance(signal_object, int):
         return signal.Signals(signal_object).name
     elif isinstance(signal_object, str):
@@ -479,6 +777,18 @@ def format_signal_for_docker(signal_object: int | str) -> str:
 
 
 def format_port_arg(port_object: ValidPortMapping) -> str:
+    """Format a one-, two-, or three-part published-port tuple.
+
+    Args:
+        port_object: Container port alone, host and container ports, or host and
+            container ports followed by the protocol spelling.
+
+    Returns:
+        Container-port text, ``host:container``, or ``host:container/protocol``.
+
+    Raises:
+        ValueError: If the tuple contains fewer than one or more than three items.
+    """
     if len(port_object) == 1:
         return str(port_object[0])
     elif len(port_object) == 2:
@@ -492,6 +802,18 @@ def format_port_arg(port_object: ValidPortMapping) -> str:
 
 
 def parse_ls_status_count(status_output: str, status: str) -> int:
+    """Extract the first count following a named status in CLI summary text.
+
+    Args:
+        status_output: Summary containing a fragment such as ``Running(2)``.
+        status: Exact, case-sensitive status label preceding the parenthesis.
+
+    Returns:
+        The parsed count, or zero when the status fragment is absent.
+
+    Raises:
+        ValueError: If the located count cannot be parsed as an integer.
+    """
     try:
         return int(status_output.split(status + "(")[1].split(")")[0])
     except IndexError:
@@ -499,18 +821,45 @@ def parse_ls_status_count(status_output: str, status: str) -> int:
 
 
 def join_if_not_none(sequence: Sequence[object] | None) -> str | None:
+    """Join stringified values with commas while preserving omitted input.
+
+    Args:
+        sequence: Values to join in order, or ``None`` to omit the argument.
+
+    Returns:
+        Comma-separated text, an empty string for an empty sequence, or ``None``.
+    """
     if sequence is None:
         return None
     return ",".join(str(x) for x in sequence)
 
 
 def format_cpuset(value: Iterable[int] | str | None) -> str | None:
+    """Format CPU indices while preserving range text and omitted input.
+
+    Args:
+        value: CPU indices to join, existing CLI range text to retain unchanged,
+            or ``None`` to omit the option.
+
+    Returns:
+        Comma-separated indices, the original string, or ``None``. An empty
+        iterable produces an empty string rather than omitting the option.
+    """
     if value is None or isinstance(value, str):
         return value
     return ",".join(str(x) for x in value)
 
 
 def to_seconds(duration: int | timedelta | None) -> str | None:
+    """Format whole seconds with a suffix while preserving omitted input.
+
+    Args:
+        duration: Seconds or a timedelta; fractional timedelta seconds truncate
+            toward zero. ``None`` omits the option.
+
+    Returns:
+        The seconds value followed by ``s``, including zero, or ``None``.
+    """
     if duration is None:
         return None
     if isinstance(duration, timedelta):

@@ -418,6 +418,7 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         tail: int | None = None,
         timestamps: bool = False,
         until: datetime | timedelta | None = None,
+        timeout: float | None = None,
     ) -> str:
         """Returns the logs of the container
 
@@ -431,6 +432,7 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
             tail=tail,
             timestamps=timestamps,
             until=until,
+            timeout=timeout,
         )
 
     def pause(self) -> None:
@@ -1331,6 +1333,7 @@ class ContainerCLI(DockerCLICaller):
         until: datetime | timedelta | None = None,
         follow: bool = False,
         stream: Literal[False] = False,
+        timeout: float | None = None,
     ) -> str: ...
 
     @overload
@@ -1345,6 +1348,7 @@ class ContainerCLI(DockerCLICaller):
         until: datetime | timedelta | None = None,
         follow: bool = False,
         stream: Literal[True],
+        timeout: float | None = None,
     ) -> ProcessStream: ...
 
     @overload
@@ -1359,6 +1363,7 @@ class ContainerCLI(DockerCLICaller):
         until: datetime | timedelta | None = None,
         follow: bool = False,
         stream: bool = False,
+        timeout: float | None = None,
     ) -> str | ProcessStream: ...
 
     def logs(
@@ -1372,6 +1377,7 @@ class ContainerCLI(DockerCLICaller):
         until: datetime | timedelta | None = None,
         follow: bool = False,
         stream: bool = False,
+        timeout: float | None = None,
     ) -> str | ProcessStream:
         """Returns the logs of a container as a string or an iterator.
 
@@ -1399,6 +1405,9 @@ class ContainerCLI(DockerCLICaller):
                 `"stdout"`. `content` is the content of the line as bytes.
                 Take a look at [the user guide](https://github.com/MaraClaw/PyWhales/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output)
                 to have an example of the output.
+            timeout: Positive finite seconds for the local logs CLI, or `None`.
+                Inspection runs outside this deadline. Expiry raises `DockerTimeout`
+                without stopping the container or changing post-exit pipe draining.
 
         # Returns
             `str` if `stream=False` (the default), `Iterable[Tuple[str, bytes]]`
@@ -1427,7 +1436,7 @@ class ContainerCLI(DockerCLICaller):
         full_cmd.add_flag("--follow", follow)
         full_cmd.append(container)
 
-        iterator = stream_stdout_and_stderr(full_cmd)
+        iterator = stream_stdout_and_stderr(full_cmd, timeout=timeout)
 
         if stream:
             return iterator

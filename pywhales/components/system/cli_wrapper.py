@@ -74,6 +74,8 @@ class SystemCLI(DockerCLICaller):
         since: datetime.datetime | datetime.timedelta | None = None,
         until: datetime.datetime | datetime.timedelta | None = None,
         filters: Mapping[str, str] = MappingProxyType({}),
+        *,
+        timeout: float | None = None,
     ) -> MappedProcessStream[DockerEvent]:
         """Return docker events information up to the current point in time.
 
@@ -111,6 +113,9 @@ class SystemCLI(DockerCLICaller):
             until: 	Stream events until this timestamp
             filters: See the [Docker documentation page about filtering
                 ](https://docs.docker.com/engine/reference/commandline/events/#filtering).
+            timeout: Positive finite seconds for the local events CLI, or `None`.
+                Expiry raises `DockerTimeout` without stopping daemon resources or
+                changing post-exit pipe draining.
         # Returns
             A closeable iterator yielding DockerEvent objects from stdout.
 
@@ -131,7 +136,7 @@ class SystemCLI(DockerCLICaller):
         full_cmd.add_args_iterable_or_single(
             "--filter", format_mapping_for_cli(filters)
         )
-        stream = stream_stdout_and_stderr(full_cmd)
+        stream = stream_stdout_and_stderr(full_cmd, timeout=timeout)
         return MappedProcessStream(
             stream,
             (

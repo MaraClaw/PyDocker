@@ -1,16 +1,19 @@
 import json
 from collections.abc import Mapping, Sequence
+from inspect import Parameter, signature
 from pathlib import Path
-from typing import Literal, assert_never
+from typing import Literal, assert_never, get_overloads
 from unittest.mock import Mock
 
 import pytest
 from pytest_mock import MockerFixture
 
-from pywhales import DockerClient, Image
+from pywhales import Container, DockerClient, Image
 from pywhales.components.buildx import cli_wrapper as buildx
 from pywhales.components.compose import cli_wrapper as compose
 from pywhales.components.container import cli_wrapper as container
+from pywhales.components.service import cli_wrapper as service
+from pywhales.components.system import cli_wrapper as system
 from pywhales.exceptions import DockerTimeout
 
 
@@ -214,3 +217,150 @@ def test_buildx_stream_adapter_forwards_environment_and_deadline(
     assert next(logs) == "log\ufffd\n"
     logs.close()
     started.close.assert_called_once()
+
+
+@pytest.mark.parametrize("timeout", [None, 2.5])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("operation", ["container", "root", "compose", "service"])
+def test_log_deadline_forwarding_keeps_inspection_unbudgeted(
+    client: DockerClient,
+    mocker: MockerFixture,
+    operation: Literal["container", "root", "compose", "service"],
+    stream: bool,
+    timeout: float | None,
+) -> None:
+    module = {
+        "container": container,
+        "root": container,
+        "compose": compose,
+        "service": service,
+    }[operation]
+    inspect = mocker.patch.object(
+        module, "run", return_value='[{"Id":"workload","ID":"workload"}]'
+    )
+    raw = mocker.MagicMock()
+    raw.__iter__.return_value = iter([("stdout", b"app | log\n")])
+    launch = mocker.patch.object(module, "stream_stdout_and_stderr", return_value=raw)
+    client.client_config.compose_project_name = "observation"
+
+    match operation:
+        case "container":
+            result = client.container.logs(
+                "workload", tail=3, follow=True, stream=stream, timeout=timeout
+            )
+        case "root":
+            result = client.logs(
+                "workload", tail=3, follow=True, stream=stream, timeout=timeout
+            )
+        case "compose":
+            result = client.compose.logs(
+                "workload", "3", True, stream=stream, timeout=timeout
+            )
+        case "service":
+            result = client.service.logs(
+                "workload", tail=3, follow=True, stream=stream, timeout=timeout
+            )
+        case unreachable:
+            assert_never(unreachable)
+
+    assert result is raw if stream else result == "app | log\n"
+    group = "container" if operation == "root" else operation
+    expected = ["docker-test", group]
+    if operation == "compose":
+        expected += ["--project-name", "observation"]
+    expected += ["logs"]
+    if operation == "compose":
+        expected += ["--no-color"]
+    expected += ["--tail", "3", "--follow", "workload"]
+    assert [str(arg) for arg in launch.call_args.args[0]] == expected
+    assert launch.call_args.kwargs == {"timeout": timeout}
+    if operation == "compose":
+        inspect.assert_not_called()
+    else:
+        inspect.assert_called_once_with(["docker-test", group, "inspect", "workload"])
+
+
+def test_container_handle_forwards_log_deadline(
+    client: DockerClient, mocker: MockerFixture
+) -> None:
+    handle = Container(client.client_config, "workload", is_immutable_id=True)
+    logs = mocker.patch.object(container.ContainerCLI, "logs", return_value="log\n")
+
+    assert handle.logs(tail=3, timeout=2.5) == "log\n"
+
+    logs.assert_called_once_with(
+        handle,
+        details=False,
+        since=None,
+        tail=3,
+        timestamps=False,
+        until=None,
+        timeout=2.5,
+    )
+
+
+@pytest.mark.parametrize("timeout", [None, 2.5])
+@pytest.mark.parametrize("operation", ["compose", "system"])
+def test_event_deadline_forwarding_preserves_flags_and_mapping(
+    client: DockerClient,
+    mocker: MockerFixture,
+    operation: Literal["compose", "system"],
+    timeout: float | None,
+) -> None:
+    module = compose if operation == "compose" else system
+    raw = mocker.MagicMock()
+    raw.__iter__.return_value = iter(
+        [
+            ("stderr", b"not an event\n"),
+            ("stdout", b'{"action":"start","Action":"start","service":"web"}\n'),
+        ]
+    )
+    launch = mocker.patch.object(module, "stream_stdout_and_stderr", return_value=raw)
+    client.client_config.compose_project_name = "observation"
+
+    if operation == "compose":
+        events = client.compose.events(["web"], timeout=timeout)
+        expected = [
+            "docker-test",
+            "compose",
+            "--project-name",
+            "observation",
+            "events",
+            "--json",
+            "web",
+        ]
+    else:
+        events = client.system.events(filters={"container": "web"}, timeout=timeout)
+        expected = [
+            "docker-test",
+            "system",
+            "events",
+            "--format",
+            "{{json .}}",
+            "--filter",
+            "container=web",
+        ]
+    with events:
+        result = list(events)
+
+    assert [event.action for event in result] == ["start"]
+    assert list(launch.call_args.args[0]) == expected
+    assert launch.call_args.kwargs == {"timeout": timeout}
+
+
+def test_subscription_deadlines_are_keyword_only_in_every_overload(
+    client: DockerClient,
+) -> None:
+    for method in (
+        container.Container.logs,
+        client.container.logs,
+        client.logs,
+        client.compose.logs,
+        client.service.logs,
+        client.compose.events,
+        client.system.events,
+    ):
+        for variant in (method, *get_overloads(method)):
+            parameter = signature(variant).parameters["timeout"]
+            assert parameter.kind is Parameter.KEYWORD_ONLY
+            assert parameter.default is None

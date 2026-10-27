@@ -513,6 +513,8 @@ class ComposeCLI(DockerCLICaller):
         since: str | None = None,
         until: str | None = None,
         stream: Literal[False] = False,
+        *,
+        timeout: float | None = None,
     ) -> str: ...
 
     @overload
@@ -527,6 +529,7 @@ class ComposeCLI(DockerCLICaller):
         until: str | None = None,
         *,
         stream: Literal[True],
+        timeout: float | None = None,
     ) -> Iterable[tuple[str, bytes]]: ...
 
     @overload
@@ -540,6 +543,8 @@ class ComposeCLI(DockerCLICaller):
         since: str | None = None,
         until: str | None = None,
         stream: bool = False,
+        *,
+        timeout: float | None = None,
     ) -> str | Iterable[tuple[str, bytes]]: ...
 
     def logs(
@@ -552,6 +557,8 @@ class ComposeCLI(DockerCLICaller):
         since: str | None = None,
         until: str | None = None,
         stream: bool = False,
+        *,
+        timeout: float | None = None,
     ) -> str | Iterable[tuple[str, bytes]]:
         """View output from containers
 
@@ -572,6 +579,9 @@ class ComposeCLI(DockerCLICaller):
                 `"stdout"`. `content` is the content of the line as bytes.
                 Take a look at [the user guide](https://github.com/MaraClaw/PyWhales/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output)
                 to have an example of the output.
+            timeout: Positive finite seconds for the local logs CLI, or `None`.
+                Expiry raises `DockerTimeout` without stopping services or changing
+                post-exit pipe draining.
         # Returns
             `str` if `stream=False` (the default), `Iterable[Tuple[str, bytes]]`
             if `stream=True`.
@@ -585,7 +595,7 @@ class ComposeCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--until", until)
         full_cmd += to_list(services)
 
-        iterator = stream_stdout_and_stderr(full_cmd)
+        iterator = stream_stdout_and_stderr(full_cmd, timeout=timeout)
         if stream:
             return iterator
         else:
@@ -1217,6 +1227,8 @@ class ComposeCLI(DockerCLICaller):
     def events(
         self,
         services: Sequence[str] = (),
+        *,
+        timeout: float | None = None,
     ) -> MappedProcessStream[ComposeEvent]:
         """Return Docker Compose events for the specified services.
 
@@ -1241,6 +1253,9 @@ class ComposeCLI(DockerCLICaller):
 
         Parameters:
             services: A list of service names to filter events. If empty, events for all services are streamed.
+            timeout: Positive finite seconds for the local events CLI, or `None`.
+                Expiry raises `DockerTimeout` without stopping services or changing
+                post-exit pipe draining.
 
         Returns:
             A closeable iterator yielding `ComposeEvent` objects from stdout.
@@ -1252,7 +1267,7 @@ class ComposeCLI(DockerCLICaller):
         """
         full_cmd = [*self.docker_compose_cmd, "events", "--json", *services]
 
-        stream = stream_stdout_and_stderr(full_cmd)
+        stream = stream_stdout_and_stderr(full_cmd, timeout=timeout)
         return MappedProcessStream(
             stream,
             (

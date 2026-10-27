@@ -344,6 +344,8 @@ class ServiceCLI(DockerCLICaller):
         resolve: bool = True,
         truncate: bool = True,
         stream: Literal[False] = False,
+        *,
+        timeout: float | None = None,
     ) -> str: ...
 
     @overload
@@ -361,6 +363,7 @@ class ServiceCLI(DockerCLICaller):
         truncate: bool = True,
         *,
         stream: Literal[True],
+        timeout: float | None = None,
     ) -> Iterable[tuple[str, bytes]]: ...
 
     @overload
@@ -377,6 +380,8 @@ class ServiceCLI(DockerCLICaller):
         resolve: bool = True,
         truncate: bool = True,
         stream: bool = False,
+        *,
+        timeout: float | None = None,
     ) -> str | Iterable[tuple[str, bytes]]: ...
 
     def logs(
@@ -392,6 +397,8 @@ class ServiceCLI(DockerCLICaller):
         resolve: bool = True,
         truncate: bool = True,
         stream: bool = False,
+        *,
+        timeout: float | None = None,
     ) -> str | Iterable[tuple[str, bytes]]:
         """Returns the logs of a service as a string or an iterator.
 
@@ -417,6 +424,9 @@ class ServiceCLI(DockerCLICaller):
                 `"stdout"`. `content` is the content of the line as bytes.
                 Take a look at [the user guide](https://github.com/MaraClaw/PyWhales/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output)
                 to have an example of the output.
+            timeout: Positive finite seconds for the local logs CLI, or `None`.
+                Inspection runs outside this deadline. Expiry raises `DockerTimeout`
+                without stopping the service or changing post-exit pipe draining.
 
         # Returns
             `str` if `stream=False` (the default), `Iterable[Tuple[str, bytes]]`
@@ -440,7 +450,7 @@ class ServiceCLI(DockerCLICaller):
         full_cmd.add_flag("--no-trunc", not truncate)
         full_cmd.append(service)
 
-        iterator = stream_stdout_and_stderr(full_cmd)
+        iterator = stream_stdout_and_stderr(full_cmd, timeout=timeout)
         if stream:
             return iterator
         else:

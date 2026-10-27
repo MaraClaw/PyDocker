@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Final, Protocol, Self
 
+from pywhales.telemetry import TelemetryObserver
+
 
 class ExecutionPolicySource(Protocol):
     """Readable client settings used to snapshot each subprocess launch."""
@@ -23,6 +25,11 @@ class ExecutionPolicySource(Protocol):
         """Return whether new launches may expose raw diagnostic values."""
         ...
 
+    @property
+    def telemetry_observer(self) -> TelemetryObserver | None:
+        """Return the optional sanitized execution observer for new launches."""
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class ExecutionPolicy:
@@ -34,10 +41,12 @@ class ExecutionPolicy:
             separate limits rather than a single total-memory cap.
         raw_diagnostics: Whether automatic diagnostics may include confidential
             command, environment, and captured-output values.
+        telemetry_observer: Optional payload-free observer snapshotted by reference.
     """
 
     stream_buffer_bytes: int | None = None
     raw_diagnostics: bool = False
+    telemetry_observer: TelemetryObserver | None = None
 
 
 class BufferDefault(Enum):
@@ -103,5 +112,9 @@ def get_execution_policy(command: Sequence[object]) -> ExecutionPolicy:
     """
     if command and isinstance(command[0], PolicyExecutable):
         source = command[0].policy_source
-        return ExecutionPolicy(source.stream_buffer_bytes, source.raw_diagnostics)
+        return ExecutionPolicy(
+            source.stream_buffer_bytes,
+            source.raw_diagnostics,
+            source.telemetry_observer,
+        )
     return ExecutionPolicy()

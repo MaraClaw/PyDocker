@@ -21,6 +21,8 @@ from pywhales.exceptions import (
     DockerTimeout,
     get_docker_exception_type,
 )
+from pywhales.telemetry import Outcome
+from pywhales.telemetry._lifecycle import ExecutionTelemetry
 
 
 class ProcessStream(Iterator[tuple[str, bytes]]):
@@ -47,6 +49,7 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         deadline: float | None = None,
         buffer_bytes: int | None = None,
         raw_diagnostics: bool = False,
+        telemetry: ExecutionTelemetry | None = None,
     ) -> None:
         """Take ownership of a launched process and start readers and a watchdog.
 
@@ -61,6 +64,7 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
             raw_diagnostics: Whether exception text may expose command and
                 captured-output values. Raw exception attributes remain available
                 regardless and must be treated as confidential.
+            telemetry: Optional launch state completed by consumption or closure.
         """
         self._process = process
         self._full_cmd = full_cmd
@@ -68,6 +72,9 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         self._deadline = deadline
         self._buffer_bytes = buffer_bytes
         self._raw_diagnostics = raw_diagnostics
+        self._telemetry = telemetry
+        self._telemetry_outcome: Outcome | None = None
+        self._read_bytes = {"stdout": 0, "stderr": 0}
         self._queue = StreamBuffer(buffer_bytes)
         self._stop = Event()
         self._released = Event()
@@ -169,6 +176,8 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
                             if self._stop.is_set():
                                 return
                             chunk = os.read(pipe.fileno(), 65536)
+                            if self._telemetry is not None:
+                                self._read_bytes[name] += len(chunk)
                             offset = 0
                     except BlockingIOError:
                         self._stop.wait(0.01)
@@ -310,17 +319,31 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         with self._queue.condition:
             error = self._error
             self._error = None
-            if self._expired:
-                self._expired = False
-                raise DockerTimeout(
-                    self._full_cmd,
-                    self._process.returncode,
-                    self._timeout_stdout,
-                    bytes(self._stderr),
-                    raw_diagnostics=self._raw_diagnostics,
-                )
-            if error is not None:
-                raise error
+            expired = self._expired
+            self._expired = False
+            if self._telemetry_outcome is None:
+                if expired:
+                    self._telemetry_outcome = "timeout"
+                elif error is not None:
+                    self._telemetry_outcome = "failure"
+        self._complete_telemetry()
+        if expired:
+            raise DockerTimeout(
+                self._full_cmd,
+                self._process.returncode,
+                self._timeout_stdout,
+                bytes(self._stderr),
+                raw_diagnostics=self._raw_diagnostics,
+            )
+        if error is not None:
+            raise error
+
+    def _complete_telemetry(self) -> None:
+        """Publish the selected outcome after cleanup, outside stream locks."""
+        if self._telemetry is not None and self._telemetry_outcome is not None:
+            self._telemetry.stdout_bytes = self._read_bytes["stdout"]
+            self._telemetry.stderr_bytes = self._read_bytes["stderr"]
+            self._telemetry.finish(self._telemetry_outcome)
 
     @override
     def __iter__(self) -> Self:
@@ -364,6 +387,8 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
             self._closed = True
             self._stop.set()
             self._queue.close()
+            self._telemetry_outcome = "success" if exit_code == 0 else "failure"
+        self._complete_telemetry()
         if exit_code != 0:
             stderr = bytes(self._stderr)
             raise get_docker_exception_type(stderr)(
@@ -383,10 +408,19 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         """
         with self._queue.condition:
             self._expire()
+            if self._telemetry_outcome is None:
+                self._telemetry_outcome = (
+                    "timeout"
+                    if self._expired
+                    else "failure"
+                    if self._error is not None
+                    else "closed"
+                )
             self._closed = True
             self._stop.set()
             self._queue.close()
         self._watchdog.join()
+        self._complete_telemetry()
 
     def __enter__(self) -> Self:
         """Return the already-running stream without launching another process."""

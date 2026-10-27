@@ -23,6 +23,7 @@ from . import utils
 from ._execution_policy import PolicyExecutable
 from ._types import JsonObject
 from .enums import ClientTypeInput, ComposeProgressInput
+from .telemetry import TelemetryObserver
 from .utils import ValidPath, to_list
 
 if TYPE_CHECKING:
@@ -159,6 +160,8 @@ class ClientConfig:
         raw_diagnostics: Per-client opt-in to confidential automatic diagnostic
             values. Safe defaults do not redact returned data or raw exception
             attributes, uncaptured terminal output, or caller-owned logging.
+        telemetry_observer: Optional sanitized launch/completion callback, frozen
+            by reference for each launch. Raw diagnostics never relax its schema.
     """
 
     config: ValidPath | None = None
@@ -188,6 +191,7 @@ class ClientConfig:
     image_stream_buffer_bytes: int | None = None
     stream_buffer_bytes: int | None = None
     raw_diagnostics: bool = False
+    telemetry_observer: TelemetryObserver | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Validate configured output budgets without probing the CLI.

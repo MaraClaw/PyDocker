@@ -15,6 +15,7 @@ from pywhales.exceptions import (
     ObservationCancelled,
     ObservationLimitError,
 )
+from pywhales.telemetry._lifecycle import ExecutionTelemetry
 
 
 def bounded_capture(
@@ -24,11 +25,14 @@ def bounded_capture(
     timeout: float | None,
     policy: ExecutionPolicy,
     observation: ObservationState,
+    *,
+    telemetry: ExecutionTelemetry,
 ) -> subprocess.CompletedProcess[bytes]:
     """Launch, capture within the observation budget, and reap the local child."""
     check_observation(observation)
     check_launch(args, env, observation.policy)
     check_observation(observation)
+    telemetry.start()
     deadline = None if timeout is None else monotonic() + timeout
     try:
         process = subprocess.Popen(
@@ -46,6 +50,7 @@ def bounded_capture(
     assert process.stdout is not None and process.stderr is not None
     stdout = bytearray()
     stderr = bytearray()
+    read_bytes = {process.stdout.fileno(): 0, process.stderr.fileno(): 0}
     try:
         buffers = {process.stdout.fileno(): stdout, process.stderr.fileno(): stderr}
         with CapturePipes((process.stdout, process.stderr)) as pipes:
@@ -88,6 +93,7 @@ def bounded_capture(
                         - len(stderr)
                     )
                     chunk = os.read(fd, min(available, remaining + 1, 65536))
+                    read_bytes[fd] += len(chunk)
                     if not chunk:
                         pipes.discard(fd)
                     elif len(chunk) > remaining:
@@ -108,3 +114,4 @@ def bounded_capture(
         process.stdout.close()
         process.stderr.close()
         process.wait()
+        telemetry.stdout_bytes, telemetry.stderr_bytes = read_bytes.values()

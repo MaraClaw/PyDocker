@@ -38,6 +38,7 @@ from pywhales._execution_policy import (
 from pywhales._process_stream import ProcessStream as ProcessStream
 from pywhales.exceptions import DockerException, DockerTimeout
 from pywhales.exceptions import get_docker_exception_type as get_docker_exception_type
+from pywhales.telemetry._lifecycle import ExecutionTelemetry
 
 PROJECT_ROOT = Path(__file__).parents[1]
 
@@ -297,75 +298,88 @@ def run(
     from pywhales._observation import get_observation
 
     observation = get_observation()
-    if observation is not None:
-        if tty or not capture_stdout or not capture_stderr or input is not None:
-            raise ValueError("Observation requires captured output and no input or tty")
-        from pywhales._bounded_capture import bounded_capture
+    with ExecutionTelemetry(policy.telemetry_observer, "captured") as telemetry:
+        if observation is not None:
+            if tty or not capture_stdout or not capture_stderr or input is not None:
+                raise ValueError(
+                    "Observation requires captured output and no input or tty"
+                )
+            from pywhales._bounded_capture import bounded_capture
 
-        completed_process = bounded_capture(
-            args, subprocess_env, pass_fds, timeout, policy, observation
-        )
-    elif timeout is None:
-        completed_process = subprocess.run(
-            args,
-            input=input,
-            stdout=stdout_dest,
-            stderr=stderr_dest,
-            env=subprocess_env,
-            pass_fds=pass_fds,
-        )
-    else:
-        deadline = monotonic() + timeout
-        with Popen(
-            args,
-            stdin=PIPE if input is not None else None,
-            stdout=stdout_dest,
-            stderr=stderr_dest,
-            env=subprocess_env,
-            pass_fds=pass_fds,
-        ) as process:
-            communicate_input = input
-            while True:
-                try:
-                    # Bound OS waits without shortening the invocation's deadline.
-                    stdout, stderr = process.communicate(
-                        communicate_input,
-                        timeout=min(86400, max(0, deadline - monotonic())),
-                    )
-                except subprocess.TimeoutExpired:
-                    communicate_input = None
-                    if monotonic() < deadline:
-                        continue
-                    timed_out = process.poll() is None
-                    if timed_out:
-                        process.kill()
-                    try:
-                        stdout, stderr = process.communicate(timeout=1)
-                    except subprocess.TimeoutExpired as captured:
-                        stdout, stderr = captured.output, captured.stderr
-                    process.wait()
-                    if timed_out:
-                        raise DockerTimeout(
-                            args,
-                            process.returncode,
-                            stdout,
-                            stderr,
-                            raw_diagnostics=policy.raw_diagnostics,
-                        ) from None
-                break
-            completed_process = subprocess.CompletedProcess(
-                args, process.returncode, stdout, stderr
+            completed_process = bounded_capture(
+                args,
+                subprocess_env,
+                pass_fds,
+                timeout,
+                policy,
+                observation,
+                telemetry=telemetry,
             )
+        elif timeout is None:
+            telemetry.start()
+            completed_process = subprocess.run(
+                args,
+                input=input,
+                stdout=stdout_dest,
+                stderr=stderr_dest,
+                env=subprocess_env,
+                pass_fds=pass_fds,
+            )
+        else:
+            telemetry.start()
+            deadline = monotonic() + timeout
+            with Popen(
+                args,
+                stdin=PIPE if input is not None else None,
+                stdout=stdout_dest,
+                stderr=stderr_dest,
+                env=subprocess_env,
+                pass_fds=pass_fds,
+            ) as process:
+                communicate_input = input
+                while True:
+                    try:
+                        # Bound OS waits without shortening the invocation's deadline.
+                        stdout, stderr = process.communicate(
+                            communicate_input,
+                            timeout=min(86400, max(0, deadline - monotonic())),
+                        )
+                    except subprocess.TimeoutExpired:
+                        communicate_input = None
+                        if monotonic() < deadline:
+                            continue
+                        timed_out = process.poll() is None
+                        if timed_out:
+                            process.kill()
+                        try:
+                            stdout, stderr = process.communicate(timeout=1)
+                        except subprocess.TimeoutExpired as captured:
+                            stdout, stderr = captured.output, captured.stderr
+                        process.wait()
+                        if timed_out:
+                            telemetry.captured(stdout, stderr)
+                            raise DockerTimeout(
+                                args,
+                                process.returncode,
+                                stdout,
+                                stderr,
+                                raw_diagnostics=policy.raw_diagnostics,
+                            ) from None
+                    break
+                completed_process = subprocess.CompletedProcess(
+                    args, process.returncode, stdout, stderr
+                )
 
-    if completed_process.returncode != 0:
-        exception_type = get_docker_exception_type(completed_process.stderr)
-        raise exception_type(
-            args,
-            completed_process.returncode,
-            completed_process.stdout,
-            completed_process.stderr,
-            raw_diagnostics=policy.raw_diagnostics,
-        )
+        telemetry.captured(completed_process.stdout, completed_process.stderr)
+        if completed_process.returncode != 0:
+            exception_type = get_docker_exception_type(completed_process.stderr)
+            raise exception_type(
+                args,
+                completed_process.returncode,
+                completed_process.stdout,
+                completed_process.stderr,
+                raw_diagnostics=policy.raw_diagnostics,
+            )
 
     if return_stderr:
         return (
@@ -572,28 +586,35 @@ def _start_process(
         subprocess_env = dict(os.environ)
         subprocess_env.update(env)
 
+    telemetry = ExecutionTelemetry(policy.telemetry_observer, "stream")
+    telemetry.start()
     deadline = None if timeout is None else monotonic() + timeout
-    args = [str(x) for x in full_cmd]
-    _log_command(
-        args,
-        os.environ if subprocess_env is None else subprocess_env,
-        raw_diagnostics=policy.raw_diagnostics,
-    )
-    process = Popen(
-        args,
-        stdin=PIPE if pipe_stdin else None,
-        stdout=PIPE,
-        stderr=PIPE,
-        env=subprocess_env,
-        pass_fds=pass_fds,
-    )
-    return ProcessStream(
-        process,
-        args,
-        deadline=deadline,
-        buffer_bytes=buffer_bytes,
-        raw_diagnostics=policy.raw_diagnostics,
-    )
+    try:
+        args = [str(x) for x in full_cmd]
+        _log_command(
+            args,
+            os.environ if subprocess_env is None else subprocess_env,
+            raw_diagnostics=policy.raw_diagnostics,
+        )
+        process = Popen(
+            args,
+            stdin=PIPE if pipe_stdin else None,
+            stdout=PIPE,
+            stderr=PIPE,
+            env=subprocess_env,
+            pass_fds=pass_fds,
+        )
+        return ProcessStream(
+            process,
+            args,
+            deadline=deadline,
+            buffer_bytes=buffer_bytes,
+            raw_diagnostics=policy.raw_diagnostics,
+            telemetry=telemetry if policy.telemetry_observer is not None else None,
+        )
+    except BaseException:
+        telemetry.finish("failure")
+        raise
 
 
 def stream_stdout_and_stderr(

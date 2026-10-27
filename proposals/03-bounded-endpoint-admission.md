@@ -1,6 +1,6 @@
 # Bounded endpoint admission
 
-Status: Future (not approved or implemented)
+Status: Implemented as an opt-in application layer with offline validation. Deployment budgets and live capacity approval remain operator decisions.
 
 Owner: application controller maintainer and operator
 Tier: P1
@@ -90,3 +90,38 @@ explicitly authorized disposable daemon. No live validation is performed here.
 Operators must choose endpoint aliasing, limits, fairness, wait/reject policy,
 queue deadlines and cross-process ownership. Until chosen, no deployment-specific
 limits or aggregate safety claim can be approved.
+
+## Implemented surface and validation
+
+[`pywhales.admission`](../pywhales/admission/__init__.py) provides an explicit
+`AdmissionOwner`, safe endpoint and pressure-class identities, per-class active
+and pending limits, and wait/reject policies. The [user guide](../docs/template/user_guide/admission.md)
+documents the callable and owned-stream interfaces. Direct SDK calls, launch
+timeouts and low-level image return shapes remain unchanged.
+
+Requests are inert, single-use handles. Admission happens before invoking the
+supplied callable, including its preflight. Pending cancellation has a distinct
+error and starts no operation. Wait uses a bounded FIFO queue; a full queue rejects
+instead of retaining overflow waiters. Queue deadlines use a separate monotonic
+clock. `iter_calls()` consumes deferred callables sequentially and lazily, without
+creating queued futures or retaining an entire producer.
+
+One permit covers a composite operation and its direct SDK children. Same-context
+reentry into the same owner fails instead of waiting on its own pool; controllers
+must avoid cross-thread dependency cycles. An admitted stream retains capacity
+until observed exhaustion/failure or completed close, including in-flight reader
+cleanup. An idle failed source conservatively retains its permit until observed
+or closed. Cleanup preserves the original error, grouping an independent cleanup
+failure after it. Snapshots expose bounded counts, high-water marks and saturating
+outcome counters, not operation payloads. Separate owners don't share capacity,
+even when their endpoint aliases match.
+
+The admission regression modules in `tests/pywhales/test_admission_*.py` cover
+bounded queues and producers, cancellation/grant races, queue expiry, setup and
+cleanup failures, reentry, generic type contracts and real local-child ownership.
+An offline application driver completed 20 producer operations, observed active
+and pending high-water marks of one for limits of one, cancelled a queued create
+with zero image preflights and zero launches, and reaped all six local child
+processes across composite success, early close and injected failure. Subsequent
+work was admitted after cleanup. No Docker daemon or deployment capacity was
+tested; these results don't authorize live operation or establish fleet limits.

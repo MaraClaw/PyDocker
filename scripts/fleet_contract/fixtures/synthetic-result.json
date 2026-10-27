@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "provenance": "synthetic",
+  "manifest_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "support_row": "synthetic-example",
+  "observed_versions": {"python": "3.14.8", "os": "synthetic-linux-0", "kernel": "0.0.0-synthetic", "docker_cli": "0.0.0-synthetic", "docker_engine": "0.0.0-synthetic", "compose": null, "buildx": null},
+  "authorization_record": "synthetic-not-authority",
+  "run_namespace": "synthetic-offline-run",
+  "endpoint_aliases": ["example-local", "example-context"],
+  "populations": {"all_submissions": 2, "launched_cli": 2, "readiness_attempts": 2, "faults": 1},
+  "outcomes": {"succeeded": 2, "failed": 0, "rejected": 0, "cancelled": 0, "unknown": 0, "timed_out": 0},
+  "latency": [
+    {"boundary": "queue_wait", "unit": "seconds", "population": "all_submissions", "samples": [{"outcome": "succeeded", "seconds": 0.1, "excluded": false, "reason": "observed"}, {"outcome": "succeeded", "seconds": 0.2, "excluded": false, "reason": "observed"}]},
+    {"boundary": "selected_cli", "unit": "seconds", "population": "launched_cli", "samples": [{"outcome": "succeeded", "seconds": 0.2, "excluded": false, "reason": "observed"}, {"outcome": "succeeded", "seconds": 0.3, "excluded": false, "reason": "observed"}]},
+    {"boundary": "readiness", "unit": "seconds", "population": "readiness_attempts", "samples": [{"outcome": "succeeded", "seconds": 0.3, "excluded": false, "reason": "observed"}, {"outcome": "succeeded", "seconds": 0.4, "excluded": false, "reason": "observed"}]},
+    {"boundary": "recovery", "unit": "seconds", "population": "faults", "samples": [{"outcome": "succeeded", "seconds": 1.0, "excluded": false, "reason": "observed"}]}
+  ],
+  "high_water": [{"resource": "cpu_cores", "value": 1.0}, {"resource": "rss_bytes", "value": 512.0}, {"resource": "file_descriptors", "value": 4.0}, {"resource": "children", "value": 1.0}, {"resource": "disk_bytes", "value": 512.0}, {"resource": "disk_inodes", "value": 2.0}],
+  "elapsed_seconds": 20.0, "stability_window_seconds": 2.0, "stable_observations": 2,
+  "early_stopped": false, "missing_evidence": [], "excluded_evidence": [],
+  "isolation_evidence_ref": "synthetic-isolation-not-proof", "artifact_receipt_ref": "synthetic-artifacts", "cleanup_receipt_ref": "synthetic-cleanup-not-proof", "residual_assets": []
+}

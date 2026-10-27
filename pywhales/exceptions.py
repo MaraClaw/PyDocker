@@ -1,3 +1,6 @@
+from typing import override
+
+
 class DockerException(Exception):
     def __init__(
         self,
@@ -11,11 +14,11 @@ class DockerException(Exception):
         if stdout is None:
             self.stdout: str | None = None
         else:
-            self.stdout: str | None = stdout.decode()
+            self.stdout: str | None = stdout.decode(errors="replace")
         if stderr is None:
             self.stderr: str | None = None
         else:
-            self.stderr: str | None = stderr.decode()
+            self.stderr: str | None = stderr.decode(errors="replace")
         command_launched_str = " ".join(command_launched)
         error_msg = (
             f"The command executed was `{command_launched_str}`.\n"
@@ -60,3 +63,32 @@ class NotASwarmManager(DockerException):
 
 class NoSuchVolume(DockerException):
     pass
+
+
+class DockerTimeout(DockerException):
+    """The local CLI exceeded its launch-based deadline and was reaped."""
+
+    @override
+    def __str__(self) -> str:
+        return f"The local CLI exceeded its deadline.\n{super().__str__()}"
+
+
+def get_docker_exception_type(output: bytes | None) -> type[DockerException]:
+    if output is None or len(output) == 0:
+        return DockerException
+    decoded = output.decode(errors="replace").lower()
+    if "no such image" in decoded:
+        return NoSuchImage
+    if "no such service" in decoded or (
+        "service" in decoded and "not found" in decoded
+    ):
+        return NoSuchService
+    if "no such container" in decoded:
+        return NoSuchContainer
+    if "this node is not a swarm manager" in decoded:
+        return NotASwarmManager
+    if "no such volume" in decoded:
+        return NoSuchVolume
+    if "network" in decoded and "not found" in decoded:
+        return NoSuchNetwork
+    return DockerException

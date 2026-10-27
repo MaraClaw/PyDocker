@@ -1,21 +1,19 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import shlex
 import signal
 import subprocess
 import sys
-from collections.abc import Iterable, Iterator, Mapping, Sequence
-from contextlib import suppress
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
-from queue import Queue
 from subprocess import PIPE, Popen
-from threading import Event, Thread
+from time import monotonic
 from types import MappingProxyType, TracebackType
 from typing import (
-    IO,
     Literal,
     Self,
     overload,
@@ -24,15 +22,9 @@ from typing import (
 
 import pydantic
 
-from pywhales.exceptions import (
-    DockerException,
-    NoSuchContainer,
-    NoSuchImage,
-    NoSuchNetwork,
-    NoSuchService,
-    NoSuchVolume,
-    NotASwarmManager,
-)
+from pywhales._process_stream import ProcessStream as ProcessStream
+from pywhales.exceptions import DockerException, DockerTimeout
+from pywhales.exceptions import get_docker_exception_type as get_docker_exception_type
 
 PROJECT_ROOT = Path(__file__).parents[1]
 
@@ -97,25 +89,11 @@ class DockerCamelModel(pydantic.BaseModel):
     )
 
 
-def get_docker_exception_type(output: bytes | None) -> type[DockerException]:
-    if output is None or len(output) == 0:
-        return DockerException
-    decoded = output.decode().lower()
-    if "no such image" in decoded:
-        return NoSuchImage
-    if "no such service" in decoded or (
-        "service" in decoded and "not found" in decoded
+def validate_timeout(timeout: float | None) -> None:
+    if timeout is not None and (
+        isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0
     ):
-        return NoSuchService
-    if "no such container" in decoded:
-        return NoSuchContainer
-    if "this node is not a swarm manager" in decoded:
-        return NotASwarmManager
-    if "no such volume" in decoded:
-        return NoSuchVolume
-    if "network" in decoded and "not found" in decoded:
-        return NoSuchNetwork
-    return DockerException
+        raise ValueError("timeout must be positive finite seconds or None")
 
 
 def _debug_enabled() -> bool:
@@ -136,6 +114,8 @@ def run(
     env: Mapping[str, str] = ...,
     tty: bool = ...,
     pass_fds: Sequence[int] = ...,
+    *,
+    timeout: float | None = ...,
 ) -> str: ...
 
 
@@ -150,6 +130,7 @@ def run(
     env: Mapping[str, str] = ...,
     tty: bool = ...,
     pass_fds: Sequence[int] = ...,
+    timeout: float | None = ...,
 ) -> tuple[str, str]: ...
 
 
@@ -162,11 +143,14 @@ def run(
     env: Mapping[str, str] = MappingProxyType({}),
     tty: bool = False,
     pass_fds: Sequence[int] = (),
+    *,
+    timeout: float | None = None,
 ) -> str | tuple[str, str]:
+    validate_timeout(timeout)
     args = [str(x) for x in args]
     subprocess_env = dict(os.environ)
     subprocess_env.update(env)
-    if args[1] == "buildx":
+    if len(args) > 1 and args[1] == "buildx":
         subprocess_env["DOCKER_CLI_EXPERIMENTAL"] = "enabled"
     if tty:
         stdout_dest = sys.stdout
@@ -186,14 +170,53 @@ def run(
         print(f"Env: {subprocess_env}")
         print("------------------------------")
     LOGGER.debug("Running command: %s", shlex.join(args))
-    completed_process = subprocess.run(
-        args,
-        input=input,
-        stdout=stdout_dest,
-        stderr=stderr_dest,
-        env=subprocess_env,
-        pass_fds=pass_fds,
-    )
+    if timeout is None:
+        completed_process = subprocess.run(
+            args,
+            input=input,
+            stdout=stdout_dest,
+            stderr=stderr_dest,
+            env=subprocess_env,
+            pass_fds=pass_fds,
+        )
+    else:
+        deadline = monotonic() + timeout
+        with Popen(
+            args,
+            stdin=PIPE if input is not None else None,
+            stdout=stdout_dest,
+            stderr=stderr_dest,
+            env=subprocess_env,
+            pass_fds=pass_fds,
+        ) as process:
+            communicate_input = input
+            while True:
+                try:
+                    # Bound OS waits without shortening the invocation's deadline.
+                    stdout, stderr = process.communicate(
+                        communicate_input,
+                        timeout=min(86400, max(0, deadline - monotonic())),
+                    )
+                except subprocess.TimeoutExpired:
+                    communicate_input = None
+                    if monotonic() < deadline:
+                        continue
+                    timed_out = process.poll() is None
+                    if timed_out:
+                        process.kill()
+                    try:
+                        stdout, stderr = process.communicate(timeout=1)
+                    except subprocess.TimeoutExpired as captured:
+                        stdout, stderr = captured.output, captured.stderr
+                    process.wait()
+                    if timed_out:
+                        raise DockerTimeout(
+                            args, process.returncode, stdout, stderr
+                        ) from None
+                break
+            completed_process = subprocess.CompletedProcess(
+                args, process.returncode, stdout, stderr
+            )
 
     if completed_process.returncode != 0:
         exception_type = get_docker_exception_type(completed_process.stderr)
@@ -249,122 +272,17 @@ def to_list(x: object) -> list[object]:
     return [x]
 
 
-class ProcessStream(Iterator[tuple[str, bytes]]):
-    """Own a local CLI process, its pipes and its reader threads.
-
-    Iterating over a ``ProcessStream`` yields ``(source, line)`` tuples.
-    Exhaustion drains output and reports command failures. ``close()`` or
-    context exit cancels the local CLI without reporting its cancellation as
-    a command failure. A bare loop break does not close the stream, and closing
-    it does not remove daemon-managed containers or other remote resources.
-    """
-
-    def __init__(self, process: Popen[bytes], full_cmd: list[str]) -> None:
-        self._process = process
-        self._full_cmd = full_cmd
-        self.stdin = process.stdin
-        self._queue: Queue[tuple[str, bytes] | None] = Queue()
-        self._stop = Event()
-        self._closed = False
-        self._remaining_readers = 2
-        self._stderr = bytearray()
-        assert process.stdout is not None
-        assert process.stderr is not None
-        self._threads = tuple(
-            Thread(target=self._read_pipe, args=(pipe, name), daemon=True)
-            for pipe, name in ((process.stdout, "stdout"), (process.stderr, "stderr"))
-        )
-        for thread in self._threads:
-            thread.start()
-
-    def _read_pipe(self, pipe: IO[bytes], name: str) -> None:
-        pending = b""
-        try:
-            with pipe:
-                os.set_blocking(pipe.fileno(), False)
-                while not self._stop.is_set():
-                    try:
-                        chunk = os.read(pipe.fileno(), 65536)
-                    except BlockingIOError:
-                        self._stop.wait(0.01)
-                        continue
-                    if not chunk:
-                        if pending:
-                            self._queue.put((name, pending))
-                        break
-                    *lines, pending = (pending + chunk).split(b"\n")
-                    for line in lines:
-                        self._queue.put((name, line + b"\n"))
-        finally:
-            self._queue.put(None)
-
-    @override
-    def __iter__(self) -> Self:
-        return self
-
-    @override
-    def __next__(self) -> tuple[str, bytes]:
-        if self._closed:
-            raise StopIteration
-        while self._remaining_readers:
-            item = self._queue.get()
-            if self._closed:
-                raise StopIteration
-            if item is None:
-                self._remaining_readers -= 1
-            else:
-                source, line = item
-                if source == "stderr":
-                    self._stderr.extend(line)
-                return item
-        exit_code = self._process.wait()
-        if self._closed:
-            raise StopIteration
-        self.close()
-        if exit_code != 0:
-            stderr = bytes(self._stderr)
-            exception_type = get_docker_exception_type(stderr)
-            raise exception_type(
-                command_launched=self._full_cmd, return_code=exit_code, stderr=stderr
-            )
-        raise StopIteration
-
-    def close(self) -> None:
-        """Cancel consumption and reap the local CLI, even before iteration."""
-        if self._closed:
-            return
-        self._closed = True
-        self._stop.set()
-        self._queue.put(None)
-        if self._process.poll() is None:
-            with suppress(ProcessLookupError):
-                self._process.kill()
-            self._process.wait(timeout=1)
-        if self.stdin is not None and not self.stdin.closed:
-            os.set_blocking(self.stdin.fileno(), False)
-            with suppress(BrokenPipeError, BlockingIOError):
-                self.stdin.close()
-        for thread in self._threads:
-            thread.join()
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        self.close()
-
-
 class MappedProcessStream[T](Iterator[T]):
     """Carry process ownership through decoding, filtering or event parsing."""
 
     def __init__(self, stream: ProcessStream, iterator: Iterator[T]) -> None:
         self._stream = stream
         self._iterator = iterator
+
+    def _on_failure(
+        self, callback: Callable[[OSError | BufferError | DockerException], None]
+    ) -> None:
+        self._stream._on_failure(callback)
 
     @override
     def __iter__(self) -> Self:
@@ -377,6 +295,9 @@ class MappedProcessStream[T](Iterator[T]):
             result = next(self._iterator)
             yielded = True
             return result
+        except StopIteration:
+            self._stream.__exit__(None, None, None)
+            raise
         finally:
             if not yielded:
                 self.close()
@@ -395,7 +316,10 @@ class MappedProcessStream[T](Iterator[T]):
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        self.close()
+        try:
+            self._stream.__exit__(exc_type, exc_value, traceback)
+        finally:
+            self._iterator = iter(())
 
 
 def _start_process(
@@ -403,14 +327,23 @@ def _start_process(
     env: Mapping[str, str] | None = None,
     pass_fds: Sequence[int] = (),
     pipe_stdin: bool = False,
+    *,
+    timeout: float | None = None,
+    buffer_bytes: int | None = None,
 ) -> ProcessStream:
     """Start a subprocess and wire up reader threads for stdout/stderr."""
+    validate_timeout(timeout)
+    if buffer_bytes is not None and (
+        type(buffer_bytes) is not int or buffer_bytes <= 0
+    ):
+        raise ValueError("buffer_bytes must be a positive integer or None")
     if env is None:
         subprocess_env = None
     else:
         subprocess_env = dict(os.environ)
         subprocess_env.update(env)
 
+    deadline = None if timeout is None else monotonic() + timeout
     process = Popen(
         [str(x) for x in full_cmd],
         stdin=PIPE if pipe_stdin else None,
@@ -419,7 +352,12 @@ def _start_process(
         env=subprocess_env,
         pass_fds=pass_fds,
     )
-    return ProcessStream(process, [str(x) for x in full_cmd])
+    return ProcessStream(
+        process,
+        [str(x) for x in full_cmd],
+        deadline=deadline,
+        buffer_bytes=buffer_bytes,
+    )
 
 
 def stream_stdout_and_stderr(
@@ -427,6 +365,9 @@ def stream_stdout_and_stderr(
     env: Mapping[str, str] | None = None,
     pass_fds: Sequence[int] = (),
     pipe_stdin: bool = False,
+    *,
+    timeout: float | None = None,
+    buffer_bytes: int | None = None,
 ) -> ProcessStream:
     """Stream stdout/stderr from a subprocess.
 
@@ -435,7 +376,9 @@ def stream_stdout_and_stderr(
     ``result.stdin`` is available for writing.  Otherwise ``result.stdin``
     is ``None``.
     """
-    return _start_process(full_cmd, env, pass_fds, pipe_stdin)
+    return _start_process(
+        full_cmd, env, pass_fds, pipe_stdin, timeout=timeout, buffer_bytes=buffer_bytes
+    )
 
 
 def format_mapping_for_cli(

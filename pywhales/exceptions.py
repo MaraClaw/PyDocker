@@ -8,6 +8,8 @@ class DockerException(Exception):
         return_code: int,
         stdout: bytes | None = None,
         stderr: bytes | None = None,
+        *,
+        raw_diagnostics: bool = False,
     ) -> None:
         self.docker_command: list[str] = command_launched
         self.return_code: int = return_code
@@ -19,6 +21,12 @@ class DockerException(Exception):
             self.stderr: str | None = None
         else:
             self.stderr: str | None = stderr.decode(errors="replace")
+        if not raw_diagnostics:
+            super().__init__(
+                f"The command returned with code {return_code}. "
+                "Command and captured output details are withheld."
+            )
+            return
         command_launched_str = " ".join(command_launched)
         error_msg = (
             f"The command executed was `{command_launched_str}`.\n"

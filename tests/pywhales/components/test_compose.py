@@ -1213,10 +1213,7 @@ def test_compose_run_volume() -> None:
 def test_compose_run_volume_with_parameter() -> None:
     with (
         tempfile.NamedTemporaryFile() as read_only_file,
-        pytest.raises(
-            DockerException,
-            match=r".*can't create /mounted/read_only_file\.txt: Read-only file system.*",
-        ),
+        pytest.raises(DockerException) as error,
     ):
         docker.compose.run(
             "dodo",
@@ -1225,6 +1222,11 @@ def test_compose_run_volume_with_parameter() -> None:
             remove=True,
             tty=False,
         )
+    assert error.value.stderr is not None
+    assert (
+        "can't create /mounted/read_only_file.txt: Read-only file system"
+        in error.value.stderr
+    )
 
 
 def test_compose_run_service_ports_flag() -> None:
@@ -1689,11 +1691,13 @@ def test_compose_port() -> None:
 
     with pytest.raises(DockerException) as err:
         d.compose.port(service, "4000", protocol="tcp")
-    assert "no port 4000/tcp for container components-busybox-1" in str(err)
+    assert err.value.stderr is not None
+    assert "no port 4000/tcp for container components-busybox-1" in err.value.stderr
 
     with pytest.raises(DockerException) as err:
         d.compose.port(service, "1111")
-    assert "no port 1111/tcp for container components-busybox-1" in str(err)
+    assert err.value.stderr is not None
+    assert "no port 1111/tcp for container components-busybox-1" in err.value.stderr
 
     with pytest.raises(ValueError) as err:
         d.compose.port("", "123")

@@ -109,6 +109,24 @@ def _debug_enabled() -> bool:
     return debug_value == "1"
 
 
+def _log_command(
+    args: Sequence[str], env: Mapping[str, str], *, raw_diagnostics: bool
+) -> None:
+    if _debug_enabled():
+        print("------------------------------")
+        if raw_diagnostics:
+            print("command: " + " ".join(args))
+            print(f"Env: {dict(env)}")
+        else:
+            print("command: [details withheld]")
+            print("Env: [values withheld]")
+        print("------------------------------")
+    if raw_diagnostics:
+        LOGGER.debug("Running command: %s", shlex.join(args))
+    else:
+        LOGGER.debug("Running command (%d arguments; details withheld)", len(args))
+
+
 @overload
 def run(
     args: Sequence[object],
@@ -152,6 +170,7 @@ def run(
     timeout: float | None = None,
 ) -> str | tuple[str, str]:
     validate_timeout(timeout)
+    policy = get_execution_policy(args)
     args = [str(x) for x in args]
     subprocess_env = dict(os.environ)
     subprocess_env.update(env)
@@ -169,12 +188,7 @@ def run(
         stderr_dest = subprocess.PIPE
     else:
         stderr_dest = None
-    if _debug_enabled():
-        print("------------------------------")
-        print("command: " + " ".join(args))
-        print(f"Env: {subprocess_env}")
-        print("------------------------------")
-    LOGGER.debug("Running command: %s", shlex.join(args))
+    _log_command(args, subprocess_env, raw_diagnostics=policy.raw_diagnostics)
     if timeout is None:
         completed_process = subprocess.run(
             args,
@@ -216,7 +230,11 @@ def run(
                     process.wait()
                     if timed_out:
                         raise DockerTimeout(
-                            args, process.returncode, stdout, stderr
+                            args,
+                            process.returncode,
+                            stdout,
+                            stderr,
+                            raw_diagnostics=policy.raw_diagnostics,
                         ) from None
                 break
             completed_process = subprocess.CompletedProcess(
@@ -230,6 +248,7 @@ def run(
             completed_process.returncode,
             completed_process.stdout,
             completed_process.stderr,
+            raw_diagnostics=policy.raw_diagnostics,
         )
 
     if return_stderr:
@@ -352,8 +371,14 @@ def _start_process(
         subprocess_env.update(env)
 
     deadline = None if timeout is None else monotonic() + timeout
+    args = [str(x) for x in full_cmd]
+    _log_command(
+        args,
+        os.environ if subprocess_env is None else subprocess_env,
+        raw_diagnostics=policy.raw_diagnostics,
+    )
     process = Popen(
-        [str(x) for x in full_cmd],
+        args,
         stdin=PIPE if pipe_stdin else None,
         stdout=PIPE,
         stderr=PIPE,
@@ -362,9 +387,10 @@ def _start_process(
     )
     return ProcessStream(
         process,
-        [str(x) for x in full_cmd],
+        args,
         deadline=deadline,
         buffer_bytes=buffer_bytes,
+        raw_diagnostics=policy.raw_diagnostics,
     )
 
 

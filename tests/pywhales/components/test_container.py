@@ -822,7 +822,8 @@ sys.exit(1)
         with pytest.raises(DockerException) as err:
             for _ in ctr_client.run(image, stream=True, remove=True):
                 pass
-        assert "Something is wrong!" in str(err.value)
+        assert err.value.stderr is not None
+        assert "Something is wrong!" in err.value.stderr
 
 
 def test_container_repr(ctr_client: DockerClient) -> None:
@@ -894,7 +895,8 @@ sys.exit(1)
         with pytest.raises(DockerException) as err:
             for _ in container.start(attach=True, stream=True):
                 pass
-        assert "Something is wrong!" in str(err.value)
+        assert err.value.stderr is not None
+        assert "Something is wrong!" in err.value.stderr
 
 
 def test_remove_on_exit(ctr_client: DockerClient) -> None:

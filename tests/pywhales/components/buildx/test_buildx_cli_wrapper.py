@@ -492,8 +492,8 @@ def test_buildx_error(tmp_path: Path) -> None:
     with pytest.raises(DockerException) as e:
         docker.buildx.build(tmp_path)
 
-    assert "docker buildx build" in str(e.value)
-    assert str(tmp_path) in str(e.value)
+    assert e.value.docker_command[1:3] == ["buildx", "build"]
+    assert str(tmp_path) in e.value.docker_command
 
 
 @pytest.mark.usefixtures("with_docker_driver")

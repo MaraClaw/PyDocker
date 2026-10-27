@@ -104,32 +104,37 @@ def test_deploy_not_swarm_manager(docker_client: DockerClient) -> None:
             [PROJECT_ROOT / "tests/pywhales/components/test-stack-file.yml"],
         )
 
-    assert "not a swarm manager" in str(e.value).lower()
+    assert e.value.stderr is not None
+    assert "not a swarm manager" in e.value.stderr.lower()
 
 
 def test_ps_not_swarm_manager(docker_client: DockerClient) -> None:
     with pytest.raises(NotASwarmManager) as e:
         docker_client.stack.ps("dodo")
 
-    assert "not a swarm manager" in str(e.value).lower()
+    assert e.value.stderr is not None
+    assert "not a swarm manager" in e.value.stderr.lower()
 
 
 def test_list_not_swarm_manager(docker_client: DockerClient) -> None:
     with pytest.raises(NotASwarmManager) as e:
         docker_client.stack.list()
 
-    assert "not a swarm manager" in str(e.value).lower()
+    assert e.value.stderr is not None
+    assert "not a swarm manager" in e.value.stderr.lower()
 
 
 def test_remove_not_swarm_manager(docker_client: DockerClient) -> None:
     with pytest.raises(NotASwarmManager) as e:
         docker_client.stack.remove("dodo")
 
-    assert "not a swarm manager" in str(e.value).lower()
+    assert e.value.stderr is not None
+    assert "not a swarm manager" in e.value.stderr.lower()
 
 
 def test_services_not_swarm_manager(docker_client: DockerClient) -> None:
     with pytest.raises(NotASwarmManager) as e:
         docker_client.stack.services("dodo")
 
-    assert "not a swarm manager" in str(e.value).lower()
+    assert e.value.stderr is not None
+    assert "not a swarm manager" in e.value.stderr.lower()

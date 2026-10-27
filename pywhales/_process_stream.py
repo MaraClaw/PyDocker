@@ -31,12 +31,14 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         *,
         deadline: float | None = None,
         buffer_bytes: int | None = None,
+        raw_diagnostics: bool = False,
     ) -> None:
         self._process = process
         self._full_cmd = full_cmd
         self.stdin = process.stdin
         self._deadline = deadline
         self._buffer_bytes = buffer_bytes
+        self._raw_diagnostics = raw_diagnostics
         self._queue = StreamBuffer(buffer_bytes)
         self._stop = Event()
         self._released = Event()
@@ -95,7 +97,12 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
                 return
             stderr = bytes(self._stderr)
         self._fail(
-            get_docker_exception_type(stderr)(self._full_cmd, exit_code, stderr=stderr)
+            get_docker_exception_type(stderr)(
+                self._full_cmd,
+                exit_code,
+                stderr=stderr,
+                raw_diagnostics=self._raw_diagnostics,
+            )
         )
 
     def _read_pipe(self, pipe: IO[bytes], name: str) -> None:
@@ -223,6 +230,7 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
                     self._process.returncode,
                     self._timeout_stdout,
                     bytes(self._stderr),
+                    raw_diagnostics=self._raw_diagnostics,
                 )
             if error is not None:
                 raise error
@@ -257,7 +265,10 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         if exit_code != 0:
             stderr = bytes(self._stderr)
             raise get_docker_exception_type(stderr)(
-                self._full_cmd, exit_code, stderr=stderr
+                self._full_cmd,
+                exit_code,
+                stderr=stderr,
+                raw_diagnostics=self._raw_diagnostics,
             )
         raise StopIteration
 

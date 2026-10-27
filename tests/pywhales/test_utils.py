@@ -167,6 +167,26 @@ def test_buildx_mapped_stream_applies_client_budget_without_wrapper_override() -
     _assert_process_released(stream._stream)
 
 
+@pytest.mark.parametrize("raw", [False, True])
+def test_run_timeout_keeps_client_diagnostics_and_raw_output(raw: bool) -> None:
+    secret = "timeout-secret-sentinel"
+    config = ClientConfig(client_call=[sys.executable], raw_diagnostics=raw)
+
+    with pytest.raises(DockerTimeout) as raised:
+        pywhales.utils.run(
+            [
+                *config.docker_cmd,
+                "-c",
+                f"print({secret!r}, flush=True); __import__('threading').Event().wait()",
+            ],
+            input=b"",
+            timeout=0.5,
+        )
+
+    assert (secret in str(raised.value)) is raw
+    assert raised.value.stdout == secret + "\n"
+
+
 def test_mapped_client_stream_applies_backpressure_and_cancels_saturated_child() -> (
     None
 ):
@@ -191,6 +211,44 @@ def test_mapped_client_stream_applies_backpressure_and_cancels_saturated_child()
         stream.close()
 
         _assert_process_released(child)
+    finally:
+        stream.close()
+
+
+@pytest.mark.parametrize("raw", [False, True])
+@pytest.mark.parametrize("failure", ["natural", "owner", "timeout"])
+def test_stream_diagnostics_snapshot_client_policy_at_launch(
+    raw: bool, failure: str
+) -> None:
+    secret = "stream-secret-sentinel"
+    config = ClientConfig(client_call=[sys.executable], raw_diagnostics=raw)
+    action = "input()" if failure == "timeout" else "raise SystemExit(7)"
+    command = [
+        *config.docker_cmd,
+        "-c",
+        f"import sys; print({secret!r}, file=sys.stderr, flush=True); input(); {action}",
+    ]
+    stream = stream_stdout_and_stderr(
+        command, pipe_stdin=True, timeout=1 if failure == "timeout" else None
+    )
+    errors: list[OSError | BufferError | DockerException] = []
+    if failure == "owner":
+        stream._on_failure(errors.append)
+    config.raw_diagnostics = not raw
+    try:
+        assert next(stream) == ("stderr", (secret + "\n").encode())
+        assert stream.stdin is not None
+        stream.stdin.write(b"go\n")
+        stream.stdin.flush()
+        expected = DockerTimeout if failure == "timeout" else DockerException
+        with pytest.raises(expected) as raised:
+            list(stream)
+
+        assert (secret in str(raised.value)) is raw
+        assert raised.value.stderr == secret + "\n"
+        if failure == "owner":
+            assert errors == [raised.value]
+        _assert_process_released(stream)
     finally:
         stream.close()
 

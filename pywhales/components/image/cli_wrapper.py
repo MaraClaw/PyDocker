@@ -1070,7 +1070,8 @@ class ImageCLI(DockerCLICaller):
         try:
             return self.inspect(image)
         except DockerException:
-            print(f"Unable to find image '{image}' locally")
+            if self.client_config.raw_diagnostics:
+                print(f"Unable to find image '{image}' locally")
             return self.pull(image)
 
     def copy_from(

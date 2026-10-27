@@ -1586,9 +1586,7 @@ def test_pull_not_quiet_multiple_images_break(ctr_client: DockerClient) -> None:
 
     with pytest.raises(DockerException) as err:
         ctr_client.pull(images_names)
-    assert f"{ctr_client.client_config.client_call[0]} image pull hellstuff" in str(
-        err.value
-    )
+    assert err.value.docker_command[-3:] == ["image", "pull", "hellstuff"]
 
 
 def test_pull_stream_logs_multiple_images_break(ctr_client: DockerClient) -> None:
@@ -1600,9 +1598,7 @@ def test_pull_stream_logs_multiple_images_break(ctr_client: DockerClient) -> Non
         logs = ctr_client.pull(images_names, stream_logs=True)
         for _ in logs:
             pass
-    assert f"{ctr_client.client_config.client_call[0]} image pull hellstuff" in str(
-        err.value
-    )
+    assert err.value.docker_command[-3:] == ["image", "pull", "hellstuff"]
 
 
 def test_push_validation_error(ctr_client: DockerClient) -> None:
@@ -1704,7 +1700,8 @@ def test_no_such_image_inspect(ctr_client: DockerClient) -> None:
     with pytest.raises(NoSuchImage) as err:
         ctr_client.image.inspect(image_name_that_does_not_exists)
 
-    assert f"No such image: {image_name_that_does_not_exists}" in str(err.value)
+    assert err.value.stderr is not None
+    assert image_name_that_does_not_exists in err.value.stderr
 
 
 def test_no_such_image_remove(ctr_client: DockerClient) -> None:
@@ -1712,7 +1709,8 @@ def test_no_such_image_remove(ctr_client: DockerClient) -> None:
     with pytest.raises(NoSuchImage) as err:
         ctr_client.image.remove(image_name_that_does_not_exists)
 
-    assert f"No such image: {image_name_that_does_not_exists}" in str(err.value)
+    assert err.value.stderr is not None
+    assert image_name_that_does_not_exists in err.value.stderr
 
 
 def test_no_such_image_push(ctr_client: DockerClient) -> None:
@@ -1720,7 +1718,8 @@ def test_no_such_image_push(ctr_client: DockerClient) -> None:
     with pytest.raises(NoSuchImage) as err:
         ctr_client.push(image_name_that_does_not_exists)
 
-    assert f"No such image: {image_name_that_does_not_exists}" in str(err.value)
+    assert err.value.stderr is not None
+    assert image_name_that_does_not_exists in err.value.stderr
 
 
 def test_no_such_image_push_stream_logs(ctr_client: DockerClient) -> None:
@@ -1728,7 +1727,8 @@ def test_no_such_image_push_stream_logs(ctr_client: DockerClient) -> None:
     with pytest.raises(NoSuchImage) as err:
         ctr_client.push(image_name_that_does_not_exists, stream_logs=True)
 
-    assert f"No such image: {image_name_that_does_not_exists}" in str(err.value)
+    assert err.value.stderr is not None
+    assert image_name_that_does_not_exists in err.value.stderr
 
 
 def test_no_such_image_save(ctr_client: DockerClient) -> None:
@@ -1736,7 +1736,8 @@ def test_no_such_image_save(ctr_client: DockerClient) -> None:
     with pytest.raises(NoSuchImage) as err:
         ctr_client.image.save(image_name_that_does_not_exists, output="/tmp/dada")
 
-    assert f"No such image: {image_name_that_does_not_exists}" in str(err.value)
+    assert err.value.stderr is not None
+    assert image_name_that_does_not_exists in err.value.stderr
 
 
 def test_no_such_image_save_generator(ctr_client: DockerClient) -> None:
@@ -1745,7 +1746,8 @@ def test_no_such_image_save_generator(ctr_client: DockerClient) -> None:
         for _ in ctr_client.image.save(image_name_that_does_not_exists):
             pass
 
-    assert f"No such image: {image_name_that_does_not_exists}" in str(err.value)
+    assert err.value.stderr is not None
+    assert image_name_that_does_not_exists in err.value.stderr
 
 
 def test_no_such_image_tag(ctr_client: DockerClient) -> None:
@@ -1753,7 +1755,8 @@ def test_no_such_image_tag(ctr_client: DockerClient) -> None:
     with pytest.raises(NoSuchImage) as err:
         ctr_client.image.tag(image_name_that_does_not_exists, "something")
 
-    assert f"No such image: {image_name_that_does_not_exists}" in str(err.value)
+    assert err.value.stderr is not None
+    assert image_name_that_does_not_exists in err.value.stderr
 
 
 def test_exists(ctr_client: DockerClient) -> None:

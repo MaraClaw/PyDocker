@@ -408,53 +408,61 @@ def test_create_not_swarm_manager(docker_client: DockerClient) -> None:
     with pytest.raises(NotASwarmManager) as e:
         docker_client.service.create("busybox", ["sleep", "infinity"])
 
-    assert "not a swarm manager" in str(e.value).lower()
+    assert e.value.stderr is not None
+    assert "not a swarm manager" in e.value.stderr.lower()
 
 
 def test_inspect_not_swarm_manager(docker_client: DockerClient) -> None:
     with pytest.raises(NotASwarmManager) as e:
         docker_client.service.inspect("dodo")
 
-    assert "not a swarm manager" in str(e.value).lower()
+    assert e.value.stderr is not None
+    assert "not a swarm manager" in e.value.stderr.lower()
 
 
 def test_exists_not_swarm_manager(docker_client: DockerClient) -> None:
     with pytest.raises(NotASwarmManager) as e:
         docker_client.service.exists("dodo")
 
-    assert "not a swarm manager" in str(e.value).lower()
+    assert e.value.stderr is not None
+    assert "not a swarm manager" in e.value.stderr.lower()
 
 
 def test_list_not_swarm_manager(docker_client: DockerClient) -> None:
     with pytest.raises(NotASwarmManager) as e:
         docker_client.service.list()
 
-    assert "not a swarm manager" in str(e.value).lower()
+    assert e.value.stderr is not None
+    assert "not a swarm manager" in e.value.stderr.lower()
 
 
 def test_ps_not_swarm_manager(docker_client: DockerClient) -> None:
     with pytest.raises(NotASwarmManager) as e:
         docker_client.service.ps("dodo")
 
-    assert "not a swarm manager" in str(e.value).lower()
+    assert e.value.stderr is not None
+    assert "not a swarm manager" in e.value.stderr.lower()
 
 
 def test_remove_not_swarm_manager(docker_client: DockerClient) -> None:
     with pytest.raises(NotASwarmManager) as e:
         docker_client.service.remove("dodo")
 
-    assert "not a swarm manager" in str(e.value).lower()
+    assert e.value.stderr is not None
+    assert "not a swarm manager" in e.value.stderr.lower()
 
 
 def test_scale_not_swarm_manager(docker_client: DockerClient) -> None:
     with pytest.raises(NotASwarmManager) as e:
         docker_client.service.scale({"dodo": 8})
 
-    assert "not a swarm manager" in str(e.value).lower()
+    assert e.value.stderr is not None
+    assert "not a swarm manager" in e.value.stderr.lower()
 
 
 def test_update_not_swarm_manager(docker_client: DockerClient) -> None:
     with pytest.raises(NotASwarmManager) as e:
         docker_client.service.update("dodo", image="busybox")
 
-    assert "not a swarm manager" in str(e.value).lower()
+    assert e.value.stderr is not None
+    assert "not a swarm manager" in e.value.stderr.lower()

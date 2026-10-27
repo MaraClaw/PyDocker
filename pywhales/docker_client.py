@@ -165,6 +165,9 @@ class DockerClient(DockerCLICaller):
             records, and stderr history have separate limits, not a total-memory cap.
         image_stream_buffer_bytes: Independent pull/push budget. A non-`None`
             value overrides the general stream budget; `None` uses its current value.
+        raw_diagnostics: Include arbitrary command, environment, and captured-output
+            values in automatic diagnostics. Defaults to safe summaries. Enable
+            only on a troubleshooting client whose diagnostic output is trusted.
     """
 
     def __init__(

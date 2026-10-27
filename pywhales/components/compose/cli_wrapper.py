@@ -341,7 +341,8 @@ class ComposeCLI(DockerCLICaller):
         elif services is not None:
             full_cmd += to_list(services)
         if stream_logs:
-            print(full_cmd)
+            if self.client_config.raw_diagnostics:
+                print(full_cmd)
             return stream_stdout_and_stderr(full_cmd)
         else:
             run(full_cmd, capture_stdout=False)

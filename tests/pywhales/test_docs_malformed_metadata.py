@@ -1,3 +1,9 @@
+"""Provider cleanup contracts against malformed metadata from a fake CLI.
+
+Subprocess responses are patched rather than executed. Inventory and acquisition
+state distinguish owned resources from borrowed ones without a real daemon.
+"""
+
 import json
 from collections.abc import Callable, Sequence
 from subprocess import CompletedProcess
@@ -35,9 +41,14 @@ class RunOptions(TypedDict):
 
 
 class MalformedDocker:
-    """Model CLI acquisitions whose inspection remains invalid until removal."""
+    """Stateful fake CLI with acquisitions that retain malformed inspect metadata.
+
+    Mutable presence and command histories let tests distinguish successful
+    acquisitions, failed acquisition commands, borrowed state, and removal.
+    """
 
     def __init__(self, demo: Demo) -> None:
+        """Select the resource scenario and initialize empty command histories."""
         self.demo = demo
         self.present = False
         self.acquisition_fails = False
@@ -47,6 +58,18 @@ class MalformedDocker:
     def execute(
         self, args: list[str], **kwargs: Unpack[RunOptions]
     ) -> CompletedProcess[bytes]:
+        """Simulate a known CLI command and update acquisition or removal state.
+
+        Args:
+            args: Full command including the expected executable/context prefix.
+            **kwargs: Subprocess options accepted by the patched boundary.
+
+        Returns:
+            Byte-output CLI success or the configured acquisition failure result.
+
+        Raises:
+            AssertionError: If the command prefix or operation is unexpected.
+        """
         assert args[:3] == ["docker-docs", "--context", "docs-context"]
         command = args[3:]
         output = ""
@@ -127,6 +150,7 @@ class MalformedDocker:
 
 
 def expected_removal(demo: Demo) -> list[str]:
+    """Return the cleanup argv expected for the selected acquired resource."""
     match demo:
         case "containers":
             return ["container", "rm", "--force", "container-id"]

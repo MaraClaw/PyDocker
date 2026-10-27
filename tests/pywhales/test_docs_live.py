@@ -1,3 +1,9 @@
+"""Live-example rendering and ownership regressions using mocked Docker state.
+
+The daemon fixture mocks acquisitions, inventory, and context cleanup and rejects
+subprocess.run calls. Despite the filename, these are not live-daemon tests.
+"""
+
 from collections.abc import Callable
 from typing import Final
 from unittest.mock import MagicMock

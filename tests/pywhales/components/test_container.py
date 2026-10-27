@@ -1550,6 +1550,7 @@ def test_exec_detach_keys(run_mock: Mock) -> None:
         ],
         tty=False,
         pass_fds=(),
+        timeout=None,
     )
 
 
@@ -1905,6 +1906,7 @@ def test_run_default_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
         tty=False,
         capture_stderr=False,
         pass_fds=(),
+        timeout=None,
     )
 
 
@@ -1926,6 +1928,7 @@ def test_run_missing_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
         tty=False,
         capture_stderr=False,
         pass_fds=(),
+        timeout=None,
     )
 
 
@@ -1947,6 +1950,7 @@ def test_run_always_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
         tty=False,
         capture_stderr=False,
         pass_fds=(),
+        timeout=None,
     )
 
 
@@ -1975,6 +1979,7 @@ def test_run_never_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
         tty=False,
         capture_stderr=False,
         pass_fds=(),
+        timeout=None,
     )
 
 

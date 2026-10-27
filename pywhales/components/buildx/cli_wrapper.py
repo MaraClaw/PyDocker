@@ -39,6 +39,7 @@ from pywhales.utils import (
     run,
     stream_stdout_and_stderr,
     to_list,
+    validate_timeout,
 )
 
 type BakeResult = dict[str, dict[str, dict[str, JsonValue]]]
@@ -159,6 +160,7 @@ class BuildxCLI(DockerCLICaller):
         call: BuildxBuildCall | None = None,
         jobs: int | str | None = None,
         return_config: Literal[True] = True,
+        timeout: float | None = None,
     ) -> BakeResult: ...
 
     @overload
@@ -182,6 +184,7 @@ class BuildxCLI(DockerCLICaller):
         call: BuildxCall | None = None,
         jobs: int | str | None = None,
         return_config: bool = True,
+        timeout: float | None = None,
     ) -> MappedProcessStream[str]: ...
 
     @overload
@@ -205,6 +208,7 @@ class BuildxCLI(DockerCLICaller):
         call: BuildxBuildCall | None = None,
         jobs: int | str | None = None,
         return_config: Literal[False],
+        timeout: float | None = None,
     ) -> None: ...
 
     @overload
@@ -228,6 +232,7 @@ class BuildxCLI(DockerCLICaller):
         call: BuildxReportCall,
         jobs: int | str | None = None,
         return_config: bool = True,
+        timeout: float | None = None,
     ) -> str: ...
 
     @overload
@@ -251,6 +256,7 @@ class BuildxCLI(DockerCLICaller):
         call: BuildxCall | None = None,
         jobs: int | str | None = None,
         return_config: Literal[True] = True,
+        timeout: float | None = None,
     ) -> BakeResult | str: ...
 
     @overload
@@ -274,6 +280,7 @@ class BuildxCLI(DockerCLICaller):
         call: BuildxCall | None = None,
         jobs: int | str | None = None,
         return_config: Literal[False],
+        timeout: float | None = None,
     ) -> str | None: ...
 
     @overload
@@ -297,6 +304,7 @@ class BuildxCLI(DockerCLICaller):
         call: BuildxCall | None = None,
         jobs: int | str | None = None,
         return_config: bool = True,
+        timeout: float | None = None,
     ) -> MappedProcessStream[str]: ...
 
     def bake(
@@ -319,6 +327,7 @@ class BuildxCLI(DockerCLICaller):
         call: BuildxCall | None = None,
         jobs: int | str | None = None,
         return_config: bool = True,
+        timeout: float | None = None,
     ) -> BakeResult | str | MappedProcessStream[str] | None:
         """Bake is similar to make, it allows you to build things declared in a file.
 
@@ -390,6 +399,7 @@ class BuildxCLI(DockerCLICaller):
         config = docker.buildx.bake(["my_target1", "my_target2"], load=True, print=True)
         ```
         """
+        validate_timeout(timeout)
         report = call in ("check", "outline", "targets")
         if print and stream_logs:
             raise ValueError(
@@ -424,19 +434,22 @@ class BuildxCLI(DockerCLICaller):
         env = dict(variables)
         if print:
             return _BAKE_RESULT_ADAPTER.validate_json(
-                run([*full_cmd, *targets], env=env)
+                run([*full_cmd, *targets], env=env, timeout=timeout)
             )
         elif stream_logs:
-            return stream_buildx_logs([*full_cmd, *targets], env=env)
+            return stream_buildx_logs([*full_cmd, *targets], env=env, timeout=timeout)
         else:
             output = run(
-                [*full_cmd, *targets], capture_stderr=progress is False, env=env
+                [*full_cmd, *targets],
+                capture_stderr=progress is False,
+                env=env,
+                timeout=timeout,
             )
             if report:
                 return output
             if return_config:
                 return _BAKE_RESULT_ADAPTER.validate_json(
-                    run([*full_cmd, "--print", *targets], env=env)
+                    run([*full_cmd, "--print", *targets], env=env, timeout=timeout)
                 )
 
     @overload
@@ -473,6 +486,7 @@ class BuildxCLI(DockerCLICaller):
         call: BuildxBuildCall | None = None,
         no_cache_filter: str | Sequence[str] | None = None,
         annotations: str | Sequence[str] | None = None,
+        timeout: float | None = None,
     ) -> pywhales.components.image.cli_wrapper.Image | None: ...
 
     @overload
@@ -509,6 +523,7 @@ class BuildxCLI(DockerCLICaller):
         call: BuildxCall | None = None,
         no_cache_filter: str | Sequence[str] | None = None,
         annotations: str | Sequence[str] | None = None,
+        timeout: float | None = None,
     ) -> MappedProcessStream[str]: ...
 
     @overload
@@ -545,6 +560,7 @@ class BuildxCLI(DockerCLICaller):
         call: BuildxReportCall,
         no_cache_filter: str | Sequence[str] | None = None,
         annotations: str | Sequence[str] | None = None,
+        timeout: float | None = None,
     ) -> str: ...
 
     @overload
@@ -581,6 +597,7 @@ class BuildxCLI(DockerCLICaller):
         call: BuildxCall | None = None,
         no_cache_filter: str | Sequence[str] | None = None,
         annotations: str | Sequence[str] | None = None,
+        timeout: float | None = None,
     ) -> pywhales.components.image.cli_wrapper.Image | str | None: ...
 
     @overload
@@ -617,6 +634,7 @@ class BuildxCLI(DockerCLICaller):
         call: BuildxCall | None = None,
         no_cache_filter: str | Sequence[str] | None = None,
         annotations: str | Sequence[str] | None = None,
+        timeout: float | None = None,
     ) -> MappedProcessStream[str]: ...
 
     def build(
@@ -655,6 +673,7 @@ class BuildxCLI(DockerCLICaller):
         call: BuildxCall | None = None,
         no_cache_filter: str | Sequence[str] | None = None,
         annotations: str | Sequence[str] | None = None,
+        timeout: float | None = None,
     ) -> (
         pywhales.components.image.cli_wrapper.Image
         | str
@@ -747,6 +766,7 @@ class BuildxCLI(DockerCLICaller):
             calling `docker.build(...)`). Otherwise, `None`. Blocking report calls
             return captured text instead. Streaming returns an owned log stream.
         """
+        validate_timeout(timeout)
         tags = to_list(tags)
         full_cmd = Command([*self.docker_cmd, "buildx", "build"])
 
@@ -820,11 +840,11 @@ class BuildxCLI(DockerCLICaller):
                 )
 
             full_cmd.append(context_path)
-            return stream_buildx_logs(full_cmd)
+            return stream_buildx_logs(full_cmd, timeout=timeout)
 
         if call in ("check", "outline", "targets"):
             full_cmd.append(context_path)
-            return run(full_cmd, capture_stderr=progress is False)
+            return run(full_cmd, capture_stderr=progress is False, timeout=timeout)
 
         will_load_image = self._build_will_load_image(builder, push, load, output)
         driver = None
@@ -839,7 +859,7 @@ class BuildxCLI(DockerCLICaller):
 
         if not will_load_image:
             full_cmd.append(context_path)
-            run(full_cmd, capture_stderr=progress is False)
+            run(full_cmd, capture_stderr=progress is False, timeout=timeout)
             return
 
         docker_image = pywhales.components.image.cli_wrapper.ImageCLI(
@@ -847,7 +867,7 @@ class BuildxCLI(DockerCLICaller):
         )
         if driver != "docker":
             full_cmd.append(context_path)
-            run(full_cmd, capture_stderr=progress is False)
+            run(full_cmd, capture_stderr=progress is False, timeout=timeout)
             return docker_image.inspect(tags[0])
         else:
             with tempfile.TemporaryDirectory() as tmp_dir:
@@ -855,7 +875,7 @@ class BuildxCLI(DockerCLICaller):
                 iidfile = tmp_dir / "id_file.txt"
                 full_cmd.add_simple_arg("--iidfile", iidfile)
                 full_cmd.append(context_path)
-                run(full_cmd, capture_stderr=progress is False)
+                run(full_cmd, capture_stderr=progress is False, timeout=timeout)
                 image_id = iidfile.read_text()
                 return docker_image.inspect(image_id)
 
@@ -1106,10 +1126,13 @@ def format_dict_for_buildx(options: BuildxOptions) -> str:
 
 
 def stream_buildx_logs(
-    full_cmd: Sequence[object], env: Mapping[str, str] | None = None
+    full_cmd: Sequence[object],
+    env: Mapping[str, str] | None = None,
+    *,
+    timeout: float | None = None,
 ) -> MappedProcessStream[str]:
     """Decode Buildx output while retaining close and context ownership."""
-    stream = stream_stdout_and_stderr(full_cmd, env=env)
+    stream = stream_stdout_and_stderr(full_cmd, env=env, timeout=timeout)
     return MappedProcessStream(
         stream, (value.decode(errors="replace") for _, value in stream)
     )

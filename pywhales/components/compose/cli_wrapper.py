@@ -34,6 +34,7 @@ from pywhales.utils import (
     run,
     stream_stdout_and_stderr,
     to_list,
+    validate_timeout,
 )
 
 
@@ -52,6 +53,7 @@ class ComposeRunArgs(TypedDict, total=False, closed=True):
     user: str | None
     volumes: Iterable[pywhales.components.volume.cli_wrapper.VolumeDefinition]
     workdir: str | Path | None
+    timeout: float | None
 
 
 class ComposeCLI(DockerCLICaller):
@@ -943,6 +945,8 @@ class ComposeCLI(DockerCLICaller):
         user: str | None = None,
         volumes: Iterable[pywhales.components.volume.cli_wrapper.VolumeDefinition] = (),
         workdir: str | Path | None = None,
+        *,
+        timeout: float | None = None,
     ) -> (
         str
         | pywhales.components.container.cli_wrapper.Container
@@ -971,6 +975,8 @@ class ComposeCLI(DockerCLICaller):
         user: str | None = None,
         volumes: Iterable[pywhales.components.volume.cli_wrapper.VolumeDefinition] = (),
         workdir: str | Path | None = None,
+        *,
+        timeout: float | None = None,
     ) -> (
         str
         | pywhales.components.container.cli_wrapper.Container
@@ -1006,6 +1012,7 @@ class ComposeCLI(DockerCLICaller):
 
         """
 
+        validate_timeout(timeout)
         if detach and self.client_config.compose_dry_run:
             raise ValueError(
                 "Detached compose.run() cannot return a container in dry-run mode."
@@ -1052,9 +1059,9 @@ class ComposeCLI(DockerCLICaller):
         full_cmd += command
 
         if stream:
-            return stream_stdout_and_stderr(full_cmd)
+            return stream_stdout_and_stderr(full_cmd, timeout=timeout)
         else:
-            result = run(full_cmd, tty=tty)
+            result = run(full_cmd, tty=tty, timeout=timeout)
             if detach:
                 Container = pywhales.components.container.cli_wrapper.Container
                 return Container(self.client_config, result, is_immutable_id=True)

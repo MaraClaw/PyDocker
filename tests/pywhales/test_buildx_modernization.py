@@ -390,7 +390,10 @@ def test_streams_keep_process_ownership_and_skip_followups(
     call: buildx.BuildxCall | None,
 ) -> None:
     def start(
-        args: Sequence[str], env: Mapping[str, str] | None = None
+        args: Sequence[str],
+        env: Mapping[str, str] | None = None,
+        *,
+        timeout: float | None = None,
     ) -> ProcessStream:
         return stream_stdout_and_stderr(
             [
@@ -399,6 +402,7 @@ def test_streams_keep_process_ownership_and_skip_followups(
                 "import os, time; print(os.getenv('TAG', 'build'), flush=True); time.sleep(60)",
             ],
             env=env,
+            timeout=timeout,
         )
 
     blocked = mocker.patch(

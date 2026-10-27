@@ -1,3 +1,5 @@
+"""Identity-based association and validation of plural Swarm inspect output."""
+
 from collections import Counter
 from collections.abc import Sequence
 from typing import assert_never
@@ -32,11 +34,24 @@ def parse_swarm_inspect_results[InspectResultT: SwarmInspectResult](
     json_str: str,
     references: Sequence[str],
 ) -> list[tuple[str, InspectResultT]]:
-    """Validate response slots, then resolve references independently of their order.
+    """Validate and associate Swarm inspection results in request order.
 
     Unique slot labels keep the shared parser's positional duplicate check from
     associating repeated request references with unrelated reordered responses.
     Identity consistency and multiplicity are checked after reference resolution.
+
+    Args:
+        parser: Resource handle supplying the response model and diagnostic policy.
+        json_str: Captured JSON array from one plural Swarm inspect command.
+        references: Requested IDs, names, or ID prefixes, including duplicates.
+
+    Returns:
+        Identity and snapshot pairs in request order. Exact IDs take precedence
+        over exact names (hostnames for nodes), then unique ID prefixes.
+
+    Raises:
+        ParsingError: If response shape, identities, reference resolution, snapshot
+            consistency, or requested multiplicity is invalid.
     """
     results = parser._parse_inspect_results(
         json_str, [str(index) for index in range(len(references))]

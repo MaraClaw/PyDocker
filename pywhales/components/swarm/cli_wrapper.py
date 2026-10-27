@@ -1,3 +1,5 @@
+"""Docker CLI commands for Swarm membership, manager state, and join tokens."""
+
 from datetime import timedelta
 
 from pywhales.client_config import Command, DockerCLICaller
@@ -5,6 +7,8 @@ from pywhales.utils import ValidPath, run
 
 
 class SwarmCLI(DockerCLICaller):
+    """Swarm commands that can change daemon membership and expose access tokens."""
+
     def ca(
         self,
         ca_certificate: ValidPath | None = None,
@@ -14,19 +18,24 @@ class SwarmCLI(DockerCLICaller):
         external_ca: str | None = None,
         rotate: bool = False,
     ) -> str | None:
-        """Get and rotate the root CA
+        """Read or rotate the Swarm root certificate authority.
 
-        Parameters:
+        Args:
             ca_certificate: Path to the PEM-formatted root CA certificate
                 to use for the new cluster
             ca_key: Path to the PEM-formatted root CA key to use
                 for the new cluster
-            certificate_expiry: Validity period for node certificates
+            certificate_expiry: Node certificate validity in seconds, or None to
+                omit the option.
             detach: Exit immediately instead of waiting for the root rotation
                 to converge. The function will return `None`.
             external_ca: Specifications of one or more certificate signing endpoints
             rotate: Rotate the swarm CA - if no certificate or key are provided,
                 new ones will be generated.
+
+        Returns:
+            None when detach=True. Otherwise, certificate text from a second
+            swarm ca invocation after the requested operation completes.
         """
         full_cmd = Command([*self.docker_cmd, "swarm", "ca"])
 
@@ -59,28 +68,17 @@ class SwarmCLI(DockerCLICaller):
         If you need the token to join the new swarm from another node,
         use the [`docker.swarm.join_token`](#join_token) function.
 
-        A example of how to initialize the whole swarm without leaving the manager
-        if the manager has ssh access to the workers:
-        ```python
-        from pywhales import docker, DockerClient
+        This initializes the selected Docker daemon as a manager and changes its
+        cluster state. It requires a running daemon that can initialize a Swarm.
 
-        worker_docker = DockerClient(host="ssh://worker_linux_user@worker_hostname")
-        # Here the docker variable is connected to the local daemon
-        # worker_docker is a connected to the Docker daemon of the
-        # worker through ssh, useful to control it without login to the machine
-        # manually.
-        docker.swarm.init()
-        my_token = docker.swarm.join_token("worker")  # you can set manager too
-        worker_docker.swarm.join("manager_hostname:2377", token=my_token)
-        ```
-
-        Parameters:
+        Args:
             advertise_address: Advertised address (format: `<ip|interface>[:port]`)
             autolock: Enable manager autolocking (requiring an unlock key to start a
                 stopped manager)
             availability: Availability of the node ("active"|"pause"|"drain")
             data_path_address: Address or interface to use for data path
                 traffic (format is `<ip|interface>`)
+            data_path_port: UDP port for data-path traffic, or None to omit it.
             listen_address: address upon which the node listens for inbound
                 swarm manager traffic (format: `<ip|interface>[:port]`)
         """
@@ -102,9 +100,9 @@ class SwarmCLI(DockerCLICaller):
         listen_address: str | None = None,
         token: str | None = None,
     ) -> None:
-        """Joins a swarm
+        """Join the selected Docker daemon to a Swarm.
 
-        Parameters:
+        Args:
             manager_address: The address of the swarm manager in the format `"{ip}:{port}"`
             advertise_address: Advertised address (format: <ip|interface>[:port])
             availability: Availability of the node
@@ -126,14 +124,16 @@ class SwarmCLI(DockerCLICaller):
         run(full_cmd)
 
     def join_token(self, node_type: str, rotate: bool = False) -> str:
-        """Obtains a token to join the swarm
+        """Return a token for joining the Swarm.
 
-        This token can then be used
-        with `docker.swarm.join("manager:2377", token=my_token)`.
+        Join tokens grant access to the cluster; treat the returned text as confidential.
 
-        Parameters:
+        Args:
             node_type: `"manager"` or `"worker"`
-            rotate: Rotate join token
+            rotate: Rotate the selected role's token before reading it.
+
+        Returns:
+            The selected join token from Docker's quiet output.
         """
         full_cmd = Command([*self.docker_cmd, "swarm", "join-token", "--quiet"])
         full_cmd.add_flag("--rotate", rotate)
@@ -141,9 +141,9 @@ class SwarmCLI(DockerCLICaller):
         return run(full_cmd)
 
     def leave(self, force: bool = False) -> None:
-        """Leave the swarm
+        """Remove the selected Docker daemon from its Swarm.
 
-        Parameters:
+        Args:
             force: Force this node to leave the swarm, ignoring warnings
         """
         full_cmd = Command([*self.docker_cmd, "swarm", "leave"])
@@ -151,10 +151,11 @@ class SwarmCLI(DockerCLICaller):
         run(full_cmd)
 
     def unlock(self, key: str) -> None:
-        """Unlock a swarm after the `--autolock` parameter was used and
-        the daemon restarted.
+        """Unlock an autolocked Swarm manager after its daemon restarts.
 
-        Parameters:
+        The unlock key is sent to the CLI's standard input.
+
+        Args:
             key: The key to unlock the swarm. The key can be obtained on any manager
                 with `docker.swarm.unlock_key()`.
         """
@@ -162,10 +163,15 @@ class SwarmCLI(DockerCLICaller):
         run(full_cmd, input=key.encode("utf-8"))
 
     def unlock_key(self, rotate: bool = False) -> str:
-        """Gives you the key needed to unlock the swarm after a manager daemon reboot.
+        """Return the key needed to unlock an autolocked Swarm manager.
 
-        Parameters:
+        Treat the returned key as confidential.
+
+        Args:
             rotate: Rotate the unlock key.
+
+        Returns:
+            The unlock key from Docker's quiet output.
         """
         full_cmd = Command([*self.docker_cmd, "swarm", "unlock-key", "--quiet"])
         full_cmd.add_flag("--rotate", rotate)
@@ -181,17 +187,17 @@ class SwarmCLI(DockerCLICaller):
         snapshot_interval: int | None = None,
         task_history_limit: int | None = None,
     ) -> None:
-        """Update the swarm configuration
+        """Update the Swarm configuration.
 
-        Parameters:
-            autolock: Change manager autolocking setting
-            cert_expiry: Validity period for node certificates, default
-                is `datetime.timedelta(days=90)`. If `int`, it's a number of seconds.
-            dispatcher_heartbeat: Dispatcher heartbeat period.
-            external_ca: Specifications of one or more certificate signing endpoints
-            max_snapshots: Number of additional Raft snapshots to retain
-            snapshot_interval: Number of log entries between Raft snapshots (default 10000)
-            task_history_limit: Task history retention limit (default 5)
+        Args:
+            autolock: Enable or disable manager autolocking; None leaves it unchanged.
+            cert_expiry: Node certificate validity duration; None leaves it unchanged.
+            dispatcher_heartbeat: Dispatcher heartbeat duration; None leaves it unchanged.
+            external_ca: Certificate-signing endpoint specification. Currently
+                forwarded as --external-ci; None omits the option.
+            max_snapshots: Additional Raft snapshots to retain; None omits the option.
+            snapshot_interval: Log entries between Raft snapshots; None omits the option.
+            task_history_limit: Task history retention limit; None omits the option.
         """
         full_cmd = Command([*self.docker_cmd, "swarm", "update"])
         autolock_arg = format_bool_for_cli(autolock)
@@ -212,6 +218,7 @@ class SwarmCLI(DockerCLICaller):
 
 
 def format_bool_for_cli(flag: bool | None) -> str | None:
+    """Return lowercase Boolean text, or None when the option is omitted."""
     if flag is None:
         return
     return str(flag).lower()
@@ -220,6 +227,7 @@ def format_bool_for_cli(flag: bool | None) -> str | None:
 def stringify_timedelta_for_docker_cli(
     delta: int | timedelta | None,
 ) -> str | None:
+    """Format a duration in seconds with an s suffix, preserving None as omission."""
     if delta is None:
         return
 

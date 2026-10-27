@@ -1,9 +1,13 @@
 # Conditional async and Engine API experiment
 
-Status: Future (not approved or implemented)
+Status: Implemented (offline evidence-gated no-go; real trial blocked)
 
 Owner: SDK maintainer and performance operator
 Tier: P2, conditional on measurement
+
+## Implementation and validation
+
+The [decision implementation](../scripts/fleet_harness/experiment.py) returns a documented `no_go` without a qualified real material-overhead baseline or real binding/deadline adapter. The offline decision makes zero candidate launches or connections and retains the existing CLI route, including Compose and Buildx. See [decision tests](../tests/pywhales/test_transport_experiment.py), [CLI tests](../tests/pywhales/test_fleet_harness_cli.py), and the [user guide](../docs/template/user_guide/capacity_harness.md). No real baseline or candidate trial was launched for this decision; authorized real qualification remains blocked.
 
 ## Objective
 
@@ -11,7 +15,7 @@ Decide whether a narrowly scoped asynchronous CLI facade or persistent Engine
 API prototype merits further work, using comparable measured operations.
 A documented no-go is a valid final outcome.
 
-## Current evidence
+## Original evidence
 
 - [`run`](../pywhales/utils.py) executes local CLI commands synchronously and
   supports selected launch-based deadlines and local process cleanup.
@@ -93,7 +97,6 @@ guarantee and no supported persistent API implementation are promised.
 
 ## Future validation and decisions
 
-Use simulated contract comparisons before any authorized isolated endpoint run.
-This proposal performs no live experiment. Operators must define the workload,
+Simulated contract comparisons cannot authorize adoption. Operators must define the workload,
 materiality threshold, acceptable regression budget, versions and endpoint access;
-those choices block the go/no-go decision and any production adoption request.
+those choices and a qualified real adapter block a measured trial and any production adoption request.

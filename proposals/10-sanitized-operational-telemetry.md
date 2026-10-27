@@ -1,16 +1,20 @@
 # Sanitized operational telemetry
 
-Status: Future (not approved or implemented)
+Status: Implemented (optional sanitized telemetry; offline validation only)
 
 Owner: SDK maintainer and application observability operator
 Tier: P1
+
+## Implementation and validation
+
+The optional [telemetry package](../pywhales/telemetry/) supplies allowlisted execution records and a bounded application-owned exporter. It does not sanitize caller output or cover every subprocess path. See [telemetry tests](../tests/pywhales/test_telemetry.py), [observation tests](../tests/pywhales/test_telemetry_observation.py), [stream tests](../tests/pywhales/test_telemetry_streams.py), [exporter tests](../tests/pywhales/test_telemetry_exporter.py), and the [user guide](../docs/template/user_guide/telemetry.md). Production configuration and authorized deployment validation remain open.
 
 ## Objective
 
 Define an optional SDK metadata seam and application exporters that report
 operation health without exporting command arguments or workload output.
 
-## Current evidence
+## Original evidence
 
 - [`run`](../pywhales/utils.py) snapshots diagnostic policy and starts selected
   command deadlines at local launch.
@@ -82,7 +86,6 @@ per-resource metric series or claim of total process-memory accounting.
 
 ## Future validation and decisions
 
-Use local children and synthetic data first, then inspect exported records in an
-authorized isolated deployment. No exporter or live Docker action is run here.
+Local-child and synthetic-data tests cover the offline seam. Inspect exported records in a separately authorized isolated deployment.
 Operators must select approved aggregation, retention, queue limits and drop
 policy. These choices block a production telemetry configuration, not the seam.

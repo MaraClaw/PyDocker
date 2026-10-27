@@ -1,9 +1,13 @@
 # Representative capacity and failure harness
 
-Status: Future (not approved or implemented)
+Status: Implemented (offline fake-only harness; real execution and qualification blocked)
 
 Owner: performance maintainer and infrastructure operator
-Tier: P1, begin baseline before feature implementation
+Tier: P1, representative baseline remains outstanding
+
+## Implementation and validation
+
+The [fleet harness](../scripts/fleet_harness/) delivers simulated reports using an in-memory fake; real providers are rejected. See [harness tests](../tests/pywhales/test_fleet_harness.py), [CLI tests](../tests/pywhales/test_fleet_harness_cli.py), [report tests](../tests/pywhales/test_fleet_report.py), and the [user guide](../docs/template/user_guide/capacity_harness.md). Real execution is BLOCKED: an independently qualified endpoint-binding and deadline adapter and separately authorized disposable infrastructure are required. Authorized qualification and a real capacity envelope remain blocked, not available through this harness.
 
 ## Objective
 
@@ -11,7 +15,7 @@ Design a separately authorized harness that measures a declared workload on
 isolated infrastructure and reports failures as well as observed distributions.
 It must not manufacture a universal container count or target.
 
-## Current evidence
+## Original evidence
 
 - [`benchmark_docker_overhead.py`](../scripts/benchmark_docker_overhead.py)
   substitutes subprocess results and denies real process launches. Its timing is
@@ -94,8 +98,7 @@ performance target, capacity certification or production load test by default.
 
 ## Future validation and decisions
 
-Validate the dry-run and fake adapters first. Only an operator may authorize a
-later isolated real run and its individual fault scenarios. This document runs
-no workload or Docker command. The operator must choose representative workload,
+The offline harness validates fake scenarios only. An operator must authorize a
+later isolated real run and its individual fault scenarios after a real adapter is qualified. The operator must choose representative workload,
 topology, thresholds, sample design, privacy, acceptable results and test hosts;
 until then no capacity envelope or transport comparison can be approved.

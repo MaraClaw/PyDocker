@@ -1,16 +1,20 @@
 # Durable operation reconciliation
 
-Status: Future (not approved or implemented)
+Status: Implemented (optional reconciliation; offline validation only; durable backend unqualified)
 
 Owner: application controller maintainer and operator
 Tier: P1
+
+## Implementation and validation
+
+The optional [reconciliation package](../pywhales/reconciliation/) provides a `JournalStore` protocol, conditional transitions and lease-generation checks for reconciliation. Its `MemoryJournalStore` is a NONdurable conformance fake. A production durable backend must be supplied and qualified by the application; journal fencing cannot fence Docker itself. See the [store tests](../tests/pywhales/test_reconciliation_store.py), [recovery tests](../tests/pywhales/test_reconciliation_recovery.py), [controller tests](../tests/pywhales/test_reconciliation.py), and [user guide](../docs/template/user_guide/reconciliation.md). Live recovery qualification remains blocked.
 
 ## Objective
 
 Let an optional controller recover a named operation after interruption by
 combining a durable journal with observed inventory and explicit ownership.
 
-## Current evidence
+## Original evidence
 
 - [`StackCLI.deploy`](../pywhales/components/stack/cli_wrapper.py) returns after
   the deploy CLI exits and doesn't promise service convergence.
@@ -87,8 +91,7 @@ daemon fencing primitive or orchestrator replacement is included.
 
 ## Future validation and decisions
 
-Begin with fake stores and a simulated endpoint, then use a disposable authorized
-environment for restart and lost-response drills. Nothing live is run here.
+Fake-store and simulated-endpoint tests are available. Restart and lost-response drills require a disposable authorized environment and a qualified durable backend.
 The operator must choose store backend, durability and lease policy, spec
 canonicalization, retention and single-writer or coordination model. Those choices
 block production recovery guarantees and the supported failure envelope.

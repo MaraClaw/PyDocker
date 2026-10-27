@@ -1,16 +1,20 @@
 # Security and resource profiles
 
-Status: Future (not approved or implemented)
+Status: Implemented (opt-in policy; offline validation only; production qualification blocked)
 
 Owner: application platform security maintainer and operator
 Tier: P1
+
+## Implementation and validation
+
+The opt-in [profiles package](../pywhales/profiles/) validates and plans supported create requests before side effects, while direct SDK calls remain unchanged. See [profile tests](../tests/pywhales/test_profiles.py), [validation tests](../tests/pywhales/test_profiles_validation.py), [fixture tests](../tests/pywhales/test_profiles_fixtures.py), and the [user guide](../docs/template/user_guide/profiles.md). Effective runtime controls and isolation require separately authorized qualification; the policy is not daemon authorization.
 
 ## Objective
 
 Offer an opt-in application policy that validates deployment requests before
 side effects and translates an approved profile into existing container options.
 
-## Current evidence
+## Original evidence
 
 - [`ContainerCLI.create`](../pywhales/components/container/cli_wrapper.py) exposes
   image, user, capability, mount, network, CPU, memory, PID and logging options.
@@ -80,9 +84,9 @@ manage secrets as a vault, configure the daemon, or promise rootless parity.
 
 ## Future validation and decisions
 
-Use synthetic policy tests first. On an authorized disposable runtime, compare
+Synthetic policy tests cover the offline implementation. On an authorized disposable runtime, compare
 the effective identity, limits, mounts, network and log configuration with the
-approved profile, including rootless only if selected. No such run occurs here.
+approved profile, including rootless only if selected. That qualification remains blocked.
 Operators must choose threat model, allowed images and endpoints, resource and
 retention values, audit loss policy and supported platforms. Those decisions
 block a deployable profile and any isolation claim.

@@ -1,8 +1,8 @@
 # Fleet-readiness proposals
 
-Status: Proposal01 is implemented as an [offline contributor contract](../scripts/fleet_contract/README.md). Proposal02 is implemented as an opt-in SDK API with offline validation. Proposal03 is implemented as an opt-in application admission layer with offline validation. Proposals04, 05 and 06 are implemented locally with offline validation only; their live scenarios are blocked and support is not qualified. Proposals07-13 remain Future. Neither implementation nor offline validation approves live operation or certifies a supported fleet size.
+Status: Proposal01 is implemented as an [offline contributor contract](../scripts/fleet_contract/README.md). Proposal02 is implemented as an opt-in SDK API with offline validation. Proposal03 is implemented as an opt-in application admission layer with offline validation. Proposals04 through 11 have local implementations with offline validation; live qualification remains blocked. Proposal08 requires an application-supplied, qualified durable backend. Proposal12 delivers a fake-only harness, with real execution blocked. Proposal13 delivers an offline `no_go` decision, retaining the CLI path; a real trial is blocked. Neither implementation nor offline validation approves live operation or certifies a supported fleet size.
 
-This series translates the fleet research in `.omo/pywhales-fleet-research/RESEARCH.md` into separate implementation units, checked against the updated source on 2026-10-27. The research remains a historical record; its earlier negative findings are not automatically true of this checkout. Source symbols and named regression tests are the baseline, not a claim that tests were executed while drafting these documents.
+This series translates the fleet research in `.omo/pywhales-fleet-research/RESEARCH.md` into separate implementation units. The research and each proposal's original evidence remain historical records. The parent review reports 1,727 offline tests and 261 adjacent tests passed, with ty, Ruff, package and documentation builds passing. The full live integration suite was not run, and no live qualification is claimed.
 
 ## Foundations already implemented
 
@@ -19,7 +19,7 @@ These foundations are dependencies to preserve, not features to implement again.
 
 ## Proposal index
 
-01 has status **Implemented (offline contract only)**, 02 has status **Implemented (opt-in SDK API; offline validation only)**, 03 has status **Implemented (opt-in application layer; offline validation only)**, and 04, 05 and 06 have status **Implemented (offline validation only; live blocked)**; 07 through 13 remain **Future**. Real version/support, authority, workload and budget decisions remain open. Dependencies refer to implementation contracts, not document-writing order. An optional layer stays opt-in even after its proposal is implemented.
+01 is an implemented offline contract; 02 through 11 have implemented local behavior with offline validation. The 12 harness is fake-only, and 13 records `no_go` without real candidate launches or connections. Real execution, live qualification, version/support, authority, workload and budget decisions remain open. Dependencies refer to implementation contracts, not document-writing order. Optional layers remain opt-in.
 
 | ID | Proposal | Responsibility | Prerequisites |
 | --- | --- | --- | --- |
@@ -29,23 +29,22 @@ These foundations are dependencies to preserve, not features to implement again.
 | 04 | [Network IPAM, internal and IPv6 controls](04-network-ipam-internal-and-ipv6.md) | SDK; operator validates topology | 01 |
 | 05 | [Service rollout and rollback](05-service-rollout-and-rollback.md) | SDK | 01 |
 | 06 | [Legacy stack flag compatibility](06-stack-legacy-flag-compatibility.md) | SDK compatibility | 01 |
-| 07 | [Service and stack convergence](07-service-and-stack-convergence.md) | Opt-in SDK observation workflow | 02, 05, 06 |
-| 08 | [Durable operation reconciliation](08-durable-operation-reconciliation.md) | Optional application/controller | 02, 03, 07, 11 |
-| 09 | [Security and resource profiles](09-security-and-resource-profiles.md) | Operator policy; opt-in application validation | 01; existing diagnostic contracts |
-| 10 | [Sanitized operational telemetry](10-sanitized-operational-telemetry.md) | SDK metadata; optional exporters/controller | 01 |
-| 11 | [Storage ownership and retention](11-storage-ownership-and-retention.md) | Operator; optional application/controller | 01, 03, 09 |
-| 12 | [Representative capacity harness](12-representative-capacity-harness.md) | Maintainer/operator test infrastructure | 01 |
-| 13 | [Conditional async and API experiment](13-conditional-async-and-api-experiment.md) | Measured experiment | 10, 12; bottleneck evidence |
+| 07 | [Service and stack convergence](07-service-and-stack-convergence.md) | Opt-in observation; fake CLI tested | 02, 05, 06 |
+| 08 | [Durable operation reconciliation](08-durable-operation-reconciliation.md) | Optional journal and fenced reconciliation; memory fake is NONdurable | 02, 03, 07, 11 |
+| 09 | [Security and resource profiles](09-security-and-resource-profiles.md) | Opt-in application policy; runtime qualification blocked | 01; existing diagnostic contracts |
+| 10 | [Sanitized operational telemetry](10-sanitized-operational-telemetry.md) | Optional SDK metadata and bounded exporter | 01 |
+| 11 | [Storage ownership and retention](11-storage-ownership-and-retention.md) | Protective planning, pressure and approval protocols; no deletion executor | 01, 03, 09 |
+| 12 | [Representative capacity harness](12-representative-capacity-harness.md) | Offline fake-only harness; real adapter and qualification blocked | 01 |
+| 13 | [Conditional async and API experiment](13-conditional-async-and-api-experiment.md) | Offline evidence-gated `no_go`; real trial blocked | 10, 12; bottleneck evidence |
 
 ## Suggested implementation order
 
-1. Maintain and review 01's implemented offline version, workload, ownership and validation contracts. Resolve its owned operator/maintainer decisions before a real run rather than choosing arbitrary SLOs.
-2. Start 12 early to collect an authorized baseline. It does not require every other proposal; qualification scenarios are enabled as their feature contracts become available.
-3. Maintain 02, 03, 04, 05 and 06 and implement 09 and 10 as independent increments once their shared interfaces are agreed.
-4. Implement 07 after 02/05/06, and 11 after 03/09. Then implement optional 08 using those established contracts.
-5. Execute 13 only if the measured entry condition holds. A documented no-go completes the experiment; a persistent API backend or async rewrite is not an unconditional deliverable.
+1. Maintain the delivered offline contracts and resolve 01's operator and maintainer decisions before any real run.
+2. Qualify an application-supplied durable journal backend for 08 and the selected runtime, profile and storage providers for 09 and 11 on separately authorized infrastructure.
+3. Before a real baseline, independently qualify 12's missing endpoint-binding and deadline adapter and obtain authorization for disposable infrastructure and each scenario.
+4. Revisit 13 only after a representative real baseline meets the materiality entry condition and a real trial is authorized. The current `no_go` requires no new backend.
 
-The numbering groups topics; it is not a strict dependency order. In particular, 08 requires the ownership contract in 11, and 12 should begin before final feature qualification. There is no dependency cycle: 11 defines ownership and eligibility without requiring 08's durable journal.
+The numbering groups topics; it is not a strict dependency order. In particular, 08 uses the ownership contract in 11, while 11 defines ownership and eligibility without requiring 08's journal. An offline harness report is not a real baseline.
 
 ## Scope boundaries
 
@@ -64,4 +63,4 @@ No proposal permits automatic mutation retries after an ambiguous timeout, silen
 - Run relevant diagnostics, type contracts and tests. Run Docker integration scenarios only on authorized disposable infrastructure, with positive resource ownership and teardown receipts.
 - Update the proposal status and this index only after its own criteria pass. Report unexecuted infrastructure scenarios explicitly.
 
-These files are contributor proposals, not generated API documentation. Proposal01's offline contract adds contributor tooling only; proposal02 adds opt-in SDK behavior without a new dependency or live Docker workload. Independent maintainer/operator review is required for any qualification assertion.
+These files are contributor proposals, not generated API documentation. Independent maintainer/operator review is required for any qualification assertion.

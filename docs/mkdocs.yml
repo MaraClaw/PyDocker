@@ -91,6 +91,12 @@ nav:
     - Volumes: objects/volumes.md
   - User guide:
       - Bounded endpoint admission: user_guide/admission.md
+      - Service and stack convergence: user_guide/convergence.md
+      - Durable operation reconciliation: user_guide/reconciliation.md
+      - Security and resource profiles: user_guide/profiles.md
+      - Storage ownership and retention: user_guide/storage.md
+      - Sanitized operational telemetry: user_guide/telemetry.md
+      - Capacity harness and transport experiments: user_guide/capacity_harness.md
       - docker.run() guide: user_guide/docker_run.md
       - Build performance and measurement: user_guide/build_performance.md
       - Swarm generic resources: user_guide/generic_resources.md

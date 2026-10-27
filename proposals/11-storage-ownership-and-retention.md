@@ -1,9 +1,13 @@
 # Storage ownership and retention
 
-Status: Future (not approved or implemented)
+Status: Implemented (opt-in planning, pressure and approval protocols; offline validation only)
 
 Owner: application platform operator and controller maintainer
 Tier: P1
+
+## Implementation and validation
+
+The [storage package](../pywhales/storage/) provides protective retention planning, pressure checks and approval-store protocols with read-only rechecks. It has no deletion executor or durable approval backend. See [planning tests](../tests/pywhales/test_storage_planning.py), [pressure tests](../tests/pywhales/test_storage_pressure.py), [validation tests](../tests/pywhales/test_storage_validation.py), and the [user guide](../docs/template/user_guide/storage.md). Production qualification, including provider behavior and backup/restore drills, remains blocked.
 
 ## Objective
 
@@ -11,7 +15,7 @@ Define storage ownership, retention planning and pressure response so a future
 controller can identify protected data and stop expensive admission safely.
 This proposal delivers planning and pressure contracts, not automatic pruning.
 
-## Current evidence
+## Original evidence
 
 - [`SystemCLI.disk_free`](../pywhales/components/system/cli_wrapper.py) reports
   Docker category summaries with rounded bytes, not filesystem free bytes or
@@ -88,9 +92,9 @@ tenant authorization by label or unapproved backup/restore operation.
 
 ## Future validation and decisions
 
-Start with fake provider and inventory data. Later validate pressure and a
+Offline tests use fake provider and inventory data. Validate pressure and a
 backup/restore drill on explicitly authorized disposable storage, without pruning
-a shared host. No live action or deletion is performed here.
+a shared host, after separate authorization.
 Operators must select label authority, retention, approval, data provider,
 thresholds and backup standards. Those choices block production eligibility,
 pressure automation and any future destructive execution design.

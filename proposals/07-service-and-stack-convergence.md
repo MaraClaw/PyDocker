@@ -1,14 +1,18 @@
 # Service and stack convergence
 
-Status: Future (not approved or implemented)
+Status: Implemented (opt-in observation; offline validation only; live qualification blocked)
 Tier: P1. Owner: SDK maintainer and service operator.
+
+## Implementation and validation
+
+The opt-in [convergence package](../pywhales/convergence/) observes fixed service or stack targets without changing deploy, update or rollback behavior. [Offline tests](../tests/pywhales/test_convergence.py) include local fake CLI observations; the [user guide](../docs/template/user_guide/convergence.md) describes outcomes, deadlines and limitations. Running tasks do not prove application readiness. Authorized disposable Swarm qualification remains blocked and has not been performed.
 
 ## Objective
 
 Offer an opt-in observation workflow that reports Swarm service or stack
 convergence separately from the existing mutation commands.
 
-## Current evidence
+## Original evidence
 
 - [`StackCLI.deploy`](../pywhales/components/stack/cli_wrapper.py) returns a
   stack handle after the deploy CLI exits and explicitly does not guarantee task
@@ -92,8 +96,7 @@ or a replacement for explicit rollback decisions.
 
 ## Future validation and decisions
 
-Start with deterministic unit tests and local children for deadlines, stale
-tasks, cancellation, and cleanup. Separately authorize a disposable Swarm for
+Offline tests cover deadlines, stale tasks, cancellation and cleanup. Separately authorize a disposable Swarm for
 rolling-update, failed-update, and stack membership tests; remove owned stacks
 and services and verify teardown of any test-created Swarm state.
 

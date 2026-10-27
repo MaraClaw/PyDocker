@@ -1,3 +1,5 @@
+"""Docker daemon information, rounded disk summaries, and owned event streams."""
+
 import datetime
 import json
 from collections.abc import Mapping
@@ -19,6 +21,17 @@ from pywhales.utils import (
 
 
 class DiskFreeResult:
+    """Docker-reported disk usage grouped by resource kind.
+
+    Byte totals are derived from the CLI's rounded values, not exact daemon counts.
+
+    Attributes:
+        images: Image usage and reclaimable space.
+        containers: Container usage and reclaimable space.
+        volumes: Local volume usage and reclaimable space.
+        build_cache: Build-cache usage and reclaimable space.
+    """
+
     def __init__(self, cli_stdout: str) -> None:
         docker_items = {}
         for line in cli_stdout.splitlines():
@@ -43,27 +56,14 @@ class DiskFreeResult:
 
 
 class SystemCLI(DockerCLICaller):
+    """System commands using the configured CLI, daemon, and execution policy."""
+
     def disk_free(self) -> DiskFreeResult:
-        """Give information about the disk usage of the Docker daemon.
+        """Return the selected Docker daemon's disk usage summaries.
 
-        Returns a `pywhales.DiskFreeResult` object.
-
-        ```python
-        from pywhales import docker
-        disk_free_result = docker.system.disk_free()
-        print(disk_free_result.images.active)  #int
-        print(disk_free_result.containers.reclaimable)  # int, number of bytes
-        print(disk_free_result.volumes.reclaimable_percent)  # float
-        print(disk_free_result.build_cache.total_count)  # int
-        print(disk_free_result.build_cache.size)  # int, number of bytes
-        ...
-        ```
-        Note that the number are not 100% accurate because the docker CLI
-        doesn't provide the exact numbers.
-
-        Maybe in a future implementation, we can provide exact numbers.
-
-        Verbose mode is not yet implemented.
+        Returns:
+            Usage for images, containers, local volumes, and build cache. Byte
+            values reflect the CLI's rounding rather than exact daemon totals.
         """
 
         full_cmd = Command([*self.docker_cmd, "system", "df", "--format", "{{json .}}"])
@@ -77,50 +77,35 @@ class SystemCLI(DockerCLICaller):
         *,
         timeout: float | None = None,
     ) -> MappedProcessStream[DockerEvent]:
-        """Return docker events information up to the current point in time.
+        """Start a closeable stream of events from the selected Docker daemon.
 
-        If `until` is not specified, then the iterator returned is infinite.
+        The local CLI starts during this call, before iteration. Without until,
+        it continues waiting for events until closed, failed, or timed out.
         Use the stream as a context manager or call `close()` when stopping
         early. A bare loop break does not release the local CLI process.
-        For example
+        Closing only cancels this local CLI, not daemon-managed resources.
 
-        ```python
-        from pywhales import docker
-        from datetime import datetime, timedelta
+        Args:
+            since: Lower event time bound, or None to omit it.
+            until: Upper event time bound, or None to keep the subscription open.
+            filters: Docker event filter names and values; the default adds none.
+            timeout: Positive finite seconds for the local CLI, or None for no
+                deadline. Timing starts at launch and continues while iteration
+                pauses. Expiry kills and reaps the CLI while preserving captured
+                output; natural post-exit pipe draining is unchanged.
 
+        Returns:
+            An owned iterator mapping stdout JSON records to DockerEvent objects;
+            stderr is not yielded as events. It inherits the client's stream
+            buffer budget and retains transport ownership through mapping.
 
-        with docker.system.events() as events:
-            for event in events:
-                print("new event!")
-                print(event)
-
-        for event in docker.system.events(until=datetime.now() - timedelta(seconds=30)):
-            print("some past event")
-            print(event)
-            # this loop will end, unlike the previous one
-
-        for event in docker.system.events(until=datetime.now() + timedelta(seconds=30)):
-            print("some past event")
-            print(event)
-            # this loop will end in 30 seconds, even if there are no events at all
-
-        events = list(docker.system.events(filters={"container": "mycontainer"}, until=datetime.now()))
-        # the list of all events concerning the container "mycontainer"
-        ```
-
-        Parameters:
-            since:  Show all events created since timestamp
-            until: 	Stream events until this timestamp
-            filters: See the [Docker documentation page about filtering
-                ](https://docs.docker.com/engine/reference/commandline/events/#filtering).
-            timeout: Positive finite seconds for the local events CLI, or `None`.
-                Expiry raises `DockerTimeout` without stopping daemon resources or
-                changing post-exit pipe draining.
-        # Returns
-            A closeable iterator yielding DockerEvent objects from stdout.
-
-        [reference page for
-        system events](https://docs.docker.com/engine/api/v1.40/#operation/SystemEvents)
+        Raises:
+            ValueError: If timeout is a Boolean or is neither None nor a positive
+                finite number of seconds.
+            DockerTimeout: If the CLI exceeds its deadline, delivered during
+                iteration or clean context exit.
+            BufferError: If a record or retained stderr history exceeds the
+                configured stream buffer budget.
         """
         full_cmd = Command(
             [
@@ -147,26 +132,10 @@ class SystemCLI(DockerCLICaller):
         )
 
     def info(self) -> SystemInfo:
-        """Returns diverse information about the Docker client and daemon.
+        """Return Docker-reported client and daemon information.
 
-        # Returns
-            A `pywhales.SystemInfo` object
-
-        As an example
-
-        ```python
-        from pywhales import docker
-
-        info = docker.system.info()
-        print(info.images)
-        # 40
-        print(info.plugins.volume)
-        # ["local"}
-        ...
-        ```
-
-        You can find all attributes available by looking up the [reference page for
-        system info](https://docs.docker.com/engine/api/v1.40/#operation/SystemInfo).
+        Returns:
+            Parsed system information. Fields omitted by Docker remain None.
         """
         full_cmd = Command(
             [*self.docker_cmd, "system", "info", "--format", "{{json .}}"]
@@ -179,9 +148,9 @@ class SystemCLI(DockerCLICaller):
         volumes: bool = False,
         filters: Mapping[str, str] = MappingProxyType({}),
     ) -> None:
-        """Remove unused docker data
+        """Remove unused Docker data without a confirmation prompt.
 
-        Parameters:
+        Args:
             all: Remove all unused images not just dangling ones
             volumes: Prune volumes
             filters: See the [Docker documentation page about filtering

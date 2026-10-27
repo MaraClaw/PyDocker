@@ -15,7 +15,7 @@ from . import utils
 from ._execution_policy import PolicyExecutable
 from ._types import JsonObject
 from .enums import ClientTypeInput, ComposeProgressInput
-from .utils import ValidPath, run, to_list
+from .utils import ValidPath, to_list
 
 CACHE_VALIDITY_PERIOD: float = 0.01
 
@@ -346,14 +346,8 @@ class ReloadableObjectFromJson[InspectResultT, ReferenceT: str | None = str](
             ) from err
 
 
-def bulk_reload[InspectResultT, ReferenceT: str | None](
-    docker_objects: Sequence[ReloadableObjectFromJson[InspectResultT, ReferenceT]],
-) -> None:
-    assert len({x.client_config for x in docker_objects}) == 1
-    all_ids = [x._get_immutable_id() for x in docker_objects]
-    full_cmd = [*docker_objects[0].docker_cmd, "inspect", *all_ids]
-    json_str = run(full_cmd)
-    for json_obj, docker_object in zip(
-        json.loads(json_str), docker_objects, strict=False
-    ):
-        docker_object._set_inspect_result(docker_object._parse_json_object(json_obj))
+def bulk_reload(docker_objects: Sequence[object]) -> None:
+    """Stage namespace snapshots before refreshing any existing resource cache."""
+    from ._bulk_reload import bulk_reload as reload_snapshots
+
+    reload_snapshots(docker_objects)

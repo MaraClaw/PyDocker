@@ -26,7 +26,11 @@
   Both TTY plus streaming and detach plus streaming are invalid combinations.
 - `start()` streaming requires `attach=True` and a single container; attaching multiple
   containers is invalid. Unattached calls return `None`; attached, nonstreamed calls return `str`.
-- `ContainerCLI.logs()` inspects the container before starting its output stream.
+- `ContainerCLI.logs()`, its root alias `docker.logs()`, and `Container.logs()` accept keyword-only
+  `timeout` for the local logs launch; the handle still returns `str`. Inspect preflight runs outside
+  this deadline. Expiry raises `DockerTimeout` without stopping the container; post-exit draining is unchanged.
+- Logs use the originating client's general `stream_buffer_bytes` at the shared stream boundary,
+  including when collecting text. Keep the owned transport closed on collection/decoding failure.
   `follow=True` without `stream=True` can block until the container stops.
 
 ## Batch Inspection And Top
@@ -47,7 +51,7 @@ Paths below are relative to the repository root.
 - `tests/pywhales/components/test_container.py`: mocked top, batch inspection, cleanup races,
   eager-log decoding cleanup, and streaming-log ownership; also contains live component tests.
 - `tests/pywhales/test_container_image_enum_json.py`: mocked filter argv and enum/JSON snapshots.
-- `tests/pywhales/components/test_command_deadlines.py`: launch validation and output shapes.
-- `tests/pywhales/components/test_deadline_forwarding.py`: execution budgets and unbudgeted pulls.
-- `tests/pywhales/test_command_deadline_types.py`: static run/execute overloads and aliases.
+- `tests/pywhales/components/test_command_deadlines.py`: launch/log validation, partial output, reaping, and output shapes.
+- `tests/pywhales/components/test_deadline_forwarding.py`: execution/log budgets, handle/root aliases, and unbudgeted preflights.
+- `tests/pywhales/test_command_deadline_types.py`: static run/execute/log overloads, handle forwarding, and aliases.
 - `tests/pywhales/test_type_contracts.py`: static inspect and parsed/raw top return contracts.

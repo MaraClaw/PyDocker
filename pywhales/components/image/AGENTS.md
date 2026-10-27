@@ -17,6 +17,9 @@
 - `pull([])` returns `[]`, or an empty generator with `stream_logs=True`; no child CLI starts.
   `push([])` returns `None` even with streaming enabled. Preserve this asymmetry.
 - Push batch-inspects deduplicated references before starting any transfer, including streamed ones.
+- At public `pull()`/`push()` entry, select non-`None` `image_stream_buffer_bytes`, otherwise
+  `stream_buffer_bytes`, once before consuming references or running push preflight. Keep the
+  independent override unchanged; don't write the fallback into config.
 
 ## Multi-Image Streams
 
@@ -26,8 +29,9 @@
 - Records are `(image_reference, bytes)`; don't promise global ordering across images or pipes.
 - The first worker error stops sibling work and queued transfers without waiting for consumption.
   Deliver that original error once through iteration, including after explicit `close()`.
-- Forward the selected client's `image_stream_buffer_bytes` to child streams and the group.
-  A record exceeding the configured budget raises `BufferError`.
+- Snapshot the selected budget, including `None`, for the group queue and every eager, lazy, or queued
+  child stream. Later budget mutations affect new public operations only. Pass `None` explicitly at
+  the shared boundary so it stays unbounded. A record exceeding a configured budget raises `BufferError`.
 
 ## Inspection, Copy, And Archives
 
@@ -39,6 +43,10 @@
   returning a new `Image` with optional `new_tag`. Both forward `pull`, defaulting to `"missing"`.
 - `save()` rejects empty input and inspects references before saving. An output path returns `None`;
   omitted output returns an iterator of archive bytes. Don't treat it as a progress-log stream.
+- Path-based `load()` uses the general stream budget, not the pull/push override.
+  Direct archive load/save subprocesses snapshot `raw_diagnostics` before launch for failure rendering;
+  preserve archive payloads, exception classes, and raw attributes. Don't promise archive memory bounds.
+- Automatic missing-image reference diagnostics require `raw_diagnostics=True`; fallback behavior is unchanged.
 
 ## Test Navigation
 
@@ -48,6 +56,8 @@
   `test_multiple_image_stream_has_lazy_owned_lifecycle`,
   `test_multiple_image_stream_keeps_first_original_error`,
   `test_batch_inspect_image_aliases_and_typed_snapshot`.
+- The same file covers fallback/override snapshots before preflight, lazy queued children,
+  backpressure, path-load budgets, and safe/raw direct-archive failures.
 - The same component file covers copy policy forwarding with `test_copy_from_pull` and
   `test_copy_to_pull`; archive integration coverage includes `test_save_load` and
   `test_save_iterator_bytes`. Read fixtures before choosing daemon-free selections.

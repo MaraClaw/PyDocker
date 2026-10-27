@@ -20,6 +20,16 @@ All exceptions will have these 4 attributes:
 * stdout: the content that docker wrote to stdout, as a string, or `None`
 * stderr: the content that docker wrote to stderr, as a string, or `None`
 
+Automatic failure messages, debug printing, and logger records withhold command,
+environment, and captured-output values by default. Exception classes and exit
+codes remain available. The four attributes above still contain raw values;
+avoid logging them where they could expose credentials or application data.
+
+Use `DockerClient(raw_diagnostics=True)` on a separate troubleshooting client to
+enable detailed diagnostics. This also permits raw inspect-response dumps when
+model parsing fails. Returned payloads, uncaptured terminal output, and values
+you log yourself are not protected by this policy.
+
 ## Example
 
 ```python
@@ -31,5 +41,5 @@ client = DockerClient(compose_files=["/tmp/docker-compose.yml"])
 try:
     client.execute("my-service", ["arg1", "arg2"])
 except DockerException as e:
-    print(f"Exit code {e.return_code} while running {e.docker_command}")
+    print(f"Docker command failed with exit code {e.return_code}")
 ```

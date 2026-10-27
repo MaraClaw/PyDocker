@@ -113,7 +113,7 @@ def test_top_preserves_cells_when_docker_selects_columns(
     assert (result.headings, result.rows, result.raw_output) == (headings, rows, output)
     run_mock.assert_called_once_with(
         [
-            Path(sys.executable),
+            sys.executable,
             "engine",
             "--host",
             "ssh://host",

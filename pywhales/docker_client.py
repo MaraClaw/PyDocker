@@ -160,6 +160,11 @@ class DockerClient(DockerCLICaller):
             An explicit `compose.build(progress=...)` overrides this per call.
             New Compose options require a plugin version that supports them;
             PyWhales forwards them without version probes or fallback.
+        stream_buffer_bytes: Positive retained-output budget for each new owned
+            subprocess stream. `None` is unbounded. Queued output, unfinished
+            records, and stderr history have separate limits, not a total-memory cap.
+        image_stream_buffer_bytes: Independent pull/push budget. A non-`None`
+            value overrides the general stream budget; `None` uses its current value.
     """
 
     def __init__(
@@ -190,6 +195,8 @@ class DockerClient(DockerCLICaller):
         compose_parallel: int | None = None,
         compose_progress: ComposeProgressInput | None = None,
         image_stream_buffer_bytes: int | None = None,
+        stream_buffer_bytes: int | None = None,
+        raw_diagnostics: bool = False,
     ) -> None:
         if client_binary != "docker":
             warnings.warn(
@@ -224,6 +231,8 @@ class DockerClient(DockerCLICaller):
                 compose_parallel=compose_parallel,
                 compose_progress=compose_progress,
                 image_stream_buffer_bytes=image_stream_buffer_bytes,
+                stream_buffer_bytes=stream_buffer_bytes,
+                raw_diagnostics=raw_diagnostics,
             )
         super().__init__(client_config)
 

@@ -66,7 +66,7 @@ def test_top_uses_project_configuration_when_selecting_services(
     )
     run_mock.assert_called_once_with(
         [
-            Path(sys.executable),
+            sys.executable,
             "engine",
             "--context",
             "remote",

@@ -191,12 +191,14 @@ def test_constructor_retains_existing_positional_slots() -> None:
         ".",
         "--compatibility",
     ]
-    assert [field.name for field in fields(ClientConfig)][-5:] == [
+    assert [field.name for field in fields(ClientConfig)][-7:] == [
         "_client_call_with_path",
         "compose_dry_run",
         "compose_parallel",
         "compose_progress",
         "image_stream_buffer_bytes",
+        "stream_buffer_bytes",
+        "raw_diagnostics",
     ]
 
 

@@ -1,4 +1,5 @@
 import json
+import sys
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from datetime import datetime
@@ -10,8 +11,50 @@ import pytest
 from pytest_mock import MockerFixture
 
 from pywhales import Config, DockerClient, Node, Secret, Service, docker
+from pywhales._execution_policy import get_execution_policy
 from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.utils import PROJECT_ROOT
+
+
+@pytest.mark.parametrize("budget", [True, False, 0, -1, 1.5, "8", b"8"])
+def test_general_stream_budget_rejects_invalid_config_before_lookup(
+    budget: int | None,
+) -> None:
+    with patch("shutil.which") as lookup, pytest.raises(ValueError):
+        ClientConfig(stream_buffer_bytes=budget)
+
+    lookup.assert_not_called()
+
+
+@pytest.mark.parametrize("budget", [None, 1, 1024])
+def test_general_stream_budget_preserves_independent_image_override(
+    budget: int | None,
+) -> None:
+    config = ClientConfig(stream_buffer_bytes=budget)
+
+    assert config.stream_buffer_bytes == budget
+    assert config.image_stream_buffer_bytes is None
+    assert config.raw_diagnostics is False
+
+
+def test_docker_command_policy_does_not_replace_cached_executable_prefix() -> None:
+    config = ClientConfig(
+        client_call=[sys.executable, "engine"],
+        stream_buffer_bytes=17,
+        raw_diagnostics=True,
+    )
+    cached = config.get_client_call_with_path()
+
+    command = config.docker_cmd
+    command.append("version")
+    config.stream_buffer_bytes = 31
+
+    assert config.get_client_call_with_path() is cached
+    assert cached == [Path(sys.executable), "engine"]
+    assert isinstance(cached[0], Path)
+    assert isinstance(command[0], str)
+    assert get_execution_policy(command).stream_buffer_bytes == 31
+    assert get_execution_policy(command).raw_diagnostics is True
 
 
 @pytest.mark.parametrize("budget", [True, False, 0, -1, 1.5, "8", b"8"])

@@ -18,6 +18,42 @@ from pywhales.exceptions import DockerException
 
 
 @pytest.mark.parametrize("budget", [True, False, 0, -1, 1.5, "8", b"8"])
+def test_general_stream_budget_rejects_invalid_client_option_before_lookup(
+    budget: int | None,
+) -> None:
+    with patch("shutil.which") as lookup, pytest.raises(ValueError):
+        DockerClient(stream_buffer_bytes=budget)
+
+    lookup.assert_not_called()
+
+
+def test_execution_policy_uses_supplied_config_without_constructor_overrides() -> None:
+    config = ClientConfig(stream_buffer_bytes=17, raw_diagnostics=True)
+
+    client = DockerClient(
+        client_config=config, stream_buffer_bytes=0, raw_diagnostics=False
+    )
+
+    assert client.client_config is config
+    assert client.client_config.stream_buffer_bytes == 17
+    assert client.client_config.raw_diagnostics is True
+
+
+def test_execution_policy_is_isolated_when_clients_are_constructed() -> None:
+    safe = DockerClient(stream_buffer_bytes=31)
+    raw = DockerClient(stream_buffer_bytes=17, raw_diagnostics=True)
+    default = DockerClient()
+
+    safe.client_config.stream_buffer_bytes = 23
+
+    assert raw.client_config.stream_buffer_bytes == 17
+    assert raw.client_config.raw_diagnostics is True
+    assert safe.client_config.raw_diagnostics is False
+    assert default.client_config.stream_buffer_bytes is None
+    assert default.client_config.raw_diagnostics is False
+
+
+@pytest.mark.parametrize("budget", [True, False, 0, -1, 1.5, "8", b"8"])
 def test_image_stream_budget_rejects_invalid_client_option_before_lookup(
     budget: int | None,
 ) -> None:
@@ -78,7 +114,7 @@ def test_top_dispatches_process_listing_when_root_alias_is_used(run_mock: Mock) 
     assert result.rows == (("1", "sleep 60"),)
     run_mock.assert_called_once_with(
         [
-            Path(sys.executable),
+            sys.executable,
             "engine",
             "--context",
             "remote",
@@ -99,12 +135,8 @@ def test_stop_dispatch_is_unchanged_when_root_and_component_are_used(
     client.container.stop("second", time=1)
 
     assert run_mock.call_args_list == [
-        call(
-            [Path(sys.executable), "engine", "container", "stop", "--time", 0, "first"]
-        ),
-        call(
-            [Path(sys.executable), "engine", "container", "stop", "--time", 1, "second"]
-        ),
+        call([sys.executable, "engine", "container", "stop", "--time", 0, "first"]),
+        call([sys.executable, "engine", "container", "stop", "--time", 1, "second"]),
     ]
 
 

@@ -12,6 +12,7 @@ from typing import override
 import pydantic
 
 from . import utils
+from ._execution_policy import PolicyExecutable
 from ._types import JsonObject
 from .enums import ClientTypeInput, ComposeProgressInput
 from .utils import ValidPath, run, to_list
@@ -85,13 +86,16 @@ class ClientConfig:
     compose_parallel: int | None = None
     compose_progress: ComposeProgressInput | None = None
     image_stream_buffer_bytes: int | None = None
+    stream_buffer_bytes: int | None = None
+    raw_diagnostics: bool = False
 
     def __post_init__(self) -> None:
-        budget = self.image_stream_buffer_bytes
-        if budget is not None and (type(budget) is not int or budget <= 0):
-            raise ValueError(
-                "image_stream_buffer_bytes must be a positive integer or None"
-            )
+        for name, budget in (
+            ("image_stream_buffer_bytes", self.image_stream_buffer_bytes),
+            ("stream_buffer_bytes", self.stream_buffer_bytes),
+        ):
+            if budget is not None and (type(budget) is not int or budget <= 0):
+                raise ValueError(f"{name} must be a positive integer or None")
 
     def get_client_call_with_path(self) -> list[Path | str]:
         if self._client_call_with_path is None:
@@ -115,6 +119,7 @@ class ClientConfig:
     @property
     def docker_cmd(self) -> Command:
         result = Command(self.get_client_call_with_path())
+        result[0] = PolicyExecutable(str(result[0]), self)
 
         if self.config is not None:
             result += ["--config", self.config]

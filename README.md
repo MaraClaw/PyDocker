@@ -3,6 +3,7 @@
 ------------------------------------------------------------------------
 
 [![Run tests](https://github.com/MaraClaw/PyWhales/actions/workflows/python-package.yml/badge.svg)](https://github.com/MaraClaw/PyWhales/actions/workflows/python-package.yml)
+[![PyPI](https://img.shields.io/pypi/v/pywhales.svg)](https://pypi.org/project/pywhales/#description)
 [![Code style: Ruff](https://img.shields.io/badge/code%20style-Ruff-261230.svg)](https://docs.astral.sh/ruff/)
 [![Types: ty](https://img.shields.io/badge/types-ty-261230.svg)](https://docs.astral.sh/ty/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/MaraClaw/PyWhales/blob/HEAD/LICENSE)

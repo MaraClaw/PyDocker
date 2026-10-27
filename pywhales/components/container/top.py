@@ -11,6 +11,17 @@ def docker_top_fields(ps_args: Sequence[str]) -> tuple[str, ...] | None:
 
     Scalar options pass through unchanged. Headerless and implicit-column format
     extensions are available in raw mode only.
+
+    Args:
+        ps_args: Docker `ps` argument tokens to examine without executing them.
+
+    Returns:
+        Explicit field tokens in argument order, retaining heading aliases, or
+        `None` when no explicit field selection is present.
+
+    Raises:
+        TopParseError: A selection is headerless, implicit, missing, or contains
+            empty fields or headings and therefore requires raw output mode.
     """
     selections: list[str] = []
     arguments = iter(ps_args)

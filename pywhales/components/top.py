@@ -101,6 +101,18 @@ def parse_table(
     Explicit selections supply field identities independently of renamed headings.
     Unknown selected fields require raw mode, since their whitespace semantics are
     not known. Padding between scalar cells is not part of those cells.
+
+    Args:
+        output: CLI table text with headings followed by process rows.
+        fields: Explicit ps field selections, optionally with renamed headings.
+            None infers column semantics from the headings.
+
+    Returns:
+        Original headings and string cells in their output order.
+
+    Raises:
+        TopParseError: If headings, field selections, or row widths are unsupported
+            or ambiguous.
     """
     lines = [line for line in output.splitlines() if line.strip()]
     if not lines:
@@ -141,7 +153,18 @@ def parse_table(
 
 
 def parse_compose_top(output: str) -> ComposeTopResult:
-    """Retain either grouped container tables or the newer flat service table."""
+    """Parse grouped container tables or a flat Compose service table.
+
+    Args:
+        output: Captured Compose top output, including optional section separators.
+
+    Returns:
+        Sections in output order with the complete original text. Empty output
+        produces no sections; flat service tables have no container attribution.
+
+    Raises:
+        TopParseError: If a section name or process table has an unsupported layout.
+    """
     lines = output.splitlines()
     populated = [line for line in lines if line.strip()]
     if not populated:

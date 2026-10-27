@@ -1,3 +1,5 @@
+"""Typed Docker context metadata, endpoint, and local storage snapshots."""
+
 from typing import Annotated
 
 import pydantic

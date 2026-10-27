@@ -1,3 +1,9 @@
+"""Static contracts for resource, process, image, and Buildx return shapes.
+
+The ty check analyzes assert_type calls inside _check_* functions. Pytest does
+not collect or execute these functions; they are not runtime Docker examples.
+"""
+
 from collections.abc import Iterator
 from pathlib import Path
 from typing import assert_type

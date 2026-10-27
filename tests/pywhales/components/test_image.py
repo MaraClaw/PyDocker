@@ -1,3 +1,10 @@
+"""Image model, command, and streaming regressions with mixed runtime boundaries.
+
+The image_commands fixture substitutes real controllable Python children for
+Docker streams. Other integration cases use a real Docker daemon, pull or remove
+images, and require disposable daemon state.
+"""
+
 import contextlib
 import json
 import sys
@@ -28,6 +35,7 @@ from pywhales.utils import MappedProcessStream, ProcessStream, stream_stdout_and
 
 
 def _assert_image_process_released(stream: ProcessStream) -> None:
+    """Check that the child exited, reader threads stopped, and pipes closed."""
     assert stream._process.poll() is not None
     assert all(not thread.is_alive() for thread in stream._threads)
     assert all(
@@ -38,7 +46,14 @@ def _assert_image_process_released(stream: ProcessStream) -> None:
 
 
 class _ImageCommands:
+    """Controllable Python-child transport for image-stream ownership tests.
+
+    The supplied ExitStack owns children and patches. Mutable maps and events
+    track launches and completed closes; children wait for an exit status on stdin.
+    """
+
     def __init__(self, stack: contextlib.ExitStack) -> None:
+        """Attach transport state to the caller-owned cleanup stack."""
         self.stack = stack
         self.client = DockerClient()
         self.client.client_config._client_call_with_path = ["docker-test"]
@@ -52,6 +67,15 @@ class _ImageCommands:
     def start(
         self, command: Command, *, buffer_bytes: int | None = None
     ) -> ProcessStream:
+        """Start a stack-owned Python child for a patched image command.
+
+        Args:
+            command: Wrapper argv whose final argument names the child.
+            buffer_bytes: Output-buffer budget forwarded to the real stream.
+
+        Returns:
+            A running stream with piped stdin, also owned by the cleanup stack.
+        """
         name = str(command[-1])
         code = "import os, sys; "
         if self.output:
@@ -82,6 +106,16 @@ class _ImageCommands:
     def stream(
         self, operation: Literal["pull", "push"], names: list[str]
     ) -> MultiImageStream:
+        """Return an owned multi-image stream through the patched transport.
+
+        Args:
+            operation: Image operation to dispatch.
+            names: At least two distinct image references, passed in input order.
+
+        Returns:
+            A stream the caller must close or use as a context manager; the
+            fixture's cleanup stack separately owns any launched child streams.
+        """
         method = (
             self.client.image.pull if operation == "pull" else self.client.image.push
         )
@@ -90,18 +124,27 @@ class _ImageCommands:
         return result
 
     def finish(self, name: str, status: int = 0) -> None:
+        """Send an exit status to the named child's input without waiting for exit."""
         stdin = self.children[name].stdin
         assert stdin is not None
         stdin.write(f"{status}\n".encode())
         stdin.flush()
 
     def release_children(self) -> None:
+        """Close every currently recorded child stream."""
         for child in tuple(self.children.values()):
             child.close()
 
 
 @pytest.fixture
 def image_commands() -> Generator[_ImageCommands]:
+    """Yield a patched image transport and close its real children on teardown.
+
+    Inspection is mocked and stream launches use local Python, not Docker.
+
+    Yields:
+        Mutable transport controls whose children and patches belong to the fixture.
+    """
     with contextlib.ExitStack() as stack:
         commands = _ImageCommands(stack)
         stack.enter_context(

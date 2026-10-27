@@ -1,3 +1,9 @@
+"""Local image handles, registry transfers, and Docker archive operations.
+
+Commands use the configured Docker CLI and selected daemon. Progress streams and
+archive-byte iterators have different startup and cleanup contracts.
+"""
+
 from __future__ import annotations
 
 import builtins
@@ -71,6 +77,13 @@ type ImageListFilter = (
 
 
 class Image(ReloadableObjectFromJson[ImageInspectResult]):
+    """Reloadable local image handle retaining its originating configuration.
+
+    Inspection-backed properties may refresh through the Docker CLI. Using the
+    handle as a context manager opts into forced image removal on exit, even for
+    a pre-existing image; an already missing image is tolerated during cleanup.
+    """
+
     def __init__(
         self, client_config: ClientConfig, reference: str, is_immutable_id: bool = False
     ) -> None:
@@ -208,10 +221,20 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
     def save(self, output: ValidPath | None) -> Iterator[bytes] | None: ...
 
     def save(self, output: ValidPath | None = None) -> Iterator[bytes] | None:
-        """Saves this Docker image in a tar.
+        """Save this image as a Docker tar archive.
 
         See the [`docker.image.save`](../sub-commands/image.md#pywhales.components.image.cli_wrapper.ImageCLI.save) command for
         information about the arguments.
+
+        Args:
+            output: Archive path, or `None` to return archive bytes lazily.
+
+        Returns:
+            An archive-byte generator when `output=None`; otherwise `None` after
+            the save CLI completes. Inspection occurs during this call; the
+            generator starts its save subprocess on first iteration. Close it
+            when abandoning consumption to leave its subprocess context; cleanup
+            can wait for the CLI and is not ProcessStream cancellation.
         """
         return ImageCLI(self.client_config).save(self, output)
 
@@ -226,9 +249,15 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
     def copy_from(
         self, path_in_image: ValidPath, destination: ValidPath, pull: str = "missing"
     ) -> None:
-        """Copy a file from a docker image in the local filesystem.
+        """Copy files from this image to the local filesystem.
 
-        See the `docker.image.copy_from` command for information about the arguments.
+        The copy uses a temporary container that is removed on context exit.
+
+        Args:
+            path_in_image: Source path inside the image.
+            destination: Local destination path.
+            pull: Image acquisition policy, forwarded to container creation;
+                defaults to `"missing"`.
         """
         return ImageCLI(self.client_config).copy_from(
             self, path_in_image, destination, pull
@@ -241,24 +270,32 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
         new_tag: str | None = None,
         pull: str = "missing",
     ) -> Image:
-        """Copy a file from the local filesystem in a docker image to create a new
-        docker image.
+        """Copy local files into a temporary container and commit a new image.
 
-        As if you did a dockerfile with a COPY instruction.
+        The temporary container is removed on context exit. The resulting image
+        remains available; the original image is not modified.
 
-        See the `docker.image.copy_to` command for information about the arguments.
+        Args:
+            local_path: Local source path.
+            path_in_image: Destination path inside the new image.
+            new_tag: Optional tag applied when committing; `None` omits a tag.
+            pull: Image acquisition policy, forwarded to container creation;
+                defaults to `"missing"`.
+
+        Returns:
+            The committed image using the originating client configuration.
         """
         return ImageCLI(self.client_config).copy_to(
             self, local_path, path_in_image, new_tag, pull
         )
 
     def exists(self) -> bool:
-        """Returns `True` if the docker image exists and `False` if it doesn't exists.
+        """Return whether this image's immutable ID still exists in the daemon.
 
         Note that you might have done `docker.image.remove("some_tag")` and the image
-        might still exists because PyWhales references images by id, not by tag.
+        might still exist because PyWhales references images by ID, not by tag.
 
-         See the `docker.image.exists` command for information about the arguments.
+        Only a missing-image failure becomes `False`; other CLI failures propagate.
         """
         return ImageCLI(self.client_config).exists(self.id)
 
@@ -267,6 +304,8 @@ ValidImage = str | Image
 
 
 class ImageCLI(DockerCLICaller):
+    """Image commands sharing client configuration and Buildx build behavior."""
+
     def __init__(self, client_config: ClientConfig) -> None:
         super().__init__(client_config)
         self.build = pywhales.components.buildx.cli_wrapper.BuildxCLI(
@@ -274,7 +313,11 @@ class ImageCLI(DockerCLICaller):
         ).build
 
     def history(self) -> Never:
-        """Not yet implemented"""
+        """Raise NotImplementedError because image history is not implemented.
+
+        Raises:
+            NotImplementedError: This operation has no implementation.
+        """
         raise NotImplementedError
 
     def import_(
@@ -285,14 +328,19 @@ class ImageCLI(DockerCLICaller):
         message: str | None = None,
         platform: str | None = None,
     ) -> Image:
-        """Import the contents from a tarball to create a filesystem image
+        """Import a tarball's contents as a new filesystem image.
 
         Alias: `docker.import_(...)`
 
-        Parameters:
+        Args:
+            source: Archive path or source accepted by `docker image import`.
+            tag: Optional repository tag for the imported image.
             changes: Apply Dockerfile instruction to the created image
             message: Set commit message for imported image
             platform: Set platform if server is multi-platform capable
+
+        Returns:
+            The imported image, inspected using the originating configuration.
         """
         full_cmd = Command([*self.docker_cmd, "image", "import"])
         full_cmd.add_args_iterable("--change", changes)
@@ -310,15 +358,23 @@ class ImageCLI(DockerCLICaller):
     def inspect(self, x: Iterable[str]) -> builtins.list[Image]: ...
 
     def inspect(self, x: str | Iterable[str]) -> Image | builtins.list[Image]:
-        """Creates a `pywhales.Image` object.
+        """Inspect one or more local image references and return image handles.
 
-        # Returns
-            `pywhales.Image`, or `List[pywhales.Image]` if the input
-            was a list of strings.
+        Iterable input uses one batch inspection and validates every snapshot's
+        identity before returning handles with seeded inspection caches.
 
-        # Raises
-            `pywhales.exceptions.NoSuchImage` if one of the images does not exists.
+        Args:
+            x: A reference, or references in the desired result order. Tags,
+                digests, and IDs are accepted; an empty iterable skips the CLI.
 
+        Returns:
+            One image for a string, or a list preserving iterable order and
+            duplicates as separate handles. Empty iterable input returns `[]`.
+
+        Raises:
+            NoSuchImage: A requested image does not exist in the selected daemon.
+            ParsingError: Batch data cannot be validated or associated with its
+                requested image reference.
         """
         if isinstance(x, str):
             return Image(self.client_config, x)
@@ -366,13 +422,14 @@ class ImageCLI(DockerCLICaller):
         return images
 
     def exists(self, x: str) -> bool:
-        """Returns `True` if the image exists. `False` otherwise.
+        """Return whether a local image reference can be inspected.
 
-         It's just calling `docker.image.inspect(...)` and verifies that it doesn't throw
-         a `pywhales.exceptions.NoSuchImage`.
+        Args:
+            x: Image tag, digest, or ID in the selected daemon.
 
-        # Returns
-            A `bool`
+        Returns:
+            `False` only when inspection raises `NoSuchImage`; `True` on success.
+            Other CLI failures propagate.
         """
         try:
             self.inspect(x)
@@ -384,16 +441,23 @@ class ImageCLI(DockerCLICaller):
     def load(
         self, input: ValidPath | bytes | Iterator[bytes], quiet: bool = False
     ) -> builtins.list[str]:
-        """Loads one or multiple Docker image(s) from a tar or an iterator of `bytes`.
+        """Load images eagerly from an archive path or archive bytes.
 
         Alias: `docker.load(...)`
 
-        Parameters:
-            input: Path or input stream to load the images from.
-            quiet: If you don't want to display the progress bars.
+        Path input consumes a process-backed progress stream before returning.
+        Byte input is written to a local CLI's stdin and fully consumed during
+        the call. These archive bytes are not progress-log records.
 
-        # Returns
-            A `List[str]` of loaded image tags for both paths and byte streams.
+        Args:
+            input: Archive path, complete archive bytes, or an iterator of archive
+                byte chunks. Loading adds images and tags to the selected daemon.
+            quiet: Pass the CLI's quiet flag. For path input, also suppress
+                printing of decoded output records.
+
+        Returns:
+            Image tags or IDs extracted from `Loaded image` output lines, in
+            output order, for both paths and byte input.
         """
         full_cmd = Command([*self.docker_cmd, "image", "load"])
 
@@ -445,14 +509,20 @@ class ImageCLI(DockerCLICaller):
         filters: Iterable[ImageListFilter] | Mapping[str, Any] = (),
         all: bool = False,
     ) -> builtins.list[Image]:
-        """Returns the list of Docker images present on the machine.
+        """Return unique image IDs present in the selected Docker daemon.
 
         Alias: `docker.images()`
 
         Note that each image may have multiple tags.
 
-        # Returns
-            A `List[pywhales.Image]` object.
+        Args:
+            repository_or_tag: Optional CLI repository or tag selector.
+            filters: CLI filter pairs. Mapping input is accepted but deprecated.
+            all: Include intermediate images.
+
+        Returns:
+            One handle per distinct image ID, with unspecified order, retaining
+            the originating client configuration.
         """
         if isinstance(filters, Mapping):
             filter_items = filters.items()
@@ -491,9 +561,9 @@ class ImageCLI(DockerCLICaller):
         all: bool = False,
         filters: Iterable[ImageListFilter] | Mapping[str, Any] = (),
     ) -> str:
-        """Remove unused images
+        """Remove unused images without prompting.
 
-        Parameters:
+        Args:
             all: Remove all unused images, not just dangling ones
             filters: Provide filter values (e.g. `[("until", "<timestamp>")]`)
 
@@ -597,25 +667,41 @@ class ImageCLI(DockerCLICaller):
         stream_logs: bool = False,
         platform: str | None = None,
     ) -> Image | builtins.list[Image] | ImageStream | EmptyImageStream:
-        """Pull one or more docker image(s)
+        """Pull one or more image references into the selected Docker daemon.
 
         Alias: `docker.pull(...)`
 
-        Parameters:
-            x: Image name(s), can be a string or a list of strings.
-                In case a list is passed, multithreading is used to pull
-                the images.
+        Blocking transfers start during the call and use at most four workers
+        for multiple distinct references. Streaming one unique reference starts
+        its CLI before returning; streaming several starts up to four workers on
+        first consumption, not on construction or context entry.
+
+        Nonempty streams own their local CLIs. Exhaust them or use a context
+        manager or `close()` on early exit; a bare loop break does not close them.
+        Closing cancels local CLIs without undoing pulls or guaranteeing that
+        daemon-side transfers stop. The selected image/general stream budget is
+        snapshotted before consuming references and retained for queued children.
+
+        Args:
+            x: Image reference or iterable of references. Iterable references are
+                deduplicated in first-seen order before selecting transfer mode.
             quiet: If you don't want to see the progress bars.
-            stream_logs: If `False` this function returns the pulled image(s).
-                If `True`, this function returns an `Iterable` of `Tuple[str, bytes]`
-                where the first element corresponds to the image name that a pull is being done for.
-                The second element is the log statement related to pull progress, as `bytes`.
-                You'll need to call `.decode()` if you want the logs as `str`.
+            stream_logs: Return owned `(image_reference, bytes)` progress records
+                instead of waiting for transfers and returning image handles.
             platform: If you want to enforce a platform.
 
-        Nonempty streamed results own their local CLI processes. Use `close()`
-        or a context manager to cancel early; a bare loop break does not close
-        them. Empty streamed input returns an empty generator.
+        Returns:
+            One image for a string, or an ordered list for iterable input when
+            `stream_logs=False`, even for one unique reference. With streaming,
+            return an owned stream of `(image_reference, bytes)` progress records,
+            without global ordering across images or stdout/stderr. Empty
+            iterable input returns `[]`, or an empty generator when streaming.
+
+        Raises:
+            ValueError: `quiet=True` is combined with `stream_logs=True`.
+            DockerException: A transfer or subsequent image inspection fails.
+            BufferError: A streamed record or retained stderr exceeds the selected
+                byte budget. Multi-image failure also cancels sibling transfers.
         """
         if quiet and stream_logs:
             raise ValueError(
@@ -801,27 +887,41 @@ class ImageCLI(DockerCLICaller):
         quiet: bool = False,
         stream_logs: bool = False,
     ) -> ImageStream | None:
-        """Push a tag or a repository to a registry
+        """Push image references to a registry after local inspection.
 
         Alias: `docker.push(...)`
 
-        Parameters:
-            x: Tag(s) or repo(s) to push. Can be a string or an iterable of strings.
-                If it's an iterable, PyWhales will push all the images with
-                multiple threads.
+        References are deduplicated and batch-inspected before any transfer,
+        including streamed transfers. Blocking transfers start during the call
+        with at most four workers. One unique streamed reference starts eagerly;
+        several unique references start workers on first consumption, not on
+        construction or context entry.
+
+        Nonempty streams own their local CLIs. Exhaust them or use a context
+        manager or `close()` on early exit; a bare loop break does not close them.
+        Closing cancels local CLIs, not registry changes or daemon-side work. The
+        selected image/general stream budget is snapshotted before consuming
+        references or inspecting images and retained for queued children.
+
+        Args:
+            x: Tag or repository reference, or an iterable deduplicated in
+                first-seen order.
             quiet: Don't print anything.
-            stream_logs: If `False` this function returns None. If `True`, this
-                function returns an `Iterable` of `Tuple[str, bytes]` where the first element
-                corresponds to the image or repository name that a push is being done for.
-                The second element is the log statement related to push progress, as `bytes`.
-                You'll need to call `.decode()` if you want the logs as `str`.
+            stream_logs: Return owned `(image_reference, bytes)` progress records
+                instead of waiting for all transfers to complete.
 
-        Nonempty streamed results own their local CLI processes. Use `close()`
-        or a context manager to cancel early; a bare loop break does not close
-        them. Empty input returns `None`.
+        Returns:
+            An owned stream of `(image_reference, bytes)` progress records with
+            no global ordering across images or stdout/stderr when streaming.
+            Otherwise `None` after transfers complete. Empty iterable input
+            returns `None` in both modes, without starting a transfer CLI.
 
-        # Raises
-            `pywhales.exceptions.NoSuchImage` if one of the images does not exist.
+        Raises:
+            ValueError: `quiet=True` is combined with `stream_logs=True`.
+            NoSuchImage: A locally inspected reference does not exist.
+            DockerException: Inspection or a push command fails.
+            BufferError: A streamed record or retained stderr exceeds the selected
+                byte budget. Multi-image failure also cancels sibling transfers.
         """
         if quiet and stream_logs:
             raise ValueError(
@@ -932,15 +1032,14 @@ class ImageCLI(DockerCLICaller):
     ) -> None:
         """Remove one or more docker images.
 
-        Parameters:
+        Args:
             x: Single image or iterable of Docker images to remove. You can use tags or
                 `pywhales.Image` objects.
             force: Force removal of the image(s).
             prune: Delete untagged parents.
 
-        # Raises
-            `pywhales.exceptions.NoSuchImage` if one of the images does not exist.
-
+        Raises:
+            NoSuchImage: A selected image does not exist.
         """
         images = to_list(x)
         if x == []:
@@ -977,42 +1076,32 @@ class ImageCLI(DockerCLICaller):
         images: ValidImage | Iterable[ValidImage],
         output: ValidPath | None = None,
     ) -> Iterator[bytes] | None:
-        """Save one or more images to a tar archive. Returns a stream if output is `None`
+        """Save one or more images as a Docker tar archive.
 
         Alias: `docker.save(...)`
 
-        Parameters:
+        Inspection occurs eagerly before returning. An output path runs the save
+        CLI during the call; omitted output returns a generator whose save CLI
+        starts on first iteration. Exhaust or close that generator to leave its
+        subprocess context. Cleanup can wait for the CLI; it does not provide the
+        cancellation or buffer-budget guarantees of a progress ProcessStream.
+
+        Args:
             images: Single image or non-empty iterable of images to save.
             output: Path of the tar archive to produce. If `output` is None, a generator
                 of bytes is produced. It can be used to stream those bytes elsewhere,
                 to another Docker daemon for example.
 
-        # Returns
-            `Optional[Iterator[bytes]]`. If output is a path, nothing is returned.
+        Returns:
+            An iterator of archive-byte chunks when `output=None`; these are
+            archive payload, not `(source, bytes)` progress records. Otherwise
+            `None` after the local CLI completes.
 
-        # Raises
-            `pywhales.exceptions.NoSuchImage` if one of the images does not exist.
-
-        # Example
-
-        An example of transfer of an image from a local Docker daemon to a remote Docker
-        daemon. We assume that the remote machine has an ssh access:
-
-        ```python
-        from pywhales import DockerClient
-
-        local_docker = DockerClient()
-        remote_docker = DockerClient(host="ssh://my_user@186.167.32.84")
-
-        image_name = "busybox:1"
-        local_docker.pull(image_name)
-        bytes_iterator = local_docker.image.save(image_name)
-
-        remote_docker.image.load(bytes_iterator)
-        ```
-
-        Of course the best solution is to use a registry to transfer images, but
-        it's a cool example nonetheless.
+        Raises:
+            ValueError: No images were supplied.
+            NoSuchImage: A requested image does not exist.
+            DockerException: Inspection or the save command fails, with lazy save
+                failures delivered during iteration.
         """
         image_list = [images] if isinstance(images, (str, Image)) else list(images)
         if len(image_list) == 0:
@@ -1031,6 +1120,20 @@ class ImageCLI(DockerCLICaller):
             run(full_cmd)
 
     def _save_generator(self, full_cmd: Sequence[object]) -> Iterator[bytes]:
+        """Launch an archive export on first iteration and yield stdout bytes.
+
+        Args:
+            full_cmd: Complete Docker save arguments to stringify at launch.
+
+        Yields:
+            Archive-byte chunks from stdout, with no progress-record framing or
+            configured payload budget. Exhaustion or generator closure leaves
+            the subprocess context, which closes pipes and waits for the child.
+
+        Raises:
+            NoSuchImage: The save CLI reports a missing image.
+            DockerException: The save CLI exits unsuccessfully.
+        """
         raw_diagnostics = self.client_config.raw_diagnostics
         command = [str(argument) for argument in full_cmd]
         with Popen(command, stdout=PIPE, stderr=PIPE) as process:
@@ -1052,16 +1155,16 @@ class ImageCLI(DockerCLICaller):
                 )
 
     def tag(self, source_image: Image | str, new_tag: str) -> None:
-        """Adds a tag to a Docker image.
+        """Add a tag to a Docker image.
 
         Alias: `docker.tag(...)`
 
-        Parameters:
+        Args:
             source_image: The Docker image to tag. You can use a tag to reference it.
             new_tag: The tag to add to the Docker image.
 
-        # Raises
-            `pywhales.exceptions.NoSuchImage` if the image does not exist.
+        Raises:
+            NoSuchImage: The source image does not exist.
         """
         full_cmd = Command(
             [
@@ -1092,6 +1195,18 @@ class ImageCLI(DockerCLICaller):
         destination: ValidPath,
         pull: str = "missing",
     ) -> None:
+        """Copy files out of an image through a temporary container.
+
+        The temporary container is removed on context exit, including copy
+        failure. The source image is retained.
+
+        Args:
+            image: Source image handle or reference.
+            path_in_image: Source path inside the image.
+            destination: Local destination path.
+            pull: Image acquisition policy forwarded to container creation;
+                defaults to `"missing"`.
+        """
         with ContainerCLI(self.client_config).create(image, pull=pull) as tmp_container:
             tmp_container.copy_from(path_in_image, destination)
 
@@ -1103,6 +1218,22 @@ class ImageCLI(DockerCLICaller):
         new_tag: str | None = None,
         pull: str = "missing",
     ) -> Image:
+        """Copy local files into a temporary container and commit a new image.
+
+        The temporary container is removed on context exit; the original and
+        committed images are retained.
+
+        Args:
+            base_image: Source image handle or reference.
+            local_path: Local source path.
+            path_in_image: Destination path inside the new image.
+            new_tag: Optional tag for the committed image; `None` omits a tag.
+            pull: Image acquisition policy forwarded to container creation;
+                defaults to `"missing"`.
+
+        Returns:
+            The committed image using the originating client configuration.
+        """
         with ContainerCLI(self.client_config).create(
             base_image, pull=pull
         ) as tmp_container:

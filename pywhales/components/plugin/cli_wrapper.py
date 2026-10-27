@@ -4,7 +4,9 @@ import builtins
 import json
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType, TracebackType
-from typing import Any, Self, overload, override
+from typing import Self, overload, override
+
+from pydantic import JsonValue
 
 from pywhales.client_config import (
     ClientConfig,
@@ -18,7 +20,7 @@ from pywhales.components.plugin.models import (
     PluginInspectResult,
     PluginSettings,
 )
-from pywhales.utils import ValidPath, run, to_list
+from pywhales.utils import ValidPath, custom_parse_object_as, run, to_list
 
 
 class Plugin(ReloadableObjectFromJson[PluginInspectResult]):
@@ -40,13 +42,15 @@ class Plugin(ReloadableObjectFromJson[PluginInspectResult]):
             self.remove(force=True)
 
     @override
-    def _fetch_inspect_result_json(self, reference: str) -> dict[str, Any]:
+    def _fetch_inspect_result_json(self, reference: str) -> dict[str, JsonValue]:
         json_str = run([*self.docker_cmd, "plugin", "inspect", reference])
-        return json.loads(json_str)[0]
+        return custom_parse_object_as(dict[str, JsonValue], {**json.loads(json_str)[0]})
 
     @override
-    def _parse_json_object(self, json_object: dict[str, Any]) -> PluginInspectResult:
-        return PluginInspectResult(**json_object)
+    def _parse_json_object(
+        self, json_object: dict[str, JsonValue]
+    ) -> PluginInspectResult:
+        return PluginInspectResult.model_validate(json_object)
 
     @property
     def id(self) -> str:

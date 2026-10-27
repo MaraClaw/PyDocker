@@ -14,6 +14,8 @@ from typing import (
     override,
 )
 
+from pydantic import JsonValue
+
 import pywhales.components.container.cli_wrapper
 from pywhales.client_config import (
     ClientConfig,
@@ -28,8 +30,9 @@ from pywhales.components.network.models import (
     NetworkInspectResult,
     NetworkIPAM,
 )
+from pywhales.enums import ResourceScope, ResourceScopeInput
 from pywhales.exceptions import NoSuchNetwork
-from pywhales.utils import format_mapping_for_cli, run, to_list
+from pywhales.utils import custom_parse_object_as, format_mapping_for_cli, run, to_list
 
 type NetworkListFilter = (
     tuple[Literal["driver"], str]
@@ -37,7 +40,7 @@ type NetworkListFilter = (
     | tuple[Literal["label"], str]
     | tuple[Literal["label!"], str]
     | tuple[Literal["name"], str]
-    | tuple[Literal["scope"], Literal["swarm", "global", "local"]]
+    | tuple[Literal["scope"], ResourceScopeInput]
     | tuple[Literal["type"], Literal["custom", "builtin"]]
     | tuple[Literal["until"], str]
     | tuple[Literal["dangling"], str]
@@ -66,13 +69,15 @@ class Network(ReloadableObjectFromJson[NetworkInspectResult]):
                 return
 
     @override
-    def _fetch_inspect_result_json(self, reference: str) -> dict[str, Any]:
+    def _fetch_inspect_result_json(self, reference: str) -> dict[str, JsonValue]:
         json_str = run([*self.docker_cmd, "network", "inspect", reference])
-        return json.loads(json_str)[0]
+        return custom_parse_object_as(dict[str, JsonValue], {**json.loads(json_str)[0]})
 
     @override
-    def _parse_json_object(self, json_object: dict[str, Any]) -> NetworkInspectResult:
-        return NetworkInspectResult(**json_object)
+    def _parse_json_object(
+        self, json_object: dict[str, JsonValue]
+    ) -> NetworkInspectResult:
+        return NetworkInspectResult.model_validate(json_object)
 
     @property
     def name(self) -> str | None:
@@ -87,7 +92,7 @@ class Network(ReloadableObjectFromJson[NetworkInspectResult]):
         return self._get_inspect_result().created
 
     @property
-    def scope(self) -> str | None:
+    def scope(self) -> ResourceScope | str | None:
         return self._get_inspect_result().scope
 
     @property
@@ -119,7 +124,7 @@ class Network(ReloadableObjectFromJson[NetworkInspectResult]):
         return self._get_inspect_result().containers
 
     @property
-    def options(self) -> dict[str, Any] | None:
+    def options(self) -> dict[str, JsonValue] | None:
         return self._get_inspect_result().options
 
     @property
@@ -127,7 +132,7 @@ class Network(ReloadableObjectFromJson[NetworkInspectResult]):
         return self._get_inspect_result().labels
 
     @property
-    def config_from(self) -> dict[str, object] | None:
+    def config_from(self) -> dict[str, JsonValue] | None:
         return self._get_inspect_result().config_from
 
     @property

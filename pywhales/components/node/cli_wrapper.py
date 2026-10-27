@@ -5,7 +5,9 @@ import json
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any, assert_never, overload, override
+from typing import assert_never, overload, override
+
+from pydantic import JsonValue
 
 import pywhales.components.task.cli_wrapper
 from pywhales.client_config import (
@@ -23,7 +25,7 @@ from pywhales.components.node.models import (
     NodeStatus,
     NodeVersion,
 )
-from pywhales.utils import run, to_list
+from pywhales.utils import custom_parse_object_as, run, to_list
 
 
 class Node(ReloadableObjectFromJson[NodeInspectResult]):
@@ -33,13 +35,15 @@ class Node(ReloadableObjectFromJson[NodeInspectResult]):
         super().__init__(client_config, "id", reference, is_immutable_id)
 
     @override
-    def _fetch_inspect_result_json(self, reference: str) -> dict[str, Any]:
+    def _fetch_inspect_result_json(self, reference: str) -> dict[str, JsonValue]:
         json_str = run([*self.docker_cmd, "node", "inspect", reference])
-        return json.loads(json_str)[0]
+        return custom_parse_object_as(dict[str, JsonValue], {**json.loads(json_str)[0]})
 
     @override
-    def _parse_json_object(self, json_object: dict[str, Any]) -> NodeInspectResult:
-        return NodeInspectResult(**json_object)
+    def _parse_json_object(
+        self, json_object: dict[str, JsonValue]
+    ) -> NodeInspectResult:
+        return NodeInspectResult.model_validate(json_object)
 
     @property
     def id(self) -> str:

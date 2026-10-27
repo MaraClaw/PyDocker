@@ -43,6 +43,7 @@ from pywhales.components.container.models import (
 )
 from pywhales.components.container.top import docker_top_fields
 from pywhales.components.top import ContainerTopResult, parse_table
+from pywhales.enums import ContainerStatusInput, HealthStatusInput, IsolationInput
 from pywhales.exceptions import NoSuchContainer
 from pywhales.utils import (
     ProcessStream,
@@ -65,12 +66,7 @@ type ContainerListFilter = (
     | tuple[Literal["label"], str]
     | tuple[Literal["label!"], str]
     | tuple[Literal["exited"], int]
-    | tuple[
-        Literal["status"],
-        Literal[
-            "created", "restarting", "running", "removing", "paused", "exited", "dead"
-        ],
-    ]
+    | tuple[Literal["status"], ContainerStatusInput]
     | tuple[Literal["ancestor"], str]
     | tuple[Literal["before"], str]
     | tuple[Literal["since"], str]
@@ -78,8 +74,8 @@ type ContainerListFilter = (
     | tuple[Literal["network"], str]
     | tuple[Literal["publish"], str]
     | tuple[Literal["expose"], str]
-    | tuple[Literal["health"], Literal["starting", "healthy", "unhealthy", "none"]]
-    | tuple[Literal["isolation"], Literal["default", "process", "hyperv"]]
+    | tuple[Literal["health"], HealthStatusInput]
+    | tuple[Literal["isolation"], IsolationInput]
     | tuple[Literal["is-task"], str]
     | tuple[Literal["until"], str]
 )
@@ -126,13 +122,19 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
                 return
 
     @override
-    def _fetch_inspect_result_json(self, reference: str) -> dict[str, Any]:
+    def _fetch_inspect_result_json(
+        self, reference: str
+    ) -> dict[str, pydantic.JsonValue]:
         json_str = run([*self.docker_cmd, "container", "inspect", reference])
-        return json.loads(json_str)[0]
+        return custom_parse_object_as(
+            dict[str, pydantic.JsonValue], {**json.loads(json_str)[0]}
+        )
 
     @override
-    def _parse_json_object(self, json_object: dict[str, Any]) -> ContainerInspectResult:
-        return ContainerInspectResult(**json_object)
+    def _parse_json_object(
+        self, json_object: dict[str, pydantic.JsonValue]
+    ) -> ContainerInspectResult:
+        return ContainerInspectResult.model_validate(json_object)
 
     # ----------------------------------------------------------------
     # attributes taken from the json inspect result
@@ -177,7 +179,7 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         return self._get_inspect_result().log_path
 
     @property
-    def node(self) -> object:
+    def node(self) -> pydantic.JsonValue:
         return self._get_inspect_result().node
 
     @property
@@ -2495,7 +2497,7 @@ class ContainerCLI(DockerCLICaller):
 
 
 class ContainerStats:
-    def __init__(self, json_dict: dict[str, Any]) -> None:
+    def __init__(self, json_dict: dict[str, str]) -> None:
         """Takes a json_dict with container stats from the CLI and
         parses it.
         """

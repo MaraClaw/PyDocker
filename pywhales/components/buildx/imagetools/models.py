@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated
 
 import pydantic
 
@@ -37,4 +37,4 @@ class Manifest(pydantic.BaseModel):
     layers: list[ManifestLayer] | None = None
     manifests: list[ImageVariantManifest] | None = None
     config: ManifestConfig | None = None
-    annotations: dict[str, Any] | None = None
+    annotations: dict[str, pydantic.JsonValue] | None = None

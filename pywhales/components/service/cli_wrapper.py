@@ -15,6 +15,8 @@ from typing import (
     override,
 )
 
+from pydantic import JsonValue
+
 import pywhales.components.task.cli_wrapper
 from pywhales.client_config import (
     ClientConfig,
@@ -32,9 +34,11 @@ from pywhales.components.service.models import (
     ServiceUpdateStatus,
     ServiceVersion,
 )
+from pywhales.enums import RestartConditionInput
 from pywhales.exceptions import NoSuchService
 from pywhales.utils import (
     ValidPath,
+    custom_parse_object_as,
     format_mapping_for_cli,
     format_time_arg,
     run,
@@ -69,13 +73,15 @@ class Service(ReloadableObjectFromJson[ServiceInspectResult]):
             self.remove()
 
     @override
-    def _fetch_inspect_result_json(self, reference: str) -> dict[str, Any]:
+    def _fetch_inspect_result_json(self, reference: str) -> dict[str, JsonValue]:
         json_str = run([*self.docker_cmd, "service", "inspect", reference])
-        return json.loads(json_str)[0]
+        return custom_parse_object_as(dict[str, JsonValue], {**json.loads(json_str)[0]})
 
     @override
-    def _parse_json_object(self, json_object: dict[str, Any]) -> ServiceInspectResult:
-        return ServiceInspectResult(**json_object)
+    def _parse_json_object(
+        self, json_object: dict[str, JsonValue]
+    ) -> ServiceInspectResult:
+        return ServiceInspectResult.model_validate(json_object)
 
     @property
     def id(self) -> str:
@@ -203,7 +209,7 @@ class ServiceCLI(DockerCLICaller):
         limit_pids: int | None = None,
         log_driver: str | None = None,
         network: str | None = None,
-        restart_condition: Literal["none", "on-failure", "any"] | None = None,
+        restart_condition: RestartConditionInput | None = None,
         restart_max_attempts: int | None = None,
         secrets: builtins.list[dict[str, str]] | None = None,
         mounts: builtins.list[dict[str, str]] | None = None,

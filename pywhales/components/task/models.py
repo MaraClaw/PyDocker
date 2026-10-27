@@ -1,8 +1,9 @@
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated
 
 import pydantic
 
+from pywhales.enums import Isolation, RestartCondition, TaskState
 from pywhales.utils import DockerCamelModel
 
 
@@ -33,7 +34,7 @@ class ContainerStatus(DockerCamelModel):
 
 class TaskStatus(DockerCamelModel):
     timestamp: datetime | None = None
-    state: str | None = None
+    state: TaskState | str | None = None
     message: str | None = None
     err: str | None = None
     container_status: ContainerStatus | None = None
@@ -67,7 +68,7 @@ class Placement(DockerCamelModel):
 
 
 class RestartPolicy(DockerCamelModel):
-    condition: str | None = None
+    condition: RestartCondition | str | None = None
     delay: int | None = None
     max_attempts: int | None = None
     window: int | None = None
@@ -96,21 +97,21 @@ class ContainerSpec(DockerCamelModel):
     dir: str | None = None
     user: str | None = None
     groups: list[str] | None = None
-    privileges: Any = None
+    privileges: pydantic.JsonValue = None
     tty: Annotated[bool | None, pydantic.Field(alias="TTY")] = None
     open_stdin: bool | None = None
     read_only: bool | None = None
-    mounts: list[Any] | None = None
+    mounts: list[pydantic.JsonValue] | None = None
     stop_signal: str | None = None
     stop_grace_period: int | None = None
-    health_check: Any = None
+    health_check: pydantic.JsonValue = None
     hosts: list[str] | None = None
-    dns_config: Any = None
-    secrets: list[Any] | None = None
-    configs: list[Any] | None = None
-    isolation: str | None = None
+    dns_config: pydantic.JsonValue = None
+    secrets: list[pydantic.JsonValue] | None = None
+    configs: list[pydantic.JsonValue] | None = None
+    isolation: Isolation | str | None = None
     init: bool | None = None
-    sysctls: Any | None = None
+    sysctls: pydantic.JsonValue = None
 
 
 class NetworkAttachmentSpec(DockerCamelModel):
@@ -129,12 +130,11 @@ class Resources(DockerCamelModel):
 
 
 class TaskSpec(DockerCamelModel):
-    # TODO: set types for Any
     plugin_spec: PluginSpec | None = None
     container_spec: ContainerSpec | None = None
     network_attachment_spec: NetworkAttachmentSpec | None = None
     resources: Resources | None = None
-    restart_policy: Any = None
+    restart_policy: pydantic.JsonValue = None
     placement: Placement | None = None
     force_update: int | None = None
     runtime: str | None = None
@@ -155,4 +155,4 @@ class TaskInspectResult(DockerCamelModel):
     node_id: Annotated[str | None, pydantic.Field(alias="NodeID")] = None
     assigned_generic_resources: list[AssignedGenericResources] | None = None
     status: TaskStatus | None = None
-    desired_state: str | None = None
+    desired_state: TaskState | str | None = None

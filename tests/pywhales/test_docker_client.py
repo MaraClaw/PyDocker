@@ -209,7 +209,9 @@ def test_docker_client_options(docker_client: DockerClient) -> None:
         network_settings = engine.network_settings
         assert network_settings is not None
         assert network_settings.ports is not None
-        binding = PortBinding.model_validate(network_settings.ports["2375/tcp"][0])
+        bindings = network_settings.ports["2375/tcp"]
+        assert isinstance(bindings, list)
+        binding = PortBinding.model_validate(bindings[0])
         assert binding.host_ip == "127.0.0.1"
         assert binding.host_port is not None
         endpoint = f"tcp://127.0.0.1:{binding.host_port}"

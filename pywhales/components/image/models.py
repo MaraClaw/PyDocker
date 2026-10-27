@@ -1,5 +1,6 @@
 from datetime import datetime
-from typing import Any
+
+from pydantic import JsonValue
 
 import pywhales.components.container.models
 from pywhales.utils import DockerCamelModel
@@ -15,7 +16,7 @@ class ImageHealthcheck(DockerCamelModel):
 
 class ImageGraphDriver(DockerCamelModel):
     name: str | None = None
-    data: Any = None
+    data: JsonValue = None
 
 
 class ImageRootFS(DockerCamelModel):

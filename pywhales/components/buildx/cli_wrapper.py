@@ -28,6 +28,10 @@ from pywhales.client_config import (
 from pywhales.components._cleanup import resource_cleanup
 from pywhales.components.buildx.imagetools.cli_wrapper import ImagetoolsCLI
 from pywhales.components.buildx.models import BuilderInspectResult, BuilderNode
+from pywhales.enums import BuildxBuildCall
+from pywhales.enums import BuildxCall as BuildxCall
+from pywhales.enums import BuildxProgress as BuildxProgress
+from pywhales.enums import BuildxReportCall as BuildxReportCall
 from pywhales.utils import (
     MappedProcessStream,
     ValidPath,
@@ -39,9 +43,6 @@ from pywhales.utils import (
 
 type BakeResult = dict[str, dict[str, dict[str, JsonValue]]]
 type BuildxOptions = Mapping[str, str | Path]
-type BuildxProgress = Literal["auto", "none", "plain", "quiet", "rawjson", "tty", False]
-type BuildxCall = Literal["build", "check", "outline", "targets"]
-type BuildxReportCall = Literal["check", "outline", "targets"]
 _BAKE_RESULT_ADAPTER: Final = TypeAdapter(BakeResult)
 
 
@@ -155,7 +156,7 @@ class BuildxCLI(DockerCLICaller):
         stream_logs: Literal[False] = False,
         remote_definition: str | None = None,
         *,
-        call: Literal["build"] | None = None,
+        call: BuildxBuildCall | None = None,
         jobs: int | str | None = None,
         return_config: Literal[True] = True,
     ) -> BakeResult: ...
@@ -201,7 +202,7 @@ class BuildxCLI(DockerCLICaller):
         stream_logs: Literal[False] = False,
         remote_definition: str | None = None,
         *,
-        call: Literal["build"] | None = None,
+        call: BuildxBuildCall | None = None,
         jobs: int | str | None = None,
         return_config: Literal[False],
     ) -> None: ...
@@ -306,9 +307,7 @@ class BuildxCLI(DockerCLICaller):
         load: bool = False,
         cache: bool = True,
         print: bool = False,
-        progress: Literal[
-            "auto", "none", "plain", "quiet", "rawjson", "tty", False
-        ] = "auto",
+        progress: BuildxProgress = "auto",
         pull: bool = False,
         push: bool = False,
         set: Mapping[str, str] = MappingProxyType({}),
@@ -471,7 +470,7 @@ class BuildxCLI(DockerCLICaller):
         target: str | None = None,
         stream_logs: Literal[False] = False,
         *,
-        call: Literal["build"] | None = None,
+        call: BuildxBuildCall | None = None,
         no_cache_filter: str | Sequence[str] | None = None,
         annotations: str | Sequence[str] | None = None,
     ) -> pywhales.components.image.cli_wrapper.Image | None: ...
@@ -640,9 +639,7 @@ class BuildxCLI(DockerCLICaller):
         network: str | None = None,
         output: BuildxOptions = MappingProxyType({}),
         platforms: builtins.list[str] | None = None,
-        progress: Literal[
-            "auto", "none", "plain", "quiet", "rawjson", "tty", False
-        ] = "auto",
+        progress: BuildxProgress = "auto",
         provenance: bool | dict[str, str] | None = None,
         pull: bool = False,
         push: bool = False,

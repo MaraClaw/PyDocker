@@ -8,6 +8,8 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Self, overload, override
 
+from pydantic import JsonValue
+
 from pywhales.client_config import (
     ClientConfig,
     Command,
@@ -20,7 +22,7 @@ from pywhales.components.context.models import (
     ContextInspectResult,
     ContextStorage,
 )
-from pywhales.utils import run, to_list
+from pywhales.utils import custom_parse_object_as, run, to_list
 
 
 class Context(ReloadableObjectFromJson[ContextInspectResult, str | None]):
@@ -45,23 +47,25 @@ class Context(ReloadableObjectFromJson[ContextInspectResult, str | None]):
             self.remove(force=True)
 
     @override
-    def _fetch_inspect_result_json(self, reference: str | None) -> dict[str, Any]:
+    def _fetch_inspect_result_json(self, reference: str | None) -> dict[str, JsonValue]:
         full_cmd = Command([*self.docker_cmd, "context", "inspect"])
         if reference is not None:
             full_cmd.append(reference)
         json_str = run(full_cmd)
-        return json.loads(json_str)[0]
+        return custom_parse_object_as(dict[str, JsonValue], {**json.loads(json_str)[0]})
 
     @override
-    def _parse_json_object(self, json_object: dict[str, Any]) -> ContextInspectResult:
-        return ContextInspectResult(**json_object)
+    def _parse_json_object(
+        self, json_object: dict[str, JsonValue]
+    ) -> ContextInspectResult:
+        return ContextInspectResult.model_validate(json_object)
 
     @property
     def name(self) -> str | None:
         return self._get_immutable_id()
 
     @property
-    def metadata(self) -> dict[str, object] | None:
+    def metadata(self) -> dict[str, JsonValue] | None:
         return self._get_inspect_result().metadata
 
     @property
@@ -69,7 +73,7 @@ class Context(ReloadableObjectFromJson[ContextInspectResult, str | None]):
         return self._get_inspect_result().endpoints
 
     @property
-    def tls_material(self) -> dict[str, object] | None:
+    def tls_material(self) -> dict[str, JsonValue] | None:
         return self._get_inspect_result().tls_material
 
     @property

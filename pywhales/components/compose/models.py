@@ -1,8 +1,15 @@
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, JsonValue
+
+from pywhales.enums import (
+    ComposeDependencyCondition,
+    MountType,
+    NetworkProtocol,
+    PublishMode,
+)
 
 
 class ServicePlacement(BaseModel):
@@ -32,28 +39,28 @@ class ServiceDeployConfig(BaseModel):
 
 
 class DependencyCondition(BaseModel):
-    condition: str | None = None
+    condition: ComposeDependencyCondition | str | None = None
 
 
 class ComposeServiceBuild(BaseModel):
     context: Path | None = None
     dockerfile: Path | None = None
-    args: dict[str, Any] | None = None
-    labels: dict[str, Any] | None = None
+    args: dict[str, JsonValue] | None = None
+    labels: dict[str, JsonValue] | None = None
 
 
 class ComposeServicePort(BaseModel):
-    mode: str | None = None
-    protocol: str | None = None
+    mode: PublishMode | str | None = None
+    protocol: NetworkProtocol | str | None = None
     published: int | None = None
     target: int | None = None
 
 
 class ComposeServiceVolume(BaseModel):
-    bind: dict[str, Any] | None = None
+    bind: dict[str, JsonValue] | None = None
     source: str | None = None
     target: str | None = None
-    type: str | None = None
+    type: MountType | str | None = None
 
 
 class ComposeServiceNetwork(BaseModel):
@@ -62,14 +69,14 @@ class ComposeServiceNetwork(BaseModel):
     ipv6_address: str | None = None
     link_local_ips: list[str] | None = None
     mac_address: str | None = None
-    driver_opts: dict[str, Any] | None = None
+    driver_opts: dict[str, JsonValue] | None = None
     gw_priority: int | None = None
     priority: int | None = None
 
 
 class ComposeConfigService(BaseModel):
     deploy: ServiceDeployConfig | None = None
-    blkio_config: Any | None = None
+    blkio_config: JsonValue | None = None
     cpu_count: float | None = None
     cpu_percent: float | None = None
     cpu_shares: int | None = None
@@ -79,11 +86,11 @@ class ComposeConfigService(BaseModel):
     cap_drop: Annotated[list[str] | None, Field(default_factory=list)]
     cgroup_parent: str | None = None
     command: list[str] | str | None = None
-    configs: Any = None
+    configs: JsonValue = None
     container_name: str | None = None
     depends_on: Annotated[dict[str, DependencyCondition], Field(default_factory=dict)]
     device_cgroup_rules: Annotated[list[str], Field(default_factory=list)]
-    devices: Any = None
+    devices: JsonValue = None
     environment: dict[str, str | int | None] | list[str] | None = None
     expose: Annotated[list[int] | list[str], Field(default_factory=list)]
     entrypoint: list[str] | str | None = None
@@ -99,17 +106,17 @@ class ComposeConfigNetwork(BaseModel):
     driver: str | None = None
     name: str | None = None
     external: bool | None = False
-    driver_opts: dict[str, Any] | None = None
+    driver_opts: dict[str, JsonValue] | None = None
     attachable: bool | None = None
     enable_ipv6: bool | None = None
-    ipam: Any = None
+    ipam: JsonValue = None
     internal: bool | None = None
     labels: Annotated[dict[str, str], Field(default_factory=dict)]
 
 
 class ComposeConfigVolume(BaseModel):
     driver: str | None = None
-    driver_opts: dict[str, Any] | None = None
+    driver_opts: dict[str, JsonValue] | None = None
     external: bool | None = None
     labels: Annotated[dict[str, str] | None, Field(default_factory=dict)]
     name: str | None = None
@@ -123,8 +130,8 @@ class ComposeConfig(BaseModel):
     volumes: Annotated[
         dict[str, ComposeConfigVolume] | None, Field(default_factory=dict)
     ]
-    configs: Any = None
-    secrets: Any = None
+    configs: JsonValue = None
+    secrets: JsonValue = None
 
 
 class ComposeProject(BaseModel):

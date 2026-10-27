@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated
 
 import pydantic
 
@@ -12,7 +12,7 @@ class DockerObjectVersion(DockerCamelModel):
 
 class ConfigSpecDriver(DockerCamelModel):
     name: str | None = None
-    options: dict[str, Any] | None = None
+    options: dict[str, pydantic.JsonValue] | None = None
 
 
 class ConfigSpec(DockerCamelModel):

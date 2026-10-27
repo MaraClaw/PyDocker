@@ -6,7 +6,9 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType, TracebackType
-from typing import Any, Self, assert_never, overload, override
+from typing import Self, assert_never, overload, override
+
+from pydantic import JsonValue
 
 from pywhales.client_config import (
     ClientConfig,
@@ -21,7 +23,7 @@ from pywhales.components.config.models import (
     ConfigSpec,
     DockerObjectVersion,
 )
-from pywhales.utils import format_mapping_for_cli, run, to_list
+from pywhales.utils import custom_parse_object_as, format_mapping_for_cli, run, to_list
 
 
 class Config(ReloadableObjectFromJson[ConfigInspectResult]):
@@ -43,13 +45,15 @@ class Config(ReloadableObjectFromJson[ConfigInspectResult]):
             self.remove()
 
     @override
-    def _fetch_inspect_result_json(self, reference: str) -> dict[str, Any]:
+    def _fetch_inspect_result_json(self, reference: str) -> dict[str, JsonValue]:
         json_str = run([*self.docker_cmd, "config", "inspect", reference])
-        return json.loads(json_str)[0]
+        return custom_parse_object_as(dict[str, JsonValue], {**json.loads(json_str)[0]})
 
     @override
-    def _parse_json_object(self, json_object: dict[str, Any]) -> ConfigInspectResult:
-        return ConfigInspectResult(**json_object)
+    def _parse_json_object(
+        self, json_object: dict[str, JsonValue]
+    ) -> ConfigInspectResult:
+        return ConfigInspectResult.model_validate(json_object)
 
     def remove(self) -> None:
         """Remove this config.

@@ -1,18 +1,19 @@
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 
 import pydantic
 
 import pywhales.components.node.models
+from pywhales.enums import Isolation, SwarmState
 from pywhales.utils import DockerCamelModel
 
 
 class DockerEventActor(DockerCamelModel):
     id: Annotated[str | None, pydantic.Field(alias="ID")] = None
-    attributes: Annotated[dict[str, Any] | None, pydantic.Field(alias="Attributes")] = (
-        None
-    )
+    attributes: Annotated[
+        dict[str, pydantic.JsonValue] | None, pydantic.Field(alias="Attributes")
+    ] = None
 
 
 class DockerEvent(DockerCamelModel):
@@ -34,7 +35,7 @@ class DockerItemsSummary(DockerCamelModel):
 class Plugins(DockerCamelModel):
     volume: list[str] | None = None
     network: list[str] | None = None
-    authorization: Any = None
+    authorization: pydantic.JsonValue = None
     log: list[str] | None = None
 
 
@@ -71,9 +72,9 @@ class SwarmDispatcher(DockerCamelModel):
 
 class SwarmCAConfig(DockerCamelModel):
     node_cert_expiry: int | None = None
-    external_ca: Annotated[list[Any] | None, pydantic.Field(alias="ExternalCA")] = (
-        None  # TODO: set type
-    )
+    external_ca: Annotated[
+        list[pydantic.JsonValue] | None, pydantic.Field(alias="ExternalCA")
+    ] = None
     signing_ca_cert: Annotated[str | None, pydantic.Field(alias="SigningCACert")] = None
     signing_ca_key: Annotated[str | None, pydantic.Field(alias="SigningCAKey")] = None
     force_rotate: int | None = None
@@ -85,7 +86,7 @@ class SwarmEncryptionConfig(DockerCamelModel):
 
 class Driver(DockerCamelModel):
     name: str | None = None
-    options: dict[str, Any] | None = None
+    options: dict[str, pydantic.JsonValue] | None = None
 
 
 class SwarmTasksDefault(DockerCamelModel):
@@ -119,7 +120,7 @@ class ClusterInfo(DockerCamelModel):
 class SwarmInfo(DockerCamelModel):
     node_id: Annotated[str | None, pydantic.Field(alias="NodeID")] = None
     node_addr: str | None = None
-    local_node_state: str | None = None
+    local_node_state: SwarmState | str | None = None
     control_available: bool | None = None
     error: str | None = None
     remote_managers: list[RemoteManager] | None = None
@@ -186,7 +187,7 @@ class SystemInfo(DockerCamelModel):
     n_cpu: Annotated[int | None, pydantic.Field(alias="NCPU")] = None
     mem_total: int | None = None
     index_server_address: str | None = None
-    registry_config: dict[str, Any] | None = None
+    registry_config: dict[str, pydantic.JsonValue] | None = None
     generic_resources: (
         list[pywhales.components.node.models.NodeGenericResource] | None
     ) = None
@@ -203,7 +204,7 @@ class SystemInfo(DockerCamelModel):
     default_runtime: str | None = None
     swarm: SwarmInfo | None = None
     live_restore_enabled: bool | None = None
-    isolation: str | None = None
+    isolation: Isolation | str | None = None
     init_binary: str | None = None
     containerd_commit: Commit | None = None
     runc_commit: Commit | None = None

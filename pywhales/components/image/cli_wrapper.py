@@ -19,6 +19,8 @@ from typing import (
     override,
 )
 
+from pydantic import JsonValue
+
 import pywhales.components.buildx.cli_wrapper
 from pywhales.client_config import (
     ClientConfig,
@@ -46,6 +48,7 @@ from pywhales.exceptions import DockerException, NoSuchImage
 from pywhales.utils import (
     MappedProcessStream,
     ValidPath,
+    custom_parse_object_as,
     run,
     stream_stdout_and_stderr,
     to_list,
@@ -89,13 +92,15 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
                 return
 
     @override
-    def _fetch_inspect_result_json(self, reference: str) -> dict[str, Any]:
+    def _fetch_inspect_result_json(self, reference: str) -> dict[str, JsonValue]:
         json_str = run([*self.docker_cmd, "image", "inspect", reference])
-        return json.loads(json_str)[0]
+        return custom_parse_object_as(dict[str, JsonValue], {**json.loads(json_str)[0]})
 
     @override
-    def _parse_json_object(self, json_object: Mapping[str, Any]) -> ImageInspectResult:
-        return ImageInspectResult(**json_object)
+    def _parse_json_object(
+        self, json_object: Mapping[str, JsonValue]
+    ) -> ImageInspectResult:
+        return ImageInspectResult.model_validate(json_object)
 
     @property
     def id(self) -> str:

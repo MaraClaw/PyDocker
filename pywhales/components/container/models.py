@@ -1,9 +1,17 @@
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 
 import pydantic
 
+from pywhales.enums import (
+    BindPropagation,
+    ContainerStatus,
+    HealthStatus,
+    Isolation,
+    MountType,
+    RestartPolicyName,
+)
 from pywhales.utils import DockerCamelModel
 
 
@@ -15,13 +23,13 @@ class ContainerHealthcheckResult(DockerCamelModel):
 
 
 class ContainerHealth(DockerCamelModel):
-    status: str | None = None
+    status: HealthStatus | str | None = None
     failing_streak: int | None = None
     log: list[ContainerHealthcheckResult] | None = None
 
 
 class ContainerState(DockerCamelModel):
-    status: str | None = None
+    status: ContainerStatus | str | None = None
     running: bool | None = None
     paused: bool | None = None
     restarting: bool | None = None
@@ -55,7 +63,7 @@ class ContainerDeviceRequest(DockerCamelModel):
     driver: str | None = None
     count: int | None = None
     device_ids: Annotated[list[str] | None, pydantic.Field(alias="DeviceIDs")] = None
-    capabilities: list[Any] | None = None
+    capabilities: list[pydantic.JsonValue] | None = None
     options: dict[str, str] | None = None
 
 
@@ -67,11 +75,11 @@ class ContainerUlimit(DockerCamelModel):
 
 class ContainerLogConfig(DockerCamelModel):
     type: str | None = None
-    config: Any | None = None
+    config: pydantic.JsonValue = None
 
 
 class ContainerRestartPolicy(DockerCamelModel):
-    name: str | None = None
+    name: RestartPolicyName | str | None = None
     maximum_retry_count: int | None = None
 
 
@@ -81,13 +89,13 @@ class PortBinding(DockerCamelModel):
 
 
 class ContainerMountBindOption(DockerCamelModel):
-    propagation: str | None = None
+    propagation: BindPropagation | str | None = None
     non_recursive: bool | None = None
 
 
 class ContainerVolumeDriverConfig(DockerCamelModel):
     name: str | None = None
-    options: dict[str, Any] | None = None
+    options: dict[str, pydantic.JsonValue] | None = None
 
 
 class ContainerVolumeOptions(DockerCamelModel):
@@ -103,7 +111,7 @@ class ContainerTmpfsOptions(DockerCamelModel):
 class ContainerMount(DockerCamelModel):
     target: Path | None = None
     source: str | None = None
-    type: str | None = None
+    type: MountType | str | None = None
     read_only: bool | None = None
     consistency: str | None = None
     bind_options: ContainerMountBindOption | None = None
@@ -170,15 +178,15 @@ class ContainerHostConfig(DockerCamelModel):
     publish_all_ports: bool | None = None
     readonly_rootfs: bool | None = None
     security_opt: list[str] | None = None
-    storage_opt: Any = None
+    storage_opt: pydantic.JsonValue = None
     tmpfs: dict[Path, str] | None = None
     uts_mode: str | None = None
     userns_mode: str | None = None
     shm_size: int | None = None
-    sysctls: dict[str, Any] | None = None
+    sysctls: dict[str, pydantic.JsonValue] | None = None
     runtime: str | None = None
     console_size: tuple[int, int] | None = None
-    isolation: str | None = None
+    isolation: Isolation | str | None = None
     masked_paths: list[Path] | None = None
     readonly_paths: list[Path] | None = None
 
@@ -198,7 +206,7 @@ class ContainerConfig(DockerCamelModel):
     attach_stdin: bool | None = None
     attach_stdout: bool | None = None
     attach_stderr: bool | None = None
-    exposed_ports: dict[str, Any] | None = None
+    exposed_ports: dict[str, pydantic.JsonValue] | None = None
     tty: bool | None = None
     open_stdin: bool | None = None
     stdin_once: bool | None = None
@@ -207,7 +215,7 @@ class ContainerConfig(DockerCamelModel):
     healthcheck: ContainerHealthCheck | None = None
     args_escaped: bool | None = None
     image: str | None = None
-    volumes: dict[str, Any] | None = None
+    volumes: dict[str, pydantic.JsonValue] | None = None
     working_dir: Path | None = None
     entrypoint: list[str] | str | None = None
     network_disabled: bool | None = None
@@ -220,14 +228,14 @@ class ContainerConfig(DockerCamelModel):
 
 
 class Mount(DockerCamelModel):
-    type: str | None = None
+    type: MountType | str | None = None
     name: str | None = None
     source: str | None = None
     destination: str | None = None
     driver: str | None = None
     mode: str | None = None
     rw: bool | None = None
-    propagation: str | None = None
+    propagation: BindPropagation | str | None = None
 
 
 class ContainerEndpointIPAMConfig(DockerCamelModel):
@@ -249,7 +257,7 @@ class NetworkInspectResult(DockerCamelModel):
     global_ipv6_address: str | None = None
     global_ipv6_prefix_length: int | None = None
     mac_address: str | None = None
-    driver_options: dict[str, Any] | None = None
+    driver_options: dict[str, pydantic.JsonValue] | None = None
 
 
 class ContainerNetworkAddress(DockerCamelModel):
@@ -263,7 +271,7 @@ class NetworkSettings(DockerCamelModel):
     hairpin_mode: bool | None = None
     link_local_ipv6_address: str | None = None
     link_local_ipv6_prefix_length: int | None = None
-    ports: dict[str, Any] | None = None  # to rework
+    ports: dict[str, pydantic.JsonValue] | None = None  # to rework
     sandbox_key: Path | None = None
     secondary_ip_addresses: list[ContainerNetworkAddress] | None = None
     secondary_ipv6_addresses: list[ContainerNetworkAddress] | None = None
@@ -280,7 +288,7 @@ class NetworkSettings(DockerCamelModel):
 
 class ContainerGraphDriver(DockerCamelModel):
     name: str | None = None
-    data: dict[str, Any] | None = None
+    data: dict[str, pydantic.JsonValue] | None = None
 
 
 class ContainerInspectResult(DockerCamelModel):
@@ -294,7 +302,7 @@ class ContainerInspectResult(DockerCamelModel):
     hostname_path: Path | None = None
     hosts_path: Path | None = None
     log_path: Path | None = None
-    node: object = None
+    node: pydantic.JsonValue = None
     name: str | None = None
     restart_count: int | None = None
     driver: str | None = None

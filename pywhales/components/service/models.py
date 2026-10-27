@@ -1,8 +1,17 @@
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated
 
-from pydantic import Field
+from pydantic import Field, JsonValue
 
+from pywhales.enums import (
+    EndpointMode,
+    FailureAction,
+    Isolation,
+    NetworkProtocol,
+    PublishMode,
+    ServiceUpdateState,
+    UpdateOrder,
+)
 from pywhales.utils import DockerCamelModel
 
 
@@ -21,7 +30,7 @@ class ContainerSpec(DockerCamelModel):
     labels: dict[str, str] | None = None
     privileges: dict[str, str | bool | None] | None = None
     stop_grace_period: int | None = None
-    isolation: str | None = None
+    isolation: Isolation | str | None = None
     env: list[str] | None = None
 
 
@@ -32,16 +41,16 @@ class TaskTemplate(DockerCamelModel):
 
 class ChangeConfig(DockerCamelModel):
     parallelism: int | None = None
-    failure_action: str | None = None
+    failure_action: FailureAction | str | None = None
     monitor: int | None = None
     max_failure_ratio: float | None = None
-    order: str | None = None
+    order: UpdateOrder | str | None = None
 
 
 class ServiceSpec(DockerCamelModel):
     name: str | None = None
     labels: dict[str, str] | None = None
-    mode: dict[str, Any] | None = None
+    mode: dict[str, JsonValue] | None = None
     update_config: ChangeConfig | None = None
     rollback_config: ChangeConfig | None = None
     task_template: TaskTemplate | None = None
@@ -53,14 +62,14 @@ class ServiceVersion(DockerCamelModel):
 
 class EndpointPortConfig(DockerCamelModel):
     name: str | None = None
-    protocol: str | None = None
+    protocol: NetworkProtocol | str | None = None
     target_port: int | None = None
     published_port: int | None = None
-    publish_mode: str | None = None
+    publish_mode: PublishMode | str | None = None
 
 
 class ServiceEndpointSpec(DockerCamelModel):
-    mode: str | None = None
+    mode: EndpointMode | str | None = None
     ports: list[EndpointPortConfig] | None = None
 
 
@@ -76,7 +85,7 @@ class ServiceEndpoint(DockerCamelModel):
 
 
 class ServiceUpdateStatus(DockerCamelModel):
-    state: str | None = None
+    state: ServiceUpdateState | str | None = None
     started_at: str | None = None
     completed_at: str | None = None
     message: str | None = None

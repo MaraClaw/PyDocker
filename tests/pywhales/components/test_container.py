@@ -849,7 +849,11 @@ def test_run_with_random_port(ctr_client: DockerClient) -> None:
         ports = container.network_settings.ports
         assert ports is not None
         assert ports["90/tcp"] is not None
-        assert ports["90/tcp"][0]["HostPort"] is not None
+        bindings = ports["90/tcp"]
+        assert isinstance(bindings, list)
+        binding = bindings[0]
+        assert isinstance(binding, dict)
+        assert binding["HostPort"] is not None
         assert container.id[:12] in repr(ctr_client.container.list())
 
 
@@ -862,7 +866,11 @@ def test_create_with_random_ports(ctr_client: DockerClient) -> None:
         ports = container.network_settings.ports
         assert ports is not None
         assert ports["90/tcp"] is not None
-        assert ports["90/tcp"][0]["HostPort"] is not None
+        bindings = ports["90/tcp"]
+        assert isinstance(bindings, list)
+        binding = bindings[0]
+        assert isinstance(binding, dict)
+        assert binding["HostPort"] is not None
 
 
 def test_create_with_cgroupns(ctr_client: DockerClient) -> None:

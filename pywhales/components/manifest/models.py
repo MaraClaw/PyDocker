@@ -1,3 +1,5 @@
+"""Manifest-list inspection snapshots sharing registry descriptor models."""
+
 from pywhales.components.buildx.imagetools.models import ImageVariantManifest
 from pywhales.utils import DockerCamelModel
 

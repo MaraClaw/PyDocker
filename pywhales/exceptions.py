@@ -119,6 +119,35 @@ class DockerTimeout(DockerException):
         return f"The local CLI exceeded its deadline.\n{super().__str__()}"
 
 
+class ObservationLimitError(Exception):
+    """Observation exceeded a limit without exposing command or payload values."""
+
+    def __init__(self, reason: str, limit: int | None, measured: int | None) -> None:
+        """Retain a machine-readable reason and optional numeric measurements."""
+        self.reason = reason
+        self.limit = limit
+        self.measured = measured
+        super().__init__(
+            "An observation limit was exceeded or could not be determined."
+        )
+
+
+class ObservationTimeout(TimeoutError):
+    """The observation's absolute monotonic deadline expired."""
+
+    def __init__(self) -> None:
+        """Construct a timeout without command or captured-output details."""
+        super().__init__("The observation deadline expired.")
+
+
+class ObservationCancelled(Exception):
+    """An observation cancellation token was set."""
+
+    def __init__(self) -> None:
+        """Construct a cancellation without command or captured-output details."""
+        super().__init__("The observation was cancelled.")
+
+
 def get_docker_exception_type(output: bytes | None) -> type[DockerException]:
     """Select an exception class from case-insensitive stderr message patterns.
 

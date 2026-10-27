@@ -10,6 +10,7 @@ from typing import Any, Self, overload, override
 
 from pydantic import JsonValue
 
+from pywhales._inspect_validation import parse_namespace_inspect_results
 from pywhales.client_config import (
     ClientConfig,
     Command,
@@ -203,7 +204,18 @@ class ContextCLI(DockerCLICaller):
         if isinstance(x, str) or x is None:
             return Context(self.client_config, x)
         else:
-            return [Context(self.client_config, ref) for ref in x]
+            if not x:
+                return []
+            parser = Context(self.client_config, x[0], is_immutable_id=True)
+            snapshots = parse_namespace_inspect_results(
+                parser, run([*self.docker_cmd, "context", "inspect", *x]), x
+            )
+            contexts = []
+            for identity, snapshot in snapshots:
+                context = Context(self.client_config, identity, is_immutable_id=True)
+                context._set_inspect_result(snapshot)
+                contexts.append(context)
+            return contexts
 
     def list(self) -> builtins.list[Context]:
         """List all Docker contexts available

@@ -1,3 +1,10 @@
+"""Deadline execution contracts against a temporary Python CLI driver.
+
+Commands launch real local Python children rather than Docker. The driver records
+argv, supplies inspection fixtures, and optionally blocks so tests can observe
+timeout delivery, captured output, and process cleanup.
+"""
+
 import json
 import sys
 from collections.abc import Iterable
@@ -27,6 +34,11 @@ OPERATIONS: tuple[Operation, ...] = (
 
 @pytest.fixture
 def client(tmp_path: Path) -> DockerClient:
+    """Return a client whose command prefix starts the temporary Python driver.
+
+    Creating the fixture writes the driver but starts no child. Wrapper calls
+    launch it and append their arguments to launches.jsonl under tmp_path.
+    """
     driver = tmp_path / "driver.py"
     driver.write_text(
         """import json
@@ -83,6 +95,24 @@ def invoke(
     timeout: float | None,
     stream: bool = False,
 ) -> object:
+    """Dispatch a launch scenario with its selected execution deadline.
+
+    Args:
+        client: Client configured to run the local Python driver.
+        operation: Launch entry point whose return and timeout behavior is tested.
+        timeout: Per-launch duration in seconds, or None for no deadline.
+        stream: Return owned output streams instead of eager results when true.
+
+    Returns:
+        Captured text for run/execute/Compose, an image for build, or a config
+        mapping for bake. Streaming returns a caller-owned process stream;
+        build and bake map records to text instead of labeled bytes.
+
+    Raises:
+        ValueError: If timeout is not a finite positive duration or None.
+        DockerTimeout: If an eager launch exceeds its deadline. A streaming
+            deadline is reported when the returned stream is consumed or exited.
+    """
     match operation:
         case "run":
             return client.run("app", stream=stream, timeout=timeout)
@@ -245,6 +275,25 @@ def subscribe(
     timeout: float | None,
     stream: bool = True,
 ) -> str | Iterable[tuple[str, bytes] | ComposeEvent | DockerEvent]:
+    """Start a selected log or event subscription against the local driver.
+
+    Args:
+        client: Client configured to run the local Python driver.
+        operation: Subscription entry point to exercise.
+        timeout: Per-subscription duration in seconds, or None for no deadline.
+        stream: Stream logs when true; false collects text. Handle logs always
+            collect text, and event subscriptions always stream typed events.
+
+    Returns:
+        Collected log text or a caller-owned stream of labeled log bytes or
+        typed events. Close streams or use their context manager on early exit;
+        launching starts the child and deadline before consumption.
+
+    Raises:
+        ValueError: If timeout is not a finite positive duration or None.
+        DockerTimeout: If collected logs exceed the deadline. Streams report
+            expiry during consumption or context-manager exit instead.
+    """
     match operation:
         case "container_logs":
             return client.container.logs(
@@ -273,6 +322,7 @@ def subscribe(
 
 
 def assert_released(raw: ProcessStream) -> None:
+    """Check process completion, watchdog and reader shutdown, and output closure."""
     assert raw._process.returncode is not None
     assert not raw._watchdog.is_alive()
     assert all(not thread.is_alive() for thread in raw._threads)

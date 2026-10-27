@@ -1,3 +1,9 @@
+"""Static deadline-option contracts for launches, logs, and event subscriptions.
+
+The ty check validates inferred shapes for clients, aliases, and container handles.
+Pytest does not collect or execute the _check_* functions or their Docker calls.
+"""
+
 from collections.abc import Iterable
 from typing import assert_type
 

@@ -1,11 +1,26 @@
 """Typed network inspection snapshots, address pools, and attached containers."""
 
+from collections.abc import Mapping
 from datetime import datetime
 
-from pydantic import JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from pywhales.enums import ResourceScope
 from pywhales.utils import DockerCamelModel
+
+
+class NetworkIPAMPool(BaseModel):
+    """Creation-time IPAM pool; addresses are interpreted by Docker.
+
+    Auxiliary mappings are revalidated when a network is created.
+    """
+
+    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+
+    subnet: str
+    gateway: str | None = None
+    ip_range: str | None = None
+    auxiliary_addresses: Mapping[str, str] = Field(default_factory=dict)
 
 
 class NetworkIPAM(DockerCamelModel):

@@ -1,3 +1,5 @@
+"""Swarm secret metadata snapshots without the secret payload."""
+
 import datetime as dt
 
 from pydantic import Field, JsonValue

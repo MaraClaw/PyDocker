@@ -1,3 +1,5 @@
+"""Swarm secret metadata and creation commands requiring a manager daemon."""
+
 import builtins
 import datetime as dt
 import json
@@ -40,6 +42,12 @@ type SecretListFilter = (
 
 
 class Secret(ReloadableObjectFromJson[SecretInspectResult]):
+    """Reloadable Swarm secret handle with context-exit removal.
+
+    Cleanup is attempted even if the body raises. If cleanup also fails, both
+    exceptions are preserved together rather than suppressing either failure.
+    """
+
     def __init__(
         self, client_config: ClientConfig, reference: str, is_immutable_id: bool = False
     ) -> None:
@@ -99,6 +107,8 @@ ValidSecret = Secret | str
 
 
 class SecretCLI(DockerCLICaller):
+    """Secret commands that retain metadata but cannot retrieve secret payloads."""
+
     def create(
         self,
         name: str,
@@ -107,10 +117,17 @@ class SecretCLI(DockerCLICaller):
         labels: Mapping[str, str] = {},
         template_driver: str | None = None,
     ) -> Secret:
-        """Creates a `pywhales.Secret`.
+        """Create a Swarm secret from a file.
 
-        # Returns
-            A `pywhales.Secret` object.
+        Args:
+            name: Name for the secret.
+            file: Local file containing the secret payload.
+            driver: Secret driver, or None to omit the option.
+            labels: Metadata labels; the default adds none.
+            template_driver: Template driver, or None to omit the option.
+
+        Returns:
+            A handle to the new secret without an initial inspect call.
         """
         full_cmd = Command([*self.docker_cmd, "secret", "create"])
         full_cmd.add_simple_arg("--driver", driver)
@@ -126,10 +143,20 @@ class SecretCLI(DockerCLICaller):
     def inspect(self, x: Iterable[str]) -> builtins.list[Secret]: ...
 
     def inspect(self, x: str | Iterable[str]) -> Secret | builtins.list[Secret]:
-        """Returns one or more `pywhales.Secret` based on an ID or name.
+        """Inspect one or more Swarm secrets by name or ID.
 
-        Parameters:
-            x: One or more IDs/names.
+        Args:
+            x: One name or ID, or an iterable of references. Empty input returns
+                without invoking the CLI.
+
+        Returns:
+            One handle for a string, otherwise handles in request order with
+            duplicates retained as distinct handles. All snapshots are validated
+            before any returned handle is hydrated.
+
+        Raises:
+            ParsingError: If response identities cannot be associated unambiguously
+                with the requests or snapshots are inconsistent.
         """
         references = to_list(x)
         if not references:
@@ -153,7 +180,15 @@ class SecretCLI(DockerCLICaller):
     def list(
         self, filters: Iterable[SecretListFilter] | Mapping[str, Any] = ()
     ) -> builtins.list[Secret]:
-        """Returns all secrets as a `List[pywhales.Secret]`."""
+        """List secrets in the selected Swarm.
+
+        Args:
+            filters: Docker filter pairs; the default selects all secrets.
+                Mapping inputs are deprecated.
+
+        Returns:
+            Secret handles in CLI output order.
+        """
         filter_items = filters.items() if isinstance(filters, Mapping) else filters
         if isinstance(filters, Mapping):
             warnings.warn(
@@ -169,11 +204,12 @@ class SecretCLI(DockerCLICaller):
         return [Secret(self.client_config, id_, is_immutable_id=True) for id_ in ids]
 
     def remove(self, x: ValidSecret | Iterable[ValidSecret]) -> None:
-        """Removes one or more secrets
+        """Remove one or more secrets.
 
-        Parameters:
+        Args:
             x: One or more secrets.
                 Name, ids or `pywhales.Secret` objects are valid inputs.
+                An empty iterable does not invoke the CLI.
         """
         secrets = [x] if isinstance(x, str | Secret) else list(x)
         if not secrets:

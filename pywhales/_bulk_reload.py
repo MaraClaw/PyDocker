@@ -6,7 +6,7 @@ sequential, not a transaction across the daemon or concurrent cache readers.
 
 from collections.abc import Callable, Sequence
 from functools import partial
-from typing import assert_never
+from typing import TYPE_CHECKING, assert_never
 
 from pywhales.client_config import ParsingError, ReloadableObjectFromJson
 from pywhales.components.config.cli_wrapper import Config, ConfigCLI
@@ -20,6 +20,9 @@ from pywhales.components.secret.cli_wrapper import Secret, SecretCLI
 from pywhales.components.service.cli_wrapper import Service, ServiceCLI
 from pywhales.components.task.cli_wrapper import Task, TaskCLI
 from pywhales.components.volume.cli_wrapper import Volume, VolumeCLI
+
+if TYPE_CHECKING:
+    from pywhales.inventory import InspectionPolicy
 
 type SupportedResource = (
     Container
@@ -165,7 +168,9 @@ def _prepare_publication(
             raise TypeError("Inspect returned an unexpected resource kind")
 
 
-def bulk_reload(docker_objects: Sequence[object]) -> None:
+def bulk_reload(
+    docker_objects: Sequence[object], *, policy: InspectionPolicy | None = None
+) -> None:
     """Inspect supported resources and publish their caches after all groups pass.
 
     Validate every input before resolving any CLI executable. Group by exact
@@ -178,6 +183,7 @@ def bulk_reload(docker_objects: Sequence[object]) -> None:
     Args:
         docker_objects: Container, image, network, volume, node, service, config,
             secret, task, plugin, or context handles. Empty input is a no-op.
+        policy: Optional inspection limits, intersected with an active observation.
 
     Raises:
         TypeError: If any input kind is unsupported or inspection returns a
@@ -211,6 +217,27 @@ def bulk_reload(docker_objects: Sequence[object]) -> None:
         seen.add(id(resource))
         key = id(resource.client_config), type(resource)
         groups.setdefault(key, []).append(resource)
+
+    from pywhales._observation import check_observation, get_observation, observation
+
+    current = get_observation()
+    selected_policy = policy
+    if selected_policy is None and current is not None:
+        selected_policy = current.policy
+    if groups and selected_policy is not None:
+        from pywhales._inventory_staging import stage_resources
+
+        with observation(selected_policy) as state:
+            originals = [resource for group in groups.values() for resource in group]
+            staged = stage_resources(originals, state.policy)
+            publications = [
+                _prepare_publication(original, snapshot)
+                for original, snapshot in zip(originals, staged, strict=True)
+            ]
+            check_observation(state)
+        for publish in publications:
+            publish()
+        return
 
     publications: list[Callable[[], None]] = []
     for resources in groups.values():

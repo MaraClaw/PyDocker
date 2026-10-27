@@ -294,7 +294,18 @@ def run(
     else:
         stderr_dest = None
     _log_command(args, subprocess_env, raw_diagnostics=policy.raw_diagnostics)
-    if timeout is None:
+    from pywhales._observation import get_observation
+
+    observation = get_observation()
+    if observation is not None:
+        if tty or not capture_stdout or not capture_stderr or input is not None:
+            raise ValueError("Observation requires captured output and no input or tty")
+        from pywhales._bounded_capture import bounded_capture
+
+        completed_process = bounded_capture(
+            args, subprocess_env, pass_fds, timeout, policy, observation
+        )
+    elif timeout is None:
         completed_process = subprocess.run(
             args,
             input=input,

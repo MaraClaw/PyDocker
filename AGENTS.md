@@ -1,7 +1,5 @@
 # PyWhales Agent Guide
 
-Generated: 2026-10-27 | Commit: `2cf0f4c` | Branch: `develop`
-
 ## Overview
 
 PyWhales is a typed Python wrapper around the external Docker CLI, not a Docker HTTP SDK.
@@ -17,6 +15,9 @@ The installed `pywhales` console entry point only prints a notice; it isn't a Do
 | --- | --- |
 | `pywhales/docker_client.py` | Public client, command-group wiring, top-level aliases |
 | `pywhales/client_config.py` | Shared client options, command assembly, reloadable resource bases |
+| `pywhales/_execution_policy.py` | Originating-config carrier and per-launch execution policy |
+| `pywhales/_inspect_validation.py` | Context, plugin, and task batch-response validation |
+| `pywhales/_bulk_reload.py` | Grouped inspection and staged resource-cache publication |
 | `pywhales/utils.py` | Subprocess execution, common conversions, Pydantic model base |
 | `pywhales/_process_stream.py` | Process-backed streaming and lifecycle ownership |
 | `pywhales/_stream_buffer.py` | Thread-safe output buffering and byte accounting |
@@ -30,16 +31,14 @@ The installed `pywhales` console entry point only prints a notice; it isn't a Do
 
 ## Code Map
 
-Locations are source declarations. Reference counts aren't dependency counts.
-
-| Symbol | Location | Role | References |
-| --- | --- | --- | --- |
-| `DockerClient` | `pywhales/docker_client.py:92` | Public facade and shared-config command-group wiring | 529 LSP locations (capped display; includes tests/declaration) |
-| `ClientConfig` | `pywhales/client_config.py:62` | Dataclass holding CLI, connection, and Compose settings | - |
-| `Command` | `pywhales/client_config.py:30` | Argument-list builder with option/flag helpers | - |
-| `ReloadableObject` | `pywhales/client_config.py:198` | Resource identity and refreshed inspection data | - |
-| `DockerCamelModel` | `pywhales/utils.py:84` | Pydantic base mapping Python names to Docker JSON aliases | - |
-| `ProcessStream` | `pywhales/_process_stream.py:20` | Iterator owning a CLI process and streamed output | - |
+| Symbol | File | Role |
+| --- | --- | --- |
+| `DockerClient` | `pywhales/docker_client.py` | Public facade and shared-config command-group wiring |
+| `ClientConfig` | `pywhales/client_config.py` | Dataclass holding CLI, connection, Compose, and execution settings |
+| `Command` | `pywhales/client_config.py` | Argument-list builder with option/flag helpers |
+| `ReloadableObject` | `pywhales/client_config.py` | Resource identity and refreshed inspection data |
+| `DockerCamelModel` | `pywhales/utils.py` | Pydantic base mapping Python names to Docker JSON aliases |
+| `ProcessStream` | `pywhales/_process_stream.py` | Iterator owning a CLI process and streamed output |
 
 ## Guide Scope
 
@@ -83,7 +82,8 @@ The strict coverage command is an integration run, not a safe default for a work
 - Missing runtime support can skip tests locally; CI uses `--no-runtime-skip` to turn unavailable runtime checks into failures.
 - `scripts/ci-setup.sh` calls `scripts/add-local-docker-registry.sh`, which overwrites `/etc/docker/daemon.json` and restarts Docker with sudo.
 - That setup also installs plugins; it's CI provisioning, not safe workstation setup. Don't run it casually.
-- `PYDOCKER_DEBUG=1` prints commands and the merged subprocess environment. Don't enable it where logs could expose secrets.
+- `PYDOCKER_DEBUG=1` enables execution diagnostics that withhold command, environment, and captured-output values by default.
+  `DockerClient(raw_diagnostics=True)` opts that client into raw diagnostics; see `pywhales/AGENTS.md` for the confidentiality boundary.
 - Documentation generation is Docker-free by default. `--live-examples` explicitly opts into real Docker operations.
 - Edit `docs/template/` and source docstrings, not generated documentation output.
 - `docs/generated_sources/`, `site/`, and `docs/site/` are ignored outputs; don't commit generated sources or site files.

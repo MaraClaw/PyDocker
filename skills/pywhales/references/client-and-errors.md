@@ -72,10 +72,14 @@ existing secret mechanism; don't embed them in generated examples or reports.
 
 ## Troubleshooting Without Credential Leaks
 
-Don't enable `PYDOCKER_DEBUG=1` in a credential-bearing environment: it prints
-the command and the entire merged subprocess environment. The legacy
-`PYTHON_ON_WHALES_DEBUG` is consulted only if `PYDOCKER_DEBUG` is unset.
-Prefer a redacted command and error excerpt over an environment dump.
+`PYDOCKER_DEBUG=1` enables execution diagnostics, with command and environment
+values withheld by default. A separate `DockerClient(raw_diagnostics=True)`
+opts into detailed logs and errors, including the merged environment in debug
+printing and inspect-response dumps on model failures. Use that opt-in only in
+a trusted troubleshooting environment. The legacy `PYTHON_ON_WHALES_DEBUG` is
+consulted only if `PYDOCKER_DEBUG` is unset. Raw exception attributes, returned
+payloads, uncaptured terminal output, and caller logging remain outside this
+policy.
 
 If an argument is rejected, inspect that method in the installed package before
 changing versions or guessing SDK-style names. New Compose flags are forwarded

@@ -1,3 +1,5 @@
+"""Network handles and Docker CLI operations against the selected daemon."""
+
 from __future__ import annotations
 
 import builtins
@@ -48,6 +50,12 @@ type NetworkListFilter = (
 
 
 class Network(ReloadableObjectFromJson[NetworkInspectResult]):
+    """Reloadable network handle retaining its originating client settings.
+
+    Context-manager exit attempts removal, ignoring an already absent network.
+    Other cleanup failures are grouped with any active body exception.
+    """
+
     def __init__(
         self, client_config: ClientConfig, reference: str, is_immutable_id: bool = False
     ) -> None:
@@ -144,32 +152,13 @@ class Network(ReloadableObjectFromJson[NetworkInspectResult]):
         return f"pywhales.Network(id='{self.id[:12]}', name={self.name})"
 
     def exists(self) -> bool:
-        """Returns `True` if the network exists and `False` if it doesn't exist.
-
-        If it doesn't exist, that most likely means it was removed.
-        """
+        """Return whether this network can still be inspected."""
         return NetworkCLI(self.client_config).exists(self.id)
 
     def remove(self) -> None:
-        """Removes this Docker network.
+        """Remove this Docker network.
 
-        Rather than removing it manually, you can use a context manager to
-        make sure the network is deleted even if an exception is raised.
-
-        ```python
-        from pywhales import docker
-
-        with docker.network.create("some_name") as my_net:
-            docker.run(
-                "busybox",
-                ["ping", "idonotexistatall.com"],
-                networks=[my_net],
-                remove=True,
-            )
-            # an exception will be raised because the container will fail
-            # but the network will be removed anyway.
-        ```
-
+        A context manager attempts this removal even if its body raises.
         """
         NetworkCLI(self.client_config).remove(self)
 
@@ -178,6 +167,8 @@ ValidNetwork = Network | str
 
 
 class NetworkCLI(DockerCLICaller):
+    """Daemon network commands retaining the originating client configuration."""
+
     def connect(
         self,
         network: ValidNetwork,
@@ -188,15 +179,15 @@ class NetworkCLI(DockerCLICaller):
         ip6: str | None = None,
         links: Sequence[pywhales.components.container.cli_wrapper.ValidContainer] = (),
     ) -> None:
-        """Connect a container to a network
+        """Connect a container to a network.
 
-        Parameters:
+        Args:
             network: The network to connect to
             container: The container to connect
-            alias: Add network-scoped alias for the container
+            alias: Network-scoped alias, or None to omit it.
             driver_options: Driver options for the network
-            ip: IPv4 address (e.g., `"172.30.100.104"`)
-            ip6: IPv6 address (e.g., `"2001:db8::33"`)
+            ip: IPv4 address, or None to let Docker choose.
+            ip6: IPv6 address, or None to let Docker choose.
             links: Add links to other containers
         """
         full_cmd = Command([*self.docker_cmd, "network", "connect"])
@@ -218,13 +209,19 @@ class NetworkCLI(DockerCLICaller):
         labels: Mapping[str, str] = MappingProxyType({}),
         options: Sequence[str] = (),
     ) -> Network:
-        """Creates a Docker network.
+        """Create a Docker network.
 
-        Parameters:
-            name: The name of the network
+        Args:
+            name: Name for the network.
+            attachable: Allow manually started containers to attach.
+            driver: Network driver, or None to use Docker's default.
+            gateway: Gateway address, or None to let Docker choose.
+            subnet: Subnet in CIDR notation, or None to let Docker choose.
+            labels: Metadata labels; the default adds none.
+            options: Driver-specific key=value options; the default adds none.
 
-        # Returns
-            A `pywhales.Network`.
+        Returns:
+            A handle to the created network without an initial inspect call.
         """
         full_cmd = Command([*self.docker_cmd, "network", "create"])
         full_cmd.add_flag("--attachable", attachable)
@@ -242,11 +239,12 @@ class NetworkCLI(DockerCLICaller):
         container: pywhales.components.container.cli_wrapper.ValidContainer,
         force: bool = False,
     ) -> None:
-        """Disconnect a container from a network
+        """Disconnect a container from a network.
 
-        Parameters:
+        Args:
             network: The name of the network.
             container: The container to disconnect.
+            force: Force Docker to disconnect the container when True.
         """
         full_cmd = Command([*self.docker_cmd, "network", "disconnect"])
         full_cmd.add_flag("--force", force)
@@ -257,10 +255,14 @@ class NetworkCLI(DockerCLICaller):
         self,
         network: ValidNetwork,
     ) -> bool:
-        """Check if a network exists
+        """Return whether a network can be inspected.
 
-        Parameters:
-            network: The name of the network.
+        Args:
+            network: Network name, ID, or handle to inspect.
+
+        Returns:
+            False when Docker reports NoSuchNetwork; True on successful inspection.
+            Other inspection failures propagate.
         """
         try:
             self.inspect(str(network))
@@ -276,13 +278,19 @@ class NetworkCLI(DockerCLICaller):
     def inspect(self, x: Iterable[str]) -> builtins.list[Network]: ...
 
     def inspect(self, x: str | Iterable[str]) -> Network | builtins.list[Network]:
-        """Returns a `pywhales.Network` object from a string (id or network name).
+        """Inspect one or more networks by name or ID.
 
-        Parameters:
-            x: One id or network name or a list of ids or network names.
+        Args:
+            x: One name or ID, or an iterable of references. An empty iterable
+                returns without invoking the CLI.
 
-        # Returns
-            One or a list of `pywhales.Network`.
+        Returns:
+            One handle for a string, otherwise handles in request order with
+            duplicates retained as distinct handles.
+
+        Raises:
+            ParsingError: If a batch response has invalid shape, inconsistent
+                duplicate snapshots, or identities that do not match the requests.
         """
         if isinstance(x, str):
             return Network(self.client_config, x)
@@ -313,11 +321,12 @@ class NetworkCLI(DockerCLICaller):
     ) -> builtins.list[Network]:
         """List all the networks available.
 
-        Parameters:
-            filters: Filters to apply when listing networks.
+        Args:
+            filters: Docker filter pairs; the default selects all networks.
+                Mapping inputs are deprecated.
 
-        # Returns
-            List of `pywhales.Network`.
+        Returns:
+            Network handles in CLI output order.
         """
         filter_items = filters.items() if isinstance(filters, Mapping) else filters
         if isinstance(filters, Mapping):
@@ -339,8 +348,11 @@ class NetworkCLI(DockerCLICaller):
     ) -> None:
         """Remove Docker networks which are not used by any containers.
 
-        Parameters:
-            filters: Filters to apply when finding networks to prune.
+        Docker's confirmation prompt is bypassed.
+
+        Args:
+            filters: Docker filter pairs restricting removal. Mapping inputs are
+                deprecated; the default adds no filters.
         """
         filter_items = filters.items() if isinstance(filters, Mapping) else filters
         if isinstance(filters, Mapping):
@@ -356,10 +368,10 @@ class NetworkCLI(DockerCLICaller):
         run(full_cmd)
 
     def remove(self, networks: ValidNetwork | Sequence[ValidNetwork]) -> None:
-        """Removes a Docker network
+        """Remove one or more Docker networks.
 
-        Parameters:
-            networks: One or more networks.
+        Args:
+            networks: Network names, IDs, or handles. An empty list is a no-op.
         """
         if networks == []:
             return

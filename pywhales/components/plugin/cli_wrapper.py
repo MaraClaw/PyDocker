@@ -8,6 +8,7 @@ from typing import Self, overload, override
 
 from pydantic import JsonValue
 
+from pywhales._inspect_validation import parse_namespace_inspect_results
 from pywhales.client_config import (
     ClientConfig,
     Command,
@@ -179,7 +180,18 @@ class PluginCLI(DockerCLICaller):
         if isinstance(x, str):
             return Plugin(self.client_config, x)
         else:
-            return [Plugin(self.client_config, reference) for reference in x]
+            if not x:
+                return []
+            parser = Plugin(self.client_config, x[0], is_immutable_id=True)
+            snapshots = parse_namespace_inspect_results(
+                parser, run([*self.docker_cmd, "plugin", "inspect", *x]), x
+            )
+            plugins = []
+            for identity, snapshot in snapshots:
+                plugin = Plugin(self.client_config, identity, is_immutable_id=True)
+                plugin._set_inspect_result(snapshot)
+                plugins.append(plugin)
+            return plugins
 
     def install(
         self,

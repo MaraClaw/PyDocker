@@ -1,7 +1,8 @@
 
 
 site_name: pywhales
-docs_dir: docs/generated_sources
+docs_dir: generated_sources
+site_dir: ../site
 repo_url: "https://github.com/MaraClaw/PyWhales"
 site_description: 'pywhales documentation for Python 3.14.8 and above'
 

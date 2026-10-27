@@ -67,6 +67,7 @@ The strict coverage command is an integration run, not a safe default for a work
 
 ## Conventions And Checks
 
+- Follow [the Python docstring standard](docs/python-docstrings.md) for new or changed Python module, class, function, and method docstrings; do not rewrite unrelated docstrings.
 - Treat Ruff and ty settings in `pyproject.toml` as authoritative, not legacy `.flake8` or `.isort.cfg` files.
 - Ruff targets Python 3.14 and handles import sorting as well as linting and formatting.
 - ty checks `pywhales`, `tests`, and `docs`; all rules are errors and warnings fail the check.

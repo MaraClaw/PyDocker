@@ -1,3 +1,5 @@
+"""Typed container inspection snapshots and nested Docker wire structures."""
+
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated

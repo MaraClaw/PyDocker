@@ -2,7 +2,7 @@ import base64
 import json
 import warnings
 from collections.abc import Sequence
-from typing import Annotated, Literal
+from typing import Annotated
 
 import pydantic
 
@@ -25,6 +25,7 @@ from pywhales.components.system.cli_wrapper import SystemCLI
 from pywhales.components.task.cli_wrapper import TaskCLI
 from pywhales.components.trust.cli_wrapper import TrustCLI
 from pywhales.components.volume.cli_wrapper import VolumeCLI
+from pywhales.enums import ClientTypeInput, ComposeProgressInput
 
 from .utils import DockerCamelModel, ValidPath, run
 
@@ -183,12 +184,12 @@ class DockerClient(DockerCLICaller):
         compose_compatibility: bool | None = None,
         client_binary: str = "docker",
         client_call: Sequence[str] = ("docker",),
-        client_type: Literal["docker", "nerdctl", "unknown"] = "unknown",
+        client_type: ClientTypeInput = "unknown",
         *,
         compose_dry_run: bool = False,
         compose_parallel: int | None = None,
-        compose_progress: Literal["auto", "tty", "plain", "json", "quiet"]
-        | None = None,
+        compose_progress: ComposeProgressInput | None = None,
+        image_stream_buffer_bytes: int | None = None,
     ) -> None:
         if client_binary != "docker":
             warnings.warn(
@@ -222,6 +223,7 @@ class DockerClient(DockerCLICaller):
                 compose_dry_run=compose_dry_run,
                 compose_parallel=compose_parallel,
                 compose_progress=compose_progress,
+                image_stream_buffer_bytes=image_stream_buffer_bytes,
             )
         super().__init__(client_config)
 

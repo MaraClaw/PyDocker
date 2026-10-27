@@ -1047,7 +1047,13 @@ def test_config_complexe_compose() -> None:
     assert config.networks["some-network"].labels["type"] == "frontend"
 
     assert config.networks["other-network"].internal is True
-    assert config.networks["app_net_1"].ipam["config"][0]["subnet"] == "172.16.238.0/24"
+    ipam = config.networks["app_net_1"].ipam
+    assert isinstance(ipam, dict)
+    ipam_config = ipam["config"]
+    assert isinstance(ipam_config, list)
+    first_ipam_config = ipam_config[0]
+    assert isinstance(first_ipam_config, dict)
+    assert first_ipam_config["subnet"] == "172.16.238.0/24"
     assert config.networks["app_net_3"].enable_ipv6 is True
 
     assert config.volumes is not None
@@ -1656,10 +1662,22 @@ def test_compose_port() -> None:
     assert container.network_settings is not None
     published_ports = container.network_settings.ports
     assert published_ports is not None
-    tcp_cfg = published_ports["3000/tcp"][0]
-    expected_tcp_host, expected_tcp_port = tcp_cfg["HostIp"], int(tcp_cfg["HostPort"])
-    udp_cfg = published_ports["4000/udp"][0]
-    expected_udp_host, expected_udp_port = udp_cfg["HostIp"], int(udp_cfg["HostPort"])
+    tcp_bindings = published_ports["3000/tcp"]
+    assert isinstance(tcp_bindings, list)
+    tcp_cfg = tcp_bindings[0]
+    assert isinstance(tcp_cfg, dict)
+    tcp_host_ip, tcp_host_port = tcp_cfg["HostIp"], tcp_cfg["HostPort"]
+    assert isinstance(tcp_host_ip, str)
+    assert isinstance(tcp_host_port, str)
+    expected_tcp_host, expected_tcp_port = tcp_host_ip, int(tcp_host_port)
+    udp_bindings = published_ports["4000/udp"]
+    assert isinstance(udp_bindings, list)
+    udp_cfg = udp_bindings[0]
+    assert isinstance(udp_cfg, dict)
+    udp_host_ip, udp_host_port = udp_cfg["HostIp"], udp_cfg["HostPort"]
+    assert isinstance(udp_host_ip, str)
+    assert isinstance(udp_host_port, str)
+    expected_udp_host, expected_udp_port = udp_host_ip, int(udp_host_port)
 
     tcp_host, tcp_port = d.compose.port(service, "3000", protocol="tcp")
     assert expected_tcp_host == tcp_host
@@ -1913,7 +1931,10 @@ def test_docker_compose_publish(tmp_path: Path) -> None:
         assert registry.network_settings is not None
         published_ports = registry.network_settings.ports
         assert published_ports is not None
-        binding = published_ports["5000/tcp"][0]
+        bindings = published_ports["5000/tcp"]
+        assert isinstance(bindings, list)
+        binding = bindings[0]
+        assert isinstance(binding, dict)
         assert binding["HostIp"] == "127.0.0.1"
         registry_address = f"{binding['HostIp']}:{binding['HostPort']}"
         repository = f"{registry_address}/repo/app:tag"

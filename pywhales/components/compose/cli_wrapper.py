@@ -7,6 +7,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Literal, Unpack, assert_never, overload
 
+from pydantic import JsonValue
 from typing_extensions import TypedDict
 
 import pywhales.components.container.cli_wrapper
@@ -18,6 +19,10 @@ from pywhales.components.compose.models import (
     ComposeProject,
 )
 from pywhales.components.top import ComposeTopResult, parse_compose_top
+from pywhales.enums import (
+    ComposeCreatePullPolicy,
+    ComposeUpPullPolicy,
+)
 from pywhales.utils import (
     MappedProcessStream,
     ProcessStream,
@@ -29,6 +34,7 @@ from pywhales.utils import (
     run,
     stream_stdout_and_stderr,
     to_list,
+    validate_timeout,
 )
 
 
@@ -47,6 +53,7 @@ class ComposeRunArgs(TypedDict, total=False, closed=True):
     user: str | None
     volumes: Iterable[pywhales.components.volume.cli_wrapper.VolumeDefinition]
     workdir: str | Path | None
+    timeout: float | None
 
 
 class ComposeCLI(DockerCLICaller):
@@ -217,14 +224,14 @@ class ComposeCLI(DockerCLICaller):
     def config(self, return_json: Literal[False] = ...) -> ComposeConfig: ...
 
     @overload
-    def config(self, return_json: Literal[True]) -> dict[str, object]: ...
+    def config(self, return_json: Literal[True]) -> dict[str, JsonValue]: ...
 
     @overload
     def config(
         self, return_json: bool = False
-    ) -> ComposeConfig | dict[str, object]: ...
+    ) -> ComposeConfig | dict[str, JsonValue]: ...
 
-    def config(self, return_json: bool = False) -> ComposeConfig | dict[str, object]:
+    def config(self, return_json: bool = False) -> ComposeConfig | dict[str, JsonValue]:
         """Returns the configuration of the compose stack for further inspection.
 
         For example
@@ -249,7 +256,7 @@ class ComposeCLI(DockerCLICaller):
         full_cmd = Command([*self.docker_compose_cmd, "config", "--format", "json"])
         result = run(full_cmd, capture_stdout=True)
         if return_json:
-            return custom_parse_object_as(dict[str, object], json.loads(result))
+            return custom_parse_object_as(dict[str, JsonValue], json.loads(result))
         else:
             return ComposeConfig(**json.loads(result))
 
@@ -261,7 +268,7 @@ class ComposeCLI(DockerCLICaller):
         force_recreate: bool = ...,
         no_build: bool = ...,
         no_recreate: bool = ...,
-        pull: Literal["always", "missing", "never", "build", None] = ...,
+        pull: ComposeCreatePullPolicy | None = ...,
         *,
         stream_logs: Literal[True],
     ) -> Iterable[tuple[str, bytes]] | None: ...
@@ -274,7 +281,7 @@ class ComposeCLI(DockerCLICaller):
         force_recreate: bool = ...,
         no_build: bool = ...,
         no_recreate: bool = ...,
-        pull: Literal["always", "missing", "never", "build", None] = ...,
+        pull: ComposeCreatePullPolicy | None = ...,
         stream_logs: Literal[False] = ...,
     ) -> None: ...
 
@@ -286,7 +293,7 @@ class ComposeCLI(DockerCLICaller):
         force_recreate: bool = False,
         no_build: bool = False,
         no_recreate: bool = False,
-        pull: Literal["always", "missing", "never", "build", None] = None,
+        pull: ComposeCreatePullPolicy | None = None,
         stream_logs: bool = False,
     ) -> Iterable[tuple[str, bytes]] | None: ...
 
@@ -297,7 +304,7 @@ class ComposeCLI(DockerCLICaller):
         force_recreate: bool = False,
         no_build: bool = False,
         no_recreate: bool = False,
-        pull: Literal["always", "missing", "never", "build", None] = None,
+        pull: ComposeCreatePullPolicy | None = None,
         stream_logs: bool = False,
     ) -> Iterable[tuple[str, bytes]] | None:
         """Creates containers for a service.
@@ -938,6 +945,8 @@ class ComposeCLI(DockerCLICaller):
         user: str | None = None,
         volumes: Iterable[pywhales.components.volume.cli_wrapper.VolumeDefinition] = (),
         workdir: str | Path | None = None,
+        *,
+        timeout: float | None = None,
     ) -> (
         str
         | pywhales.components.container.cli_wrapper.Container
@@ -966,6 +975,8 @@ class ComposeCLI(DockerCLICaller):
         user: str | None = None,
         volumes: Iterable[pywhales.components.volume.cli_wrapper.VolumeDefinition] = (),
         workdir: str | Path | None = None,
+        *,
+        timeout: float | None = None,
     ) -> (
         str
         | pywhales.components.container.cli_wrapper.Container
@@ -1001,6 +1012,7 @@ class ComposeCLI(DockerCLICaller):
 
         """
 
+        validate_timeout(timeout)
         if detach and self.client_config.compose_dry_run:
             raise ValueError(
                 "Detached compose.run() cannot return a container in dry-run mode."
@@ -1047,9 +1059,9 @@ class ComposeCLI(DockerCLICaller):
         full_cmd += command
 
         if stream:
-            return stream_stdout_and_stderr(full_cmd)
+            return stream_stdout_and_stderr(full_cmd, timeout=timeout)
         else:
-            result = run(full_cmd, tty=tty)
+            result = run(full_cmd, tty=tty, timeout=timeout)
             if detach:
                 Container = pywhales.components.container.cli_wrapper.Container
                 return Container(self.client_config, result, is_immutable_id=True)
@@ -1286,7 +1298,7 @@ class ComposeCLI(DockerCLICaller):
         quiet: bool = ...,
         wait: bool = ...,
         no_attach_services: list[str] | str | None = ...,
-        pull: Literal["always", "missing", "never", None] = ...,
+        pull: ComposeUpPullPolicy | None = ...,
         *,
         stream_logs: Literal[True],
         wait_timeout: int | None = ...,
@@ -1317,7 +1329,7 @@ class ComposeCLI(DockerCLICaller):
         quiet: bool = ...,
         wait: bool = ...,
         no_attach_services: list[str] | str | None = ...,
-        pull: Literal["always", "missing", "never", None] = ...,
+        pull: ComposeUpPullPolicy | None = ...,
         stream_logs: Literal[False] = ...,
         wait_timeout: int | None = ...,
         dependencies: bool = True,
@@ -1348,7 +1360,7 @@ class ComposeCLI(DockerCLICaller):
         quiet: bool = False,
         wait: bool = False,
         no_attach_services: list[str] | str | None = None,
-        pull: Literal["always", "missing", "never", None] = None,
+        pull: ComposeUpPullPolicy | None = None,
         stream_logs: bool = False,
         wait_timeout: int | None = None,
         dependencies: bool = True,
@@ -1378,7 +1390,7 @@ class ComposeCLI(DockerCLICaller):
         quiet: bool = False,
         wait: bool = False,
         no_attach_services: list[str] | str | None = None,
-        pull: Literal["always", "missing", "never", None] = None,
+        pull: ComposeUpPullPolicy | None = None,
         stream_logs: bool = False,
         wait_timeout: int | None = None,
         dependencies: bool = True,

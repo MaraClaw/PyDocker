@@ -7,11 +7,13 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, override
+from typing import override
 
 import pydantic
 
 from . import utils
+from ._types import JsonObject
+from .enums import ClientTypeInput, ComposeProgressInput
 from .utils import ValidPath, run, to_list
 
 CACHE_VALIDITY_PERIOD: float = 0.01
@@ -77,11 +79,19 @@ class ClientConfig:
     compose_project_directory: ValidPath | None = None
     compose_compatibility: bool | None = None
     client_call: list[str] = field(default_factory=lambda: ["docker"])
-    client_type: Literal["docker", "nerdctl", "unknown"] = "unknown"
+    client_type: ClientTypeInput = "unknown"
     _client_call_with_path: list[Path | str] | None = None
     compose_dry_run: bool = False
     compose_parallel: int | None = None
-    compose_progress: Literal["auto", "tty", "plain", "json", "quiet"] | None = None
+    compose_progress: ComposeProgressInput | None = None
+    image_stream_buffer_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        budget = self.image_stream_buffer_bytes
+        if budget is not None and (type(budget) is not int or budget <= 0):
+            raise ValueError(
+                "image_stream_buffer_bytes must be a positive integer or None"
+            )
 
     def get_client_call_with_path(self) -> list[Path | str]:
         if self._client_call_with_path is None:
@@ -257,10 +267,10 @@ class ReloadableObject[InspectResultT, ReferenceT: str | None = str](DockerCLICa
 class ReloadableObjectFromJson[InspectResultT, ReferenceT: str | None = str](
     ReloadableObject[InspectResultT, ReferenceT]
 ):
-    def _fetch_inspect_result_json(self, reference: ReferenceT) -> dict[str, Any]:
+    def _fetch_inspect_result_json(self, reference: ReferenceT) -> JsonObject:
         raise NotImplementedError
 
-    def _parse_json_object(self, json_object: dict[str, Any]) -> InspectResultT:
+    def _parse_json_object(self, json_object: JsonObject) -> InspectResultT:
         raise NotImplementedError
 
     @override
@@ -272,9 +282,9 @@ class ReloadableObjectFromJson[InspectResultT, ReferenceT: str | None = str](
         self, json_str: str, references: Sequence[str]
     ) -> list[InspectResultT]:
         try:
-            json_objects = pydantic.TypeAdapter(
-                list[dict[str, pydantic.JsonValue]]
-            ).validate_json(json_str)
+            json_objects = pydantic.TypeAdapter(list[JsonObject]).validate_json(
+                json_str
+            )
         except pydantic.ValidationError as err:
             raise ParsingError("Invalid batch inspect JSON response") from err
         if len(json_objects) != len(references):
@@ -292,7 +302,7 @@ class ReloadableObjectFromJson[InspectResultT, ReferenceT: str | None = str](
             resolved[reference] = identity
         return results
 
-    def _parse_inspect_result(self, json_object: dict[str, Any]) -> InspectResultT:
+    def _parse_inspect_result(self, json_object: JsonObject) -> InspectResultT:
         try:
             return self._parse_json_object(json_object)
         except pydantic.ValidationError as err:

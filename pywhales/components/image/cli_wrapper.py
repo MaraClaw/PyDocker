@@ -19,6 +19,8 @@ from typing import (
     override,
 )
 
+from pydantic import JsonValue
+
 import pywhales.components.buildx.cli_wrapper
 from pywhales.client_config import (
     ClientConfig,
@@ -46,6 +48,7 @@ from pywhales.exceptions import DockerException, NoSuchImage
 from pywhales.utils import (
     MappedProcessStream,
     ValidPath,
+    custom_parse_object_as,
     run,
     stream_stdout_and_stderr,
     to_list,
@@ -89,13 +92,15 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
                 return
 
     @override
-    def _fetch_inspect_result_json(self, reference: str) -> dict[str, Any]:
+    def _fetch_inspect_result_json(self, reference: str) -> dict[str, JsonValue]:
         json_str = run([*self.docker_cmd, "image", "inspect", reference])
-        return json.loads(json_str)[0]
+        return custom_parse_object_as(dict[str, JsonValue], {**json.loads(json_str)[0]})
 
     @override
-    def _parse_json_object(self, json_object: Mapping[str, Any]) -> ImageInspectResult:
-        return ImageInspectResult(**json_object)
+    def _parse_json_object(
+        self, json_object: Mapping[str, JsonValue]
+    ) -> ImageInspectResult:
+        return ImageInspectResult.model_validate(json_object)
 
     @property
     def id(self) -> str:
@@ -689,7 +694,11 @@ class ImageCLI(DockerCLICaller):
             assert child is not None
             return child
 
-        return MultiImageStream(image_names, start)
+        return MultiImageStream(
+            image_names,
+            start,
+            buffer_bytes=self.client_config.image_stream_buffer_bytes,
+        )
 
     def _pull_single_tag(
         self,
@@ -709,7 +718,9 @@ class ImageCLI(DockerCLICaller):
         full_cmd.append(image_name)
 
         if stream_logs:
-            stream = stream_stdout_and_stderr(full_cmd)
+            stream = stream_stdout_and_stderr(
+                full_cmd, buffer_bytes=self.client_config.image_stream_buffer_bytes
+            )
             return MappedProcessStream(
                 stream, ((image_name, line) for _, line in stream)
             )
@@ -857,7 +868,11 @@ class ImageCLI(DockerCLICaller):
             assert child is not None
             return child
 
-        return MultiImageStream(tags_or_repos, start)
+        return MultiImageStream(
+            tags_or_repos,
+            start,
+            buffer_bytes=self.client_config.image_stream_buffer_bytes,
+        )
 
     def _push_single_tag(
         self,
@@ -869,7 +884,9 @@ class ImageCLI(DockerCLICaller):
         full_cmd.add_flag("--quiet", quiet)
         full_cmd.append(tag_or_repo)
         if stream_logs:
-            stream = stream_stdout_and_stderr(full_cmd)
+            stream = stream_stdout_and_stderr(
+                full_cmd, buffer_bytes=self.client_config.image_stream_buffer_bytes
+            )
             return MappedProcessStream(
                 stream, ((tag_or_repo, line) for _, line in stream)
             )

@@ -19,9 +19,9 @@ class ContextStorage(DockerCamelModel):
 
 class ContextInspectResult(DockerCamelModel):
     name: str | None = None
-    metadata: dict[str, object] | None = None
+    metadata: dict[str, pydantic.JsonValue] | None = None
     endpoints: dict[str, ContextEndpoint] | None = None
     tls_material: Annotated[
-        dict[str, object] | None, pydantic.Field(alias="TLSMaterial")
+        dict[str, pydantic.JsonValue] | None, pydantic.Field(alias="TLSMaterial")
     ] = None
     storage: ContextStorage | None = None

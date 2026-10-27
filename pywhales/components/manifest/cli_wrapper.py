@@ -1,7 +1,9 @@
 import json
 from collections.abc import Sequence
 from types import TracebackType
-from typing import Any, Self, override
+from typing import Self, override
+
+from pydantic import JsonValue
 
 from pywhales.client_config import (
     ClientConfig,
@@ -12,7 +14,7 @@ from pywhales.client_config import (
 from pywhales.components._cleanup import resource_cleanup
 from pywhales.components.buildx.imagetools.models import ImageVariantManifest
 from pywhales.components.manifest.models import ManifestListInspectResult
-from pywhales.utils import run, to_list
+from pywhales.utils import custom_parse_object_as, run, to_list
 
 
 class ManifestList(ReloadableObjectFromJson[ManifestListInspectResult]):
@@ -40,18 +42,18 @@ class ManifestList(ReloadableObjectFromJson[ManifestListInspectResult]):
             self.remove()
 
     @override
-    def _fetch_inspect_result_json(self, reference: str) -> dict[str, Any]:
+    def _fetch_inspect_result_json(self, reference: str) -> dict[str, JsonValue]:
         cmd = Command([*self.docker_cmd, "manifest", "inspect", reference])
         cmd.add_flag("--insecure", self.insecure)
         json_str = run(cmd)
-        return json.loads(json_str)
+        return custom_parse_object_as(dict[str, JsonValue], {**json.loads(json_str)})
 
     @override
     def _parse_json_object(
-        self, json_object: dict[str, Any]
+        self, json_object: dict[str, JsonValue]
     ) -> ManifestListInspectResult:
         json_object["name"] = self.reference
-        return ManifestListInspectResult(**json_object)
+        return ManifestListInspectResult.model_validate(json_object)
 
     @property
     def name(self) -> str | None:

@@ -3,6 +3,7 @@ from typing import Annotated
 
 from pydantic import Field
 
+from pywhales.enums import NodeAvailability, NodeReachability, NodeRole, NodeState
 from pywhales.utils import DockerCamelModel
 
 
@@ -13,8 +14,8 @@ class NodeVersion(DockerCamelModel):
 class NodeSpec(DockerCamelModel):
     name: str | None = None
     labels: dict[str, str] | None = None
-    role: str | None = None
-    availability: str | None = None
+    role: NodeRole | str | None = None
+    availability: NodeAvailability | str | None = None
 
 
 class NodePlatform(DockerCamelModel):
@@ -69,14 +70,14 @@ class NodeDescription(DockerCamelModel):
 
 
 class NodeStatus(DockerCamelModel):
-    state: str | None = None
+    state: NodeState | str | None = None
     message: str | None = None
     addr: str | None = None
 
 
 class NodeManagerStatus(DockerCamelModel):
     leader: bool | None = None
-    reachability: str | None = None
+    reachability: NodeReachability | str | None = None
     addr: str | None = None
 
 

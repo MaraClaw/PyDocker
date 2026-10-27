@@ -17,6 +17,8 @@ from typing import (
     override,
 )
 
+from pydantic import JsonValue
+
 import pywhales.components.buildx.cli_wrapper
 import pywhales.components.container.cli_wrapper
 import pywhales.components.image.cli_wrapper
@@ -29,9 +31,10 @@ from pywhales.client_config import (
 )
 from pywhales.components._cleanup import resource_cleanup
 from pywhales.components.volume.models import VolumeInspectResult
+from pywhales.enums import ResourceScope, ResourceScopeInput
 from pywhales.exceptions import NoSuchVolume
 from pywhales.test_utils import random_name
-from pywhales.utils import ValidPath, run, to_list
+from pywhales.utils import ValidPath, custom_parse_object_as, run, to_list
 
 type VolumeListFilter = (
     tuple[Literal["driver"], str]
@@ -39,7 +42,7 @@ type VolumeListFilter = (
     | tuple[Literal["label"], str]
     | tuple[Literal["label!"], str]
     | tuple[Literal["name"], str]
-    | tuple[Literal["scope"], Literal["swarm", "global", "local"]]
+    | tuple[Literal["scope"], ResourceScopeInput]
     | tuple[Literal["after", "since"], str]
     | tuple[Literal["until"], str]
     | tuple[Literal["dangling"], str]
@@ -68,13 +71,15 @@ class Volume(ReloadableObjectFromJson[VolumeInspectResult]):
                 return
 
     @override
-    def _fetch_inspect_result_json(self, reference: str) -> dict[str, Any]:
+    def _fetch_inspect_result_json(self, reference: str) -> dict[str, JsonValue]:
         json_str = run([*self.docker_cmd, "volume", "inspect", reference])
-        return json.loads(json_str)[0]
+        return custom_parse_object_as(dict[str, JsonValue], {**json.loads(json_str)[0]})
 
     @override
-    def _parse_json_object(self, json_object: dict[str, Any]) -> VolumeInspectResult:
-        return VolumeInspectResult(**json_object)
+    def _parse_json_object(
+        self, json_object: dict[str, JsonValue]
+    ) -> VolumeInspectResult:
+        return VolumeInspectResult.model_validate(json_object)
 
     @property
     def name(self) -> str:
@@ -93,7 +98,7 @@ class Volume(ReloadableObjectFromJson[VolumeInspectResult]):
         return self._get_inspect_result().created_at
 
     @property
-    def status(self) -> dict[str, Any] | None:
+    def status(self) -> dict[str, JsonValue] | None:
         return self._get_inspect_result().status
 
     @property
@@ -101,7 +106,7 @@ class Volume(ReloadableObjectFromJson[VolumeInspectResult]):
         return self._get_inspect_result().labels
 
     @property
-    def scope(self) -> str | None:
+    def scope(self) -> ResourceScope | str | None:
         return self._get_inspect_result().scope
 
     @property

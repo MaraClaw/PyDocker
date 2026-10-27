@@ -11,9 +11,59 @@ from uuid import uuid4
 import pytest
 
 from pywhales import DockerClient, Image
+from pywhales.client_config import ClientConfig
 from pywhales.components.container.models import PortBinding
 from pywhales.components.top import ContainerTopResult
 from pywhales.exceptions import DockerException
+
+
+@pytest.mark.parametrize("budget", [True, False, 0, -1, 1.5, "8", b"8"])
+def test_image_stream_budget_rejects_invalid_client_option_before_lookup(
+    budget: int | None,
+) -> None:
+    with patch("shutil.which") as lookup, pytest.raises(ValueError):
+        DockerClient(image_stream_buffer_bytes=budget)
+
+    lookup.assert_not_called()
+
+
+@pytest.mark.parametrize("budget", [None, 17])
+@pytest.mark.parametrize("ignored_budget", [0, 31])
+def test_image_stream_budget_keeps_supplied_config_precedence(
+    budget: int | None, ignored_budget: int
+) -> None:
+    config = ClientConfig(image_stream_buffer_bytes=budget, host="selected")
+
+    client = DockerClient(
+        client_config=config, image_stream_buffer_bytes=ignored_budget, host="ignored"
+    )
+
+    assert client.client_config is config
+    assert client.client_config.image_stream_buffer_bytes == budget
+    assert client.client_config.host == "selected"
+
+
+def test_image_stream_budget_keeps_clients_and_mutable_options_isolated() -> None:
+    files = [Path("compose.yml")]
+    call = [sys.executable, "engine"]
+    first = DockerClient(
+        image_stream_buffer_bytes=17, compose_files=files, client_call=call
+    )
+    second = DockerClient(
+        image_stream_buffer_bytes=31, compose_files=files, client_call=call
+    )
+    default = DockerClient()
+
+    first.client_config.compose_files.append(Path("extra.yml"))
+    first.client_config.client_call.append("--debug")
+    first.client_config.image_stream_buffer_bytes = 23
+
+    assert second.client_config.image_stream_buffer_bytes == 31
+    assert default.client_config.image_stream_buffer_bytes is None
+    assert second.client_config.compose_files == files == [Path("compose.yml")]
+    assert second.client_config.client_call == call == [sys.executable, "engine"]
+    assert default.client_config.compose_files == []
+    assert default.client_config.client_call == ["docker"]
 
 
 @patch(
@@ -209,7 +259,9 @@ def test_docker_client_options(docker_client: DockerClient) -> None:
         network_settings = engine.network_settings
         assert network_settings is not None
         assert network_settings.ports is not None
-        binding = PortBinding.model_validate(network_settings.ports["2375/tcp"][0])
+        bindings = network_settings.ports["2375/tcp"]
+        assert isinstance(bindings, list)
+        binding = PortBinding.model_validate(bindings[0])
         assert binding.host_ip == "127.0.0.1"
         assert binding.host_port is not None
         endpoint = f"tcp://127.0.0.1:{binding.host_port}"

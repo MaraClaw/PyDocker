@@ -3,7 +3,9 @@ from __future__ import annotations
 import builtins
 import json
 from datetime import datetime
-from typing import Any, override
+from typing import override
+
+from pydantic import JsonValue
 
 import pywhales.components.service.cli_wrapper
 from pywhales.client_config import (
@@ -18,7 +20,8 @@ from pywhales.components.task.models import (
     TaskSpec,
     TaskStatus,
 )
-from pywhales.utils import run
+from pywhales.enums import TaskState
+from pywhales.utils import custom_parse_object_as, run
 
 
 class Task(ReloadableObjectFromJson[TaskInspectResult]):
@@ -28,13 +31,15 @@ class Task(ReloadableObjectFromJson[TaskInspectResult]):
         super().__init__(client_config, "id", reference, is_immutable_id)
 
     @override
-    def _fetch_inspect_result_json(self, reference: str) -> dict[str, Any]:
+    def _fetch_inspect_result_json(self, reference: str) -> dict[str, JsonValue]:
         json_str = run([*self.docker_cmd, "inspect", reference])
-        return json.loads(json_str)[0]
+        return custom_parse_object_as(dict[str, JsonValue], {**json.loads(json_str)[0]})
 
     @override
-    def _parse_json_object(self, json_object: dict[str, Any]) -> TaskInspectResult:
-        return TaskInspectResult(**json_object)
+    def _parse_json_object(
+        self, json_object: dict[str, JsonValue]
+    ) -> TaskInspectResult:
+        return TaskInspectResult.model_validate(json_object)
 
     @property
     def id(self) -> str:
@@ -85,7 +90,7 @@ class Task(ReloadableObjectFromJson[TaskInspectResult]):
         return self._get_inspect_result().status
 
     @property
-    def desired_state(self) -> str | None:
+    def desired_state(self) -> TaskState | str | None:
         return self._get_inspect_result().desired_state
 
     @override

@@ -9,7 +9,7 @@ from time import monotonic
 import pytest
 
 import pywhales.utils
-from pywhales.exceptions import NoSuchContainer
+from pywhales.exceptions import DockerException, DockerTimeout, NoSuchContainer
 from pywhales.utils import (
     MappedProcessStream,
     ProcessStream,
@@ -110,6 +110,7 @@ def test_process_stream_close_after_eof() -> None:
 def _assert_process_released(stream: ProcessStream) -> None:
     assert stream._process.poll() is not None
     assert all(not thread.is_alive() for thread in stream._threads)
+    assert not stream._watchdog.is_alive()
     assert all(
         pipe.closed
         for pipe in (stream.stdin, stream._process.stdout, stream._process.stderr)
@@ -349,3 +350,727 @@ def test_process_stream_close_discards_buffered_stdin_held_by_descendant() -> No
             assert select.select([status_reader], [], [], 3)[0]
             assert status_reader.read(1) == b""
             _assert_process_released(stream)
+
+
+def test_run_timeout_preserves_captured_output() -> None:
+    command = [
+        sys.executable,
+        "-c",
+        "import sys; print('ready', flush=True); "
+        "sys.stderr.write('error\\n'); sys.stderr.flush(); "
+        "__import__('threading').Event().wait()",
+    ]
+
+    with pytest.raises(DockerTimeout) as raised:
+        pywhales.utils.run(command, input=b"", timeout=1)
+
+    assert type(raised.value).__name__ == "DockerTimeout"
+    assert raised.value.docker_command == command
+    assert raised.value.stdout == "ready\n"
+    assert raised.value.stderr == "error\n"
+
+
+def test_process_stream_times_out_without_consumption() -> None:
+    stream = stream_stdout_and_stderr(
+        [sys.executable, "-c", "input()"], pipe_stdin=True, timeout=0.1
+    )
+
+    assert stream._released.wait(timeout=3)
+
+    with pytest.raises(DockerTimeout) as raised:
+        next(stream)
+    assert raised.value.docker_command[:2] == [sys.executable, "-c"]
+    assert list(stream) == []
+    _assert_process_released(stream)
+
+
+@pytest.mark.parametrize("mapped", [False, True])
+def test_process_stream_context_reports_unconsumed_timeout(mapped: bool) -> None:
+    child = stream_stdout_and_stderr(
+        [sys.executable, "-c", "input()"], pipe_stdin=True, timeout=0.1
+    )
+    stream = (
+        MappedProcessStream(child, (line for _, line in child)) if mapped else child
+    )
+
+    with pytest.raises(DockerTimeout), stream:
+        assert child._released.wait(timeout=3)
+
+    assert list(stream) == []
+    _assert_process_released(child)
+
+
+@pytest.mark.parametrize(
+    "timeout", [0, -1, float("inf"), float("-inf"), float("nan"), True]
+)
+def test_invalid_timeout_is_rejected_before_launch(timeout: float) -> None:
+    with pytest.raises(ValueError):
+        pywhales.utils.run(["does-not-exist"], timeout=timeout)
+    with pytest.raises(ValueError):
+        stream_stdout_and_stderr(["does-not-exist"], timeout=timeout)
+
+
+@pytest.mark.parametrize("timeout", [None, 1.0, 1e308])
+def test_run_deadline_preserves_return_shapes(timeout: float | None) -> None:
+    assert (
+        pywhales.utils.run([sys.executable, "-c", "print('output')"], timeout=timeout)
+        == "output"
+    )
+    assert pywhales.utils.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; print('output'); sys.stderr.write('error\\n')",
+        ],
+        return_stderr=True,
+        timeout=timeout,
+    ) == ("output", "error")
+
+
+def test_run_natural_failure_is_not_timeout() -> None:
+    with pytest.raises(DockerException) as raised:
+        pywhales.utils.run([sys.executable, "-c", "raise SystemExit(7)"], timeout=1)
+    assert type(raised.value) is DockerException
+    assert raised.value.return_code == 7
+
+
+def test_process_stream_deadline_continues_while_consumption_pauses() -> None:
+    stream = stream_stdout_and_stderr(
+        [sys.executable, "-c", "print('ready', flush=True); input()"],
+        pipe_stdin=True,
+        timeout=1,
+    )
+    assert next(stream) == ("stdout", b"ready\n")
+
+    assert stream._released.wait(timeout=3)
+
+    with pytest.raises(DockerTimeout):
+        next(stream)
+    _assert_process_released(stream)
+
+
+@pytest.mark.parametrize("mapped", [False, True])
+def test_process_stream_timeout_preserves_active_body_exception(mapped: bool) -> None:
+    child = stream_stdout_and_stderr(
+        [sys.executable, "-c", "input()"], pipe_stdin=True, timeout=0.1
+    )
+    stream = (
+        MappedProcessStream(child, (line for _, line in child)) if mapped else child
+    )
+    error = RuntimeError("body failure")
+
+    with pytest.raises(RuntimeError) as raised, stream:
+        assert child._released.wait(timeout=3)
+        raise error
+
+    assert raised.value is error
+    _assert_process_released(child)
+
+
+def test_process_stream_explicit_close_cancels_deadline() -> None:
+    stream = stream_stdout_and_stderr(
+        [sys.executable, "-c", "input()"], pipe_stdin=True, timeout=60
+    )
+
+    stream.close()
+
+    with stream:
+        assert list(stream) == []
+    _assert_process_released(stream)
+
+
+def test_process_stream_completed_child_keeps_unread_output_past_deadline() -> None:
+    stream = stream_stdout_and_stderr(
+        [sys.executable, "-c", "import os; os.write(1, b'ab\\n' * 100)"],
+        timeout=0.5,
+        buffer_bytes=3,
+    )
+    try:
+        assert stream._process.wait(timeout=3) == 0
+        assert not stream._released.wait(timeout=0.6)
+
+        assert list(stream) == [("stdout", b"ab\n")] * 100
+
+        _assert_process_released(stream)
+    finally:
+        stream.close()
+
+
+@pytest.mark.parametrize("payload", [b"1234567\n", b"12345678"])
+@pytest.mark.parametrize("pipe", [1, 2])
+def test_process_stream_record_at_budget_is_preserved(
+    payload: bytes, pipe: int
+) -> None:
+    stream = stream_stdout_and_stderr(
+        [sys.executable, "-c", f"import os; os.write({pipe}, {payload!r})"],
+        buffer_bytes=8,
+    )
+
+    assert list(stream) == [("stdout" if pipe == 1 else "stderr", payload)]
+
+    _assert_process_released(stream)
+
+
+@pytest.mark.parametrize("payload", [b"12345678\n", b"123456789"])
+@pytest.mark.parametrize("pipe", [1, 2])
+def test_process_stream_oversize_record_is_observable_without_consumer(
+    payload: bytes, pipe: int
+) -> None:
+    stream = stream_stdout_and_stderr(
+        [sys.executable, "-c", f"import os; os.write({pipe}, {payload!r}); input()"],
+        pipe_stdin=True,
+        buffer_bytes=8,
+    )
+    try:
+        assert stream._released.wait(timeout=3)
+
+        with pytest.raises(BufferError):
+            next(stream)
+
+        assert list(stream) == []
+        _assert_process_released(stream)
+    finally:
+        stream.close()
+
+
+def test_process_stream_stderr_history_has_independent_budget() -> None:
+    stream = stream_stdout_and_stderr(
+        [
+            sys.executable,
+            "-c",
+            "import os; os.write(2, b'ab\\n'); input(); os.write(2, b'cd\\n'); input()",
+        ],
+        pipe_stdin=True,
+        buffer_bytes=4,
+    )
+    try:
+        assert next(stream) == ("stderr", b"ab\n")
+        assert stream.stdin is not None
+        stream.stdin.write(b"continue\n")
+        stream.stdin.flush()
+
+        with pytest.raises(BufferError):
+            next(stream)
+
+        assert len(stream._stderr) <= 4
+        _assert_process_released(stream)
+    finally:
+        stream.close()
+
+
+@pytest.mark.parametrize("timeout", [None, 0.3])
+def test_process_stream_saturated_queue_wakes_on_close_or_expiry(
+    timeout: float | None,
+) -> None:
+    stream = stream_stdout_and_stderr(
+        [sys.executable, "-c", "import os; os.write(1, b'ab\\n' * 100000); input()"],
+        pipe_stdin=True,
+        timeout=timeout,
+        buffer_bytes=3,
+    )
+    try:
+        with stream._queue.condition:
+            assert stream._queue.condition.wait_for(
+                lambda: stream._queue._bytes == 3, timeout=3
+            )
+            assert max(stream._pending_bytes.values()) <= 3
+            assert len(stream._stderr) <= 3
+        if timeout is None:
+            closers = [Thread(target=stream.close, daemon=True) for _ in range(4)]
+            for closer in closers:
+                closer.start()
+            for closer in closers:
+                closer.join(timeout=3)
+                assert not closer.is_alive()
+            assert list(stream) == []
+        else:
+            assert stream._released.wait(timeout=3)
+            with pytest.raises(DockerTimeout):
+                next(stream)
+        _assert_process_released(stream)
+    finally:
+        stream.close()
+
+
+def test_process_stream_unfinished_records_have_separate_pipe_budgets() -> None:
+    stream = stream_stdout_and_stderr(
+        [
+            sys.executable,
+            "-c",
+            "import os; os.write(1, b'ab\\n1234'); os.write(2, b'5678'); input()",
+        ],
+        pipe_stdin=True,
+        buffer_bytes=4,
+    )
+    try:
+        with stream._queue.condition:
+            assert stream._queue.condition.wait_for(
+                lambda: stream._pending_bytes == {"stdout": 4, "stderr": 4}, timeout=3
+            )
+            assert stream._queue._bytes == 3
+            assert len(stream._stderr) == 4
+
+        assert next(stream) == ("stdout", b"ab\n")
+    finally:
+        stream.close()
+    _assert_process_released(stream)
+
+
+def test_process_stream_buffer_error_is_reported_on_context_exit() -> None:
+    child = stream_stdout_and_stderr(
+        [sys.executable, "-c", "print('oversize'); input()"],
+        pipe_stdin=True,
+        buffer_bytes=3,
+    )
+    stream = MappedProcessStream(child, (line for _, line in child))
+
+    with pytest.raises(BufferError), stream:
+        assert child._released.wait(timeout=3)
+
+    _assert_process_released(child)
+
+
+def test_process_stream_timeout_preserves_partial_output() -> None:
+    stream = stream_stdout_and_stderr(
+        [
+            sys.executable,
+            "-c",
+            "import os; os.write(1, b'partial\\xff'); os.write(2, b'error'); input()",
+        ],
+        pipe_stdin=True,
+        timeout=1,
+        buffer_bytes=16,
+    )
+    try:
+        assert stream._released.wait(timeout=3)
+
+        with pytest.raises(DockerTimeout) as raised:
+            next(stream)
+
+        assert raised.value.stdout == "partial\ufffd"
+        assert raised.value.stderr == "error"
+        _assert_process_released(stream)
+    finally:
+        stream.close()
+
+
+def test_process_stream_failure_wakes_sibling_blocked_on_full_queue() -> None:
+    stream = stream_stdout_and_stderr(
+        [
+            sys.executable,
+            "-c",
+            "import os; os.write(1, b'ab\\n' * 10); input(); os.write(2, b'oversize'); input()",
+        ],
+        pipe_stdin=True,
+        buffer_bytes=3,
+    )
+    try:
+        with stream._queue.condition:
+            assert stream._queue.condition.wait_for(
+                lambda: stream._queue._bytes == 3, timeout=3
+            )
+        assert stream.stdin is not None
+        stream.stdin.write(b"fail\n")
+        stream.stdin.flush()
+
+        assert stream._released.wait(timeout=3)
+
+        with pytest.raises(BufferError):
+            next(stream)
+        _assert_process_released(stream)
+    finally:
+        stream.close()
+
+
+@pytest.mark.parametrize("budget", [0, -1, True, False, 1.5, "3"])
+def test_process_stream_invalid_budget_is_rejected_before_launch(budget: int) -> None:
+    with pytest.raises(ValueError):
+        stream_stdout_and_stderr(["does-not-exist"], buffer_bytes=budget)
+
+
+def test_process_stream_close_after_timeout_does_not_erase_error() -> None:
+    stream = stream_stdout_and_stderr(
+        [sys.executable, "-c", "input()"], pipe_stdin=True, timeout=0.1
+    )
+    assert stream._released.wait(timeout=3)
+
+    stream.close()
+
+    with pytest.raises(DockerTimeout):
+        next(stream)
+    with stream:
+        assert list(stream) == []
+    _assert_process_released(stream)
+
+
+def test_process_stream_timeout_interrupts_blocked_next() -> None:
+    stream = stream_stdout_and_stderr(
+        [sys.executable, "-c", "input()"], pipe_stdin=True, timeout=0.1
+    )
+    errors: list[DockerTimeout] = []
+
+    def consume() -> None:
+        try:
+            next(stream)
+        except DockerTimeout as error:
+            errors.append(error)
+
+    consumer = Thread(target=consume, daemon=True)
+    consumer.start()
+    consumer.join(timeout=3)
+
+    assert not consumer.is_alive()
+    assert len(errors) == 1
+    _assert_process_released(stream)
+
+
+def test_mapped_process_stream_mapper_failure_closes_saturated_transport() -> None:
+    child = stream_stdout_and_stderr(
+        [sys.executable, "-c", "import os; os.write(1, b'ab\\n' * 100000); input()"],
+        pipe_stdin=True,
+        buffer_bytes=3,
+    )
+    error = ValueError("mapper failed")
+
+    def map_record(record: tuple[str, bytes]) -> bytes:
+        raise error
+
+    stream = MappedProcessStream(child, map(map_record, child))
+
+    with pytest.raises(ValueError) as raised:
+        next(stream)
+
+    assert raised.value is error
+    _assert_process_released(child)
+
+
+def test_mapped_process_stream_close_after_expiry_keeps_pending_timeout() -> None:
+    child = stream_stdout_and_stderr(
+        [sys.executable, "-c", "input()"], pipe_stdin=True, timeout=0.1
+    )
+    stream = MappedProcessStream(child, (line for _, line in child))
+    assert child._released.wait(timeout=3)
+
+    stream.close()
+
+    with pytest.raises(DockerTimeout):
+        next(stream)
+    assert list(stream) == []
+    _assert_process_released(child)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX fork and inherited fds")
+def test_process_stream_close_releases_pipes_inherited_after_natural_exit() -> None:
+    release_read, release_write = os.pipe()
+    status_read, status_write = os.pipe()
+    with (
+        os.fdopen(release_read, "rb", buffering=0) as release_reader,
+        os.fdopen(release_write, "wb", buffering=0) as release_writer,
+        os.fdopen(status_read, "rb", buffering=0) as status_reader,
+        os.fdopen(status_write, "wb", buffering=0) as status_writer,
+    ):
+        stream = stream_stdout_and_stderr(
+            [
+                sys.executable,
+                "-c",
+                "import os, sys\n"
+                "release, status = map(int, sys.argv[1:])\n"
+                "if os.fork() == 0:\n"
+                "    os.write(status, b'R')\n"
+                "    os.read(release, 1)\n"
+                "    os._exit(0)\n"
+                "os._exit(0)\n",
+                release_reader.fileno(),
+                status_writer.fileno(),
+            ],
+            pass_fds=(release_reader.fileno(), status_writer.fileno()),
+            timeout=0.5,
+        )
+        try:
+            release_reader.close()
+            status_writer.close()
+            assert select.select([status_reader], [], [], 3)[0]
+            assert status_reader.read(1) == b"R"
+            assert stream._process.wait(timeout=3) == 0
+            assert not stream._released.wait(timeout=0.6)
+
+            started = monotonic()
+            stream.close()
+
+            assert monotonic() - started < 3
+            assert list(stream) == []
+            _assert_process_released(stream)
+        finally:
+            release_writer.close()
+            stream.close()
+            assert select.select([status_reader], [], [], 3)[0]
+            assert status_reader.read(1) == b""
+
+
+def test_process_stream_deadline_uses_launch_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pywhales.utils, "monotonic", lambda: monotonic() - 60)
+
+    stream = stream_stdout_and_stderr(
+        [sys.executable, "-c", "input()"], pipe_stdin=True, timeout=30
+    )
+
+    assert stream._released.wait(timeout=3)
+    with pytest.raises(DockerTimeout):
+        next(stream)
+    _assert_process_released(stream)
+
+
+def test_process_stream_close_wins_pending_natural_failure_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stream = stream_stdout_and_stderr([sys.executable, "-c", "raise SystemExit(7)"])
+    reaped = Event()
+    resume = Event()
+    original_raise = stream._raise_error
+    errors: list[DockerException] = []
+
+    def pause_after_reap() -> None:
+        original_raise()
+        reaped.set()
+        assert resume.wait(timeout=3)
+
+    def consume() -> None:
+        try:
+            list(stream)
+        except DockerException as error:
+            errors.append(error)
+
+    monkeypatch.setattr(stream, "_raise_error", pause_after_reap)
+    consumer = Thread(target=consume, daemon=True)
+    consumer.start()
+    try:
+        assert reaped.wait(timeout=3)
+
+        stream.close()
+        resume.set()
+        consumer.join(timeout=3)
+
+        assert not consumer.is_alive()
+        assert errors == []
+        _assert_process_released(stream)
+    finally:
+        resume.set()
+        consumer.join(timeout=3)
+        stream.close()
+
+
+def test_process_stream_close_after_deadline_records_expiry() -> None:
+    stream = stream_stdout_and_stderr(
+        [sys.executable, "-c", "input()"], pipe_stdin=True, timeout=60
+    )
+    with stream._queue.condition:
+        stream._deadline = monotonic() - 1
+
+    stream.close()
+
+    with pytest.raises(DockerTimeout):
+        next(stream)
+    _assert_process_released(stream)
+
+
+def test_process_stream_close_wins_before_owner_failure_is_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stream = stream_stdout_and_stderr(
+        [sys.executable, "-c", "import os; input(); os._exit(7)"], pipe_stdin=True
+    )
+    observed = Event()
+    resume = Event()
+    errors: list[OSError | BufferError | DockerException] = []
+    fail = stream._fail
+
+    def pause_before_failure(error: OSError | BufferError | DockerException) -> None:
+        observed.set()
+        assert resume.wait(timeout=3)
+        fail(error)
+
+    monkeypatch.setattr(stream, "_fail", pause_before_failure)
+    stream._on_failure(errors.append)
+    closer = Thread(target=stream.close, daemon=True)
+    try:
+        assert stream.stdin is not None
+        stream.stdin.write(b"exit\n")
+        stream.stdin.flush()
+        assert observed.wait(timeout=3)
+
+        closer.start()
+        assert stream._stop.wait(timeout=3)
+        resume.set()
+        closer.join(timeout=3)
+
+        assert not closer.is_alive()
+        assert errors == []
+        assert list(stream) == []
+        _assert_process_released(stream)
+    finally:
+        resume.set()
+        if closer.ident is not None:
+            closer.join(timeout=3)
+        stream.close()
+
+
+def test_process_stream_owner_keeps_natural_failure_exception_type() -> None:
+    message = b"No such container: missing\n"
+    stream = stream_stdout_and_stderr(
+        [
+            sys.executable,
+            "-c",
+            f"import os; os.write(2, {message!r}); input(); os._exit(7)",
+        ],
+        pipe_stdin=True,
+    )
+    errors: list[OSError | BufferError | DockerException] = []
+    stream._on_failure(errors.append)
+    try:
+        assert next(stream) == ("stderr", message)
+
+        assert stream.stdin is not None
+        stream.stdin.write(b"exit\n")
+        stream.stdin.flush()
+
+        assert stream._released.wait(timeout=3)
+        assert len(errors) == 1
+        with pytest.raises(NoSuchContainer) as raised:
+            next(stream)
+        assert raised.value is errors[0]
+        assert raised.value.return_code == 7
+        assert raised.value.stderr == message.decode()
+        assert list(stream) == []
+        _assert_process_released(stream)
+    finally:
+        stream.close()
+
+
+def test_process_stream_timeout_preserves_read_scratch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stream = stream_stdout_and_stderr(
+        [sys.executable, "-c", "input(); print('captured', flush=True); input()"],
+        pipe_stdin=True,
+        timeout=60,
+    )
+    read = Event()
+    resume = Event()
+    check_size = stream._check_size
+
+    def pause_after_read(size: int, category: str) -> None:
+        check_size(size, category)
+        read.set()
+        assert resume.wait(timeout=3)
+
+    monkeypatch.setattr(stream, "_check_size", pause_after_read)
+    try:
+        assert stream.stdin is not None
+        stream.stdin.write(b"read\n")
+        stream.stdin.flush()
+        assert read.wait(timeout=3)
+        with stream._queue.condition:
+            stream._deadline = monotonic() - 1
+            stream._expire()
+
+        resume.set()
+        assert stream._released.wait(timeout=3)
+
+        with pytest.raises(DockerTimeout) as raised:
+            next(stream)
+        assert raised.value.stdout == "captured\n"
+        _assert_process_released(stream)
+    finally:
+        resume.set()
+        stream.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX fork and inherited fds")
+def test_run_completed_child_with_inherited_pipes_is_not_timeout() -> None:
+    release_read, release_write = os.pipe()
+    status_read, status_write = os.pipe()
+    with (
+        os.fdopen(release_read, "rb", buffering=0) as release_reader,
+        os.fdopen(release_write, "wb", buffering=0) as release_writer,
+        os.fdopen(status_read, "rb", buffering=0) as status_reader,
+        os.fdopen(status_write, "wb", buffering=0) as status_writer,
+    ):
+        try:
+            output = pywhales.utils.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import os, sys\n"
+                    "release, status = map(int, sys.argv[1:])\n"
+                    "if os.fork() == 0:\n"
+                    "    os.write(status, b'R')\n"
+                    "    os.read(release, 1)\n"
+                    "    os._exit(0)\n"
+                    "os.write(1, b'completed\\n')\n"
+                    "os._exit(0)\n",
+                    release_reader.fileno(),
+                    status_writer.fileno(),
+                ],
+                pass_fds=(release_reader.fileno(), status_writer.fileno()),
+                timeout=0.5,
+            )
+
+            assert output == "completed"
+            assert select.select([status_reader], [], [], 3)[0]
+            assert status_reader.read(1) == b"R"
+        finally:
+            release_reader.close()
+            status_writer.close()
+            release_writer.close()
+            assert select.select([status_reader], [], [], 3)[0]
+            assert status_reader.read(1) == b""
+
+
+def test_process_stream_queue_budget_is_shared_between_both_producers() -> None:
+    stream = stream_stdout_and_stderr(
+        [
+            sys.executable,
+            "-c",
+            "import os; os.write(1, b'aa\\n' * 10); input(); os.write(2, b'bb\\n'); input()",
+        ],
+        pipe_stdin=True,
+        buffer_bytes=3,
+    )
+    try:
+        with stream._queue.condition:
+            assert stream._queue.condition.wait_for(
+                lambda: stream._queue._bytes == 3, timeout=3
+            )
+        assert stream.stdin is not None
+        stream.stdin.write(b"stderr\n")
+        stream.stdin.flush()
+        with stream._queue.condition:
+            assert stream._queue.condition.wait_for(
+                lambda: all(stream._inflight.values()), timeout=3
+            )
+            assert stream._queue._bytes == 3
+            assert len(stream._stderr) == 3
+    finally:
+        stream.close()
+    _assert_process_released(stream)
+
+
+@pytest.mark.parametrize("budget", [65536, 65537])
+def test_process_stream_record_bound_includes_newline_across_chunks(
+    budget: int,
+) -> None:
+    stream = stream_stdout_and_stderr(
+        [sys.executable, "-c", "import os; os.write(1, b'x' * 65536 + b'\\n')"],
+        buffer_bytes=budget,
+    )
+    try:
+        if budget == 65536:
+            with pytest.raises(BufferError):
+                list(stream)
+        else:
+            assert list(stream) == [("stdout", b"x" * 65536 + b"\n")]
+        _assert_process_released(stream)
+    finally:
+        stream.close()

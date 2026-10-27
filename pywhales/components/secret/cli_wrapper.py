@@ -13,6 +13,8 @@ from typing import (
     override,
 )
 
+from pydantic import JsonValue
+
 from pywhales.client_config import (
     ClientConfig,
     Command,
@@ -22,7 +24,13 @@ from pywhales.client_config import (
 from pywhales.components._cleanup import resource_cleanup
 from pywhales.components._swarm_inspect import parse_swarm_inspect_results
 from pywhales.components.secret.models import SecretInspectResult, SecretSpec
-from pywhales.utils import ValidPath, format_mapping_for_cli, run, to_list
+from pywhales.utils import (
+    ValidPath,
+    custom_parse_object_as,
+    format_mapping_for_cli,
+    run,
+    to_list,
+)
 
 type SecretListFilter = (
     tuple[Literal["id"], str]
@@ -51,13 +59,15 @@ class Secret(ReloadableObjectFromJson[SecretInspectResult]):
             self.remove()
 
     @override
-    def _fetch_inspect_result_json(self, reference: str) -> dict[str, Any]:
+    def _fetch_inspect_result_json(self, reference: str) -> dict[str, JsonValue]:
         json_str = run([*self.docker_cmd, "secret", "inspect", reference])
-        return json.loads(json_str)[0]
+        return custom_parse_object_as(dict[str, JsonValue], {**json.loads(json_str)[0]})
 
     @override
-    def _parse_json_object(self, json_object: dict[str, Any]) -> SecretInspectResult:
-        return SecretInspectResult(**json_object)
+    def _parse_json_object(
+        self, json_object: dict[str, JsonValue]
+    ) -> SecretInspectResult:
+        return SecretInspectResult.model_validate(json_object)
 
     @property
     def id(self) -> str:

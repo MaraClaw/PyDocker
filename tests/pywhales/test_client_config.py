@@ -14,6 +14,27 @@ from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.utils import PROJECT_ROOT
 
 
+@pytest.mark.parametrize("budget", [True, False, 0, -1, 1.5, "8", b"8"])
+def test_image_stream_budget_rejects_invalid_direct_config_before_lookup(
+    budget: int | None,
+) -> None:
+    with patch("shutil.which") as lookup, pytest.raises(ValueError):
+        ClientConfig(image_stream_buffer_bytes=budget)
+
+    lookup.assert_not_called()
+
+
+@pytest.mark.parametrize("budget", [None, 1, 1024])
+def test_image_stream_budget_keeps_valid_direct_config_without_lookup(
+    budget: int | None,
+) -> None:
+    with patch("shutil.which") as lookup:
+        config = ClientConfig(image_stream_buffer_bytes=budget)
+
+    assert config.image_stream_buffer_bytes == budget
+    lookup.assert_not_called()
+
+
 @pytest.mark.parametrize("component", ["service", "node", "config", "secret"])
 @pytest.mark.parametrize("explicit_reload", [False, True], ids=["expired", "explicit"])
 def test_swarm_batch_reload_retains_originating_configuration(

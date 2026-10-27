@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pywhales"
-version = "0.2.1"
+version = "0.2.5"
 description = "A Docker client for Python, designed to be fun and intuitive!"
 readme = "README.md"
 license = "MIT"
@@ -13,13 +13,13 @@ requires-python = ">=3.14.8"
 dependencies = [
     "pydantic>=2.14.1",
     "typing_extensions>=4.16.0",
-    "boto3>=1.43.118",
+    "boto3>=1.43.119",
     "s3transfer>=0.19.3",
 ]
 
 [dependency-groups]
 dev = [
-    "ruff>=0.17.2",
+    "ruff>=0.17.3",
     "ty>=0.0.92",
     "pytest>=9.1.1",
     "pytest-mock>=3.17.0",

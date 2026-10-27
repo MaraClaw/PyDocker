@@ -20,11 +20,9 @@ jobs:
       - name: Install locked dependencies
         run: uv sync --locked
       - name: prepare
-        run: |
-          uv run --locked python -m docs.autogen
-          cp docs/mkdocs.yml mkdocs.yml
+        run: uv run --locked python -m docs.autogen
       - name: Render
-        run: uv run --locked mkdocs build --config-file mkdocs.yml
+        run: uv run --locked mkdocs build --config-file docs/mkdocs.yml
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: Docs

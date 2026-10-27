@@ -122,7 +122,20 @@ def _check_normal_dynamic(client: DockerClient, call: Literal["build"] | None) -
 def _check_positional_streams(client: DockerClient, stream: bool) -> None:
     assert_type(
         client.buildx.bake(
-            (), None, (), False, True, False, "auto", False, False, {}, {}, None, stream
+            (),
+            None,
+            (),
+            False,
+            True,
+            False,
+            "auto",
+            False,
+            False,
+            {},
+            {},
+            None,
+            stream,
+            timeout=1,
         ),
         BakeResult | MappedProcessStream[str],
     )
@@ -155,6 +168,7 @@ def _check_positional_streams(client: DockerClient, stream: bool) -> None:
             (),
             None,
             stream,
+            timeout=1,
         ),
         Image | MappedProcessStream[str] | None,
     )

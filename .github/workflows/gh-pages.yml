@@ -20,8 +20,6 @@ jobs:
       - name: Install locked dependencies
         run: uv sync --locked
       - name: prepare
-        run: |
-          uv run --locked python -m docs.autogen
-          cp docs/mkdocs.yml mkdocs.yml
+        run: uv run --locked python -m docs.autogen
       - name: Deploy docs
-        run: uv run --locked mkdocs gh-deploy --config-file mkdocs.yml --force
+        run: uv run --locked mkdocs gh-deploy --config-file docs/mkdocs.yml --force

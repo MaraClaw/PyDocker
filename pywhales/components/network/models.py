@@ -1,13 +1,15 @@
 from datetime import datetime
-from typing import Any
 
+from pydantic import JsonValue
+
+from pywhales.enums import ResourceScope
 from pywhales.utils import DockerCamelModel
 
 
 class NetworkIPAM(DockerCamelModel):
     driver: str | None = None
-    config: list[dict[str, Any]] | None = None
-    options: dict[str, Any] | None = None
+    config: list[dict[str, JsonValue]] | None = None
+    options: dict[str, JsonValue] | None = None
 
 
 class NetworkContainer(DockerCamelModel):
@@ -22,7 +24,7 @@ class NetworkInspectResult(DockerCamelModel):
     name: str | None = None
     id: str | None = None
     created: datetime | None = None
-    scope: str | None = None
+    scope: ResourceScope | str | None = None
     driver: str | None = None
     enable_ipv6: bool | None = None
     ipam: NetworkIPAM | None = None
@@ -30,7 +32,7 @@ class NetworkInspectResult(DockerCamelModel):
     attachable: bool | None = None
     ingress: bool | None = None
     containers: dict[str, NetworkContainer] | None = None
-    options: dict[str, Any] | None = None
+    options: dict[str, JsonValue] | None = None
     labels: dict[str, str] | None = None
-    config_from: dict[str, object] | None = None
+    config_from: dict[str, JsonValue] | None = None
     config_only: bool | None = None

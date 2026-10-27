@@ -849,7 +849,11 @@ def test_run_with_random_port(ctr_client: DockerClient) -> None:
         ports = container.network_settings.ports
         assert ports is not None
         assert ports["90/tcp"] is not None
-        assert ports["90/tcp"][0]["HostPort"] is not None
+        bindings = ports["90/tcp"]
+        assert isinstance(bindings, list)
+        binding = bindings[0]
+        assert isinstance(binding, dict)
+        assert binding["HostPort"] is not None
         assert container.id[:12] in repr(ctr_client.container.list())
 
 
@@ -862,7 +866,11 @@ def test_create_with_random_ports(ctr_client: DockerClient) -> None:
         ports = container.network_settings.ports
         assert ports is not None
         assert ports["90/tcp"] is not None
-        assert ports["90/tcp"][0]["HostPort"] is not None
+        bindings = ports["90/tcp"]
+        assert isinstance(bindings, list)
+        binding = bindings[0]
+        assert isinstance(binding, dict)
+        assert binding["HostPort"] is not None
 
 
 def test_create_with_cgroupns(ctr_client: DockerClient) -> None:
@@ -1542,6 +1550,7 @@ def test_exec_detach_keys(run_mock: Mock) -> None:
         ],
         tty=False,
         pass_fds=(),
+        timeout=None,
     )
 
 
@@ -1897,6 +1906,7 @@ def test_run_default_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
         tty=False,
         capture_stderr=False,
         pass_fds=(),
+        timeout=None,
     )
 
 
@@ -1918,6 +1928,7 @@ def test_run_missing_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
         tty=False,
         capture_stderr=False,
         pass_fds=(),
+        timeout=None,
     )
 
 
@@ -1939,6 +1950,7 @@ def test_run_always_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
         tty=False,
         capture_stderr=False,
         pass_fds=(),
+        timeout=None,
     )
 
 
@@ -1967,6 +1979,7 @@ def test_run_never_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
         tty=False,
         capture_stderr=False,
         pass_fds=(),
+        timeout=None,
     )
 
 

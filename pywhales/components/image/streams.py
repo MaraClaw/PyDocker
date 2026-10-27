@@ -1,10 +1,10 @@
 from collections.abc import Callable, Generator, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from queue import Queue
 from threading import Event, Lock
 from types import TracebackType
 from typing import Self, override
 
+from pywhales._stream_buffer import StreamBuffer
 from pywhales.utils import MappedProcessStream
 
 
@@ -20,16 +20,20 @@ class MultiImageStream(Iterator[tuple[str, bytes]]):
         self,
         names: Sequence[str],
         factory: Callable[[str], MappedProcessStream[tuple[str, bytes]]],
+        *,
+        buffer_bytes: int | None = None,
     ) -> None:
         self._names = tuple(names)
         self._factory = factory
         self._lock = Lock()
-        self._queue: Queue[tuple[str, bytes] | None] = Queue()
+        self._buffer_bytes = buffer_bytes
+        self._queue = StreamBuffer(buffer_bytes)
         self._executor: ThreadPoolExecutor | None = None
         self._children: set[MappedProcessStream[tuple[str, bytes]]] = set()
         self._remaining = len(names)
         self._stopped = False
         self._closing = False
+        self._failure_cleanup_started = False
         self._cleanup_done = Event()
         self._error: BaseException | None = None
 
@@ -43,7 +47,7 @@ class MultiImageStream(Iterator[tuple[str, bytes]]):
                         future = self._executor.submit(self._consume, name)
                         future.add_done_callback(self._worker_done)
                     if not self._names:
-                        self._queue.put(None)
+                        self._queue.finish()
             started = True
         finally:
             if not started:
@@ -56,27 +60,47 @@ class MultiImageStream(Iterator[tuple[str, bytes]]):
             child = self._factory(name)
             self._children.add(child)
         try:
+            child._on_failure(self._record_error)
             for item in child:
-                self._queue.put(item)
+                if self._buffer_bytes is not None and len(item[1]) > self._buffer_bytes:
+                    raise BufferError(
+                        f"image stream record exceeds buffer_bytes={self._buffer_bytes}"
+                    )
+                if not self._queue.put(item):
+                    break
         finally:
             child.close()
             with self._lock:
                 self._children.remove(child)
 
+    def _record_error(self, error: BaseException) -> None:
+        with self._lock:
+            if self._error is None:
+                self._error = error
+            self._stopped = True
+            self._queue.close()
+
     def _worker_done(self, future: Future[None]) -> None:
         error = None if future.cancelled() else future.exception()
+        if error is not None:
+            self._record_error(error)
         with self._lock:
             self._remaining -= 1
-            if error is not None and self._error is None:
-                self._error = error
-                self._stopped = True
+            if (
+                self._stopped
+                and not self._closing
+                and not self._failure_cleanup_started
+            ):
+                self._failure_cleanup_started = True
                 children = tuple(self._children)
                 executor = self._executor
             else:
                 children = ()
                 executor = None
-            if self._stopped or not self._remaining:
-                self._queue.put(None)
+            if self._stopped:
+                self._queue.close()
+            elif not self._remaining:
+                self._queue.finish()
         try:
             for child in children:
                 child.close()
@@ -115,7 +139,7 @@ class MultiImageStream(Iterator[tuple[str, bytes]]):
         """Stop admission, close children, then wait for all worker cleanup."""
         with self._lock:
             self._stopped = True
-            self._queue.put(None)
+            self._queue.close()
             cleanup_owner = not self._closing
             self._closing = True
             children = tuple(self._children)

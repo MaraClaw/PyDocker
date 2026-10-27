@@ -765,6 +765,8 @@ def test_bake_metadata_file_option(
         cmd: Iterable[str],
         capture_stderr: bool = True,
         env: dict[str, str] | None = None,
+        *,
+        timeout: float | None = None,
     ) -> str:
         recorded["cmd"] = list(cmd)
         return "{}"
@@ -792,6 +794,8 @@ def test_bake_without_metadata_file_option(
         cmd: Iterable[str],
         capture_stderr: bool = True,
         env: dict[str, str] | None = None,
+        *,
+        timeout: float | None = None,
     ) -> str:
         recorded["cmd"] = list(cmd)
         return "{}"
@@ -816,6 +820,8 @@ def test_bake_metadata_file_str_path_option(
         cmd: Iterable[str],
         capture_stderr: bool = True,
         env: dict[str, str] | None = None,
+        *,
+        timeout: float | None = None,
     ) -> str:
         recorded["cmd"] = list(cmd)
         return "{}"
@@ -890,7 +896,9 @@ def test_buildx_build_metadata_file(
 ) -> None:
     recorded = {}
 
-    def fake_run(cmd: Iterable[str], capture_stderr: bool = True) -> str:
+    def fake_run(
+        cmd: Iterable[str], capture_stderr: bool = True, *, timeout: float | None = None
+    ) -> str:
         recorded["cmd"] = list(cmd)
         return ""
 
@@ -920,7 +928,9 @@ def test_buildx_build_without_metadata_file(
 ) -> None:
     recorded = {}
 
-    def fake_run(cmd: Iterable[str], capture_stderr: bool = True) -> str:
+    def fake_run(
+        cmd: Iterable[str], capture_stderr: bool = True, *, timeout: float | None = None
+    ) -> str:
         recorded["cmd"] = list(cmd)
         return ""
 
@@ -944,7 +954,9 @@ def test_buildx_build_metadata_file_str_path(
 ) -> None:
     recorded = {}
 
-    def fake_run(cmd: Iterable[str], capture_stderr: bool = True) -> str:
+    def fake_run(
+        cmd: Iterable[str], capture_stderr: bool = True, *, timeout: float | None = None
+    ) -> str:
         recorded["cmd"] = list(cmd)
         return ""
 

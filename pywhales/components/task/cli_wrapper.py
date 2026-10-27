@@ -3,11 +3,12 @@ from __future__ import annotations
 import builtins
 import json
 from datetime import datetime
-from typing import override
+from typing import overload, override
 
 from pydantic import JsonValue
 
 import pywhales.components.service.cli_wrapper
+from pywhales._inspect_validation import parse_namespace_inspect_results
 from pywhales.client_config import (
     ClientConfig,
     DockerCLICaller,
@@ -110,12 +111,29 @@ class TaskCLI(DockerCLICaller):
         )
         return service_cli.ps(service_cli.list())
 
+    @overload
+    def inspect(self, x: str) -> Task: ...
+
+    @overload
+    def inspect(self, x: builtins.list[str]) -> builtins.list[Task]: ...
+
     def inspect(self, x: str | builtins.list[str]) -> Task | builtins.list[Task]:
         """Returns a `pywhales.Task` object from its ID."""
         if isinstance(x, str):
             return Task(self.client_config, x)
         else:
-            return [Task(self.client_config, reference) for reference in x]
+            if not x:
+                return []
+            parser = Task(self.client_config, x[0], is_immutable_id=True)
+            snapshots = parse_namespace_inspect_results(
+                parser, run([*self.docker_cmd, "inspect", "--type", "task", *x]), x
+            )
+            tasks = []
+            for identity, snapshot in snapshots:
+                task = Task(self.client_config, identity, is_immutable_id=True)
+                task._set_inspect_result(snapshot)
+                tasks.append(task)
+            return tasks
 
     def logs(self) -> None:
         """Not Yet implemented"""

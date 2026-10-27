@@ -22,6 +22,11 @@ from typing import (
 
 import pydantic
 
+from pywhales._execution_policy import (
+    DEFAULT_BUFFER,
+    BufferDefault,
+    get_execution_policy,
+)
 from pywhales._process_stream import ProcessStream as ProcessStream
 from pywhales.exceptions import DockerException, DockerTimeout
 from pywhales.exceptions import get_docker_exception_type as get_docker_exception_type
@@ -329,10 +334,13 @@ def _start_process(
     pipe_stdin: bool = False,
     *,
     timeout: float | None = None,
-    buffer_bytes: int | None = None,
+    buffer_bytes: int | BufferDefault | None = DEFAULT_BUFFER,
 ) -> ProcessStream:
     """Start a subprocess and wire up reader threads for stdout/stderr."""
     validate_timeout(timeout)
+    policy = get_execution_policy(full_cmd)
+    if buffer_bytes is DEFAULT_BUFFER:
+        buffer_bytes = policy.stream_buffer_bytes
     if buffer_bytes is not None and (
         type(buffer_bytes) is not int or buffer_bytes <= 0
     ):
@@ -367,7 +375,7 @@ def stream_stdout_and_stderr(
     pipe_stdin: bool = False,
     *,
     timeout: float | None = None,
-    buffer_bytes: int | None = None,
+    buffer_bytes: int | BufferDefault | None = DEFAULT_BUFFER,
 ) -> ProcessStream:
     """Stream stdout/stderr from a subprocess.
 

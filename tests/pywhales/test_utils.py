@@ -9,6 +9,8 @@ from time import monotonic
 import pytest
 
 import pywhales.utils
+from pywhales.client_config import ClientConfig
+from pywhales.components.buildx.cli_wrapper import stream_buildx_logs
 from pywhales.exceptions import DockerException, DockerTimeout, NoSuchContainer
 from pywhales.utils import (
     MappedProcessStream,
@@ -116,6 +118,81 @@ def _assert_process_released(stream: ProcessStream) -> None:
         for pipe in (stream.stdin, stream._process.stdout, stream._process.stderr)
         if pipe is not None
     )
+
+
+def test_client_stream_budget_is_live_for_new_launches_but_frozen_after_start() -> None:
+    config = ClientConfig(client_call=[sys.executable], stream_buffer_bytes=3)
+    command = [
+        *config.docker_cmd,
+        "-c",
+        "input(); print('long-record', flush=True); input()",
+    ]
+    stream = stream_stdout_and_stderr(command, pipe_stdin=True)
+    config.stream_buffer_bytes = None
+    try:
+        assert stream.stdin is not None
+        stream.stdin.write(b"go\n")
+        stream.stdin.flush()
+        with pytest.raises(BufferError):
+            next(stream)
+        _assert_process_released(stream)
+        with stream_stdout_and_stderr(command, pipe_stdin=True) as fresh:
+            assert fresh.stdin is not None
+            fresh.stdin.write(b"go\n")
+            fresh.stdin.flush()
+            assert next(fresh) == ("stdout", b"long-record\n")
+        _assert_process_released(fresh)
+    finally:
+        stream.close()
+
+
+def test_explicit_unbounded_buffer_does_not_fall_back_to_client_budget() -> None:
+    config = ClientConfig(client_call=[sys.executable], stream_buffer_bytes=3)
+
+    stream = stream_stdout_and_stderr(
+        [*config.docker_cmd, "-c", "print('long-record')"], buffer_bytes=None
+    )
+
+    assert list(stream) == [("stdout", b"long-record\n")]
+    _assert_process_released(stream)
+
+
+def test_buildx_mapped_stream_applies_client_budget_without_wrapper_override() -> None:
+    config = ClientConfig(client_call=[sys.executable], stream_buffer_bytes=3)
+
+    stream = stream_buildx_logs([*config.docker_cmd, "-c", "print('oversized')"])
+
+    with pytest.raises(BufferError):
+        list(stream)
+    _assert_process_released(stream._stream)
+
+
+def test_mapped_client_stream_applies_backpressure_and_cancels_saturated_child() -> (
+    None
+):
+    config = ClientConfig(client_call=[sys.executable], stream_buffer_bytes=3)
+    child = stream_stdout_and_stderr(
+        [
+            *config.docker_cmd,
+            "-c",
+            "import os; os.write(1, b'ab\\n' * 100000); input()",
+        ],
+        pipe_stdin=True,
+    )
+    stream = MappedProcessStream(child, (line for _, line in child))
+    try:
+        with child._queue.condition:
+            assert child._queue.condition.wait_for(
+                lambda: child._queue._bytes == 3 and bool(child._inflight["stdout"]),
+                timeout=3,
+            )
+
+        assert next(stream) == b"ab\n"
+        stream.close()
+
+        _assert_process_released(child)
+    finally:
+        stream.close()
 
 
 @pytest.mark.parametrize("consume", [False, True])

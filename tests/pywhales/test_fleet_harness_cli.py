@@ -1,0 +1,185 @@
+"""Actual offline CLI reports, failure receipts and safe input errors."""
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from scripts.fleet_harness.__main__ import main
+from scripts.fleet_harness.experiment import Comparison, Experiment
+from scripts.fleet_harness.runner import run
+from tests.pywhales.test_fleet_harness import FIXTURES, manifest, plan
+from tests.pywhales.test_transport_experiment import semantics
+
+
+def invoke(arguments: list[str], tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "scripts.fleet_harness", *arguments],
+        env={**os.environ, "PATH": str(tmp_path)},
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+
+
+def test_run_cli_when_docker_is_absent_writes_simulated_cleanup_report(
+    tmp_path: Path,
+) -> None:
+    result = invoke(
+        [
+            "run",
+            "--manifest",
+            str(FIXTURES / "manifest.json"),
+            "--input",
+            str(FIXTURES / "plan.json"),
+        ],
+        tmp_path,
+    )
+
+    report = json.loads(result.stdout)
+    assert result.returncode == 0 and report["simulation"] is True
+    assert report["status"] == "completed" and report["outcomes"]["succeeded"] == 3
+    assert report["cleanup"]["removed"] == report["ledger"]
+    assert report["environment"]["docker_engine"] is None
+    assert "private-example-connection" not in result.stdout
+
+
+@pytest.mark.parametrize("field,value", [("opt_in", False), ("provider", "real")])
+def test_run_cli_when_unapproved_returns_zero_call_receipt(
+    field: str, value: str | bool, tmp_path: Path
+) -> None:
+    raw = json.loads((FIXTURES / "plan.json").read_text())
+    raw[field] = value
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps(raw))
+
+    result = invoke(
+        ["run", "--manifest", str(FIXTURES / "manifest.json"), "--input", str(path)],
+        tmp_path,
+    )
+
+    report = json.loads(result.stdout)
+    assert result.returncode == 2 and report["status"] == "rejected"
+    assert (
+        report["provider_calls"]
+        == report["connections"]
+        == report["command_count"]
+        == 0
+    )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "ownership_marker",
+        "isolation_evidence_ref",
+        "effective_endpoint_allowlist",
+        "maximum_run_seconds",
+        "cleanup_surface_ref",
+    ],
+)
+def test_run_cli_when_authorization_fields_are_missing_never_starts(
+    field: str, tmp_path: Path
+) -> None:
+    raw = json.loads((FIXTURES / "manifest.json").read_text())
+    del raw["authorization"][field]
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(raw))
+
+    result = invoke(
+        ["run", "--manifest", str(path), "--input", str(FIXTURES / "plan.json")],
+        tmp_path,
+    )
+
+    report = json.loads(result.stdout)
+    assert result.returncode == 2 and report["provider_calls"] == 0
+    assert json.loads(result.stderr)["errors"]
+
+
+def test_decision_cli_when_baseline_is_absent_emits_no_go(tmp_path: Path) -> None:
+    result = invoke(["decide", "--input", str(FIXTURES / "no-baseline.json")], tmp_path)
+
+    report = json.loads(result.stdout)
+    assert result.returncode == 0
+    assert report["decision"] == "no_go" and report["candidate_launches"] == 0
+    assert report["selected_route"] == "cli" and report["simulation"] is True
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"credential-secret":"payload-secret"}',
+        "secret-invalid-json",
+        '{"operation_timeout_seconds":NaN}',
+    ],
+)
+def test_cli_errors_when_input_contains_private_values_are_fixed_codes(
+    raw: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "secret-path.json"
+    path.write_text(raw)
+
+    status = main(
+        ["run", "--manifest", str(FIXTURES / "manifest.json"), "--input", str(path)]
+    )
+
+    output = capsys.readouterr()
+    assert status == 2 and json.loads(output.out)["provider_calls"] == 0
+    assert "secret" not in output.err
+    assert {item["code"] for item in json.loads(output.err)["errors"]} <= {
+        "invalid",
+        "missing",
+    }
+
+
+def test_decision_cli_when_aggregate_outcomes_disagree_rejects_input(
+    tmp_path: Path,
+) -> None:
+    result = run(manifest(), plan())
+    comparison = Comparison(
+        cli=result,
+        candidate=result,
+        cli_contract=semantics(),
+        candidate_contract=semantics(),
+    )
+    raw = json.loads(Experiment(comparison=comparison).model_dump_json())
+    raw["comparison"]["candidate"]["outcomes"].update(succeeded=2, failed=1)
+    path = tmp_path / "inconsistent.json"
+    path.write_text(json.dumps(raw))
+
+    output = invoke(["decide", "--input", str(path)], tmp_path)
+
+    assert output.returncode == 2
+    assert json.loads(output.stdout)["candidate_launches"] == 0
+
+
+def test_decision_cli_when_private_connection_reference_is_imported_withholds_it(
+    tmp_path: Path,
+) -> None:
+    result = run(manifest(), plan())
+    comparison = Comparison(
+        cli=result,
+        candidate=result,
+        cli_contract=semantics(),
+        candidate_contract=semantics(),
+    )
+    raw = json.loads(Experiment(comparison=comparison).model_dump_json())
+    raw["comparison"]["candidate"]["environment"]["platform"]["endpoints"][0][
+        "connection_ref"
+    ] = "private-connection-secret"
+    path = tmp_path / "private.json"
+    path.write_text(json.dumps(raw))
+
+    output = invoke(["decide", "--input", str(path)], tmp_path)
+
+    assert output.returncode == 0
+    assert "private-connection-secret" not in output.stdout + output.stderr
+    evidence = json.loads(output.stdout)["evidence"]["comparison"]["candidate"]
+    assert (
+        evidence["environment"]["platform"]["endpoints"][0]["connection_ref"]
+        == "withheld"
+    )

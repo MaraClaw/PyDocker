@@ -1,0 +1,20 @@
+{
+  "provider": "fake",
+  "opt_in": true,
+  "repetitions": 1,
+  "maximum_samples": 10,
+  "operation_timeout_seconds": 4.0,
+  "steps": [
+    {"scenario": "lifecycle", "endpoint": "example-local", "action": "create", "asset": "example-container"},
+    {"scenario": "inventory", "endpoint": "example-context", "action": "inspect"},
+    {"scenario": "recovery", "endpoint": "example-local", "action": "fault", "fault": "synthetic-fault-not-authority", "recovery_seconds": 0.2}
+  ],
+  "metrics": [
+    {"name": "cpu_cores", "value": 0.1},
+    {"name": "rss_bytes", "value": 1024.0},
+    {"name": "file_descriptors", "value": 3.0},
+    {"name": "children", "value": 1.0},
+    {"name": "disk_bytes", "value": 1024.0},
+    {"name": "disk_inodes", "value": 1.0}
+  ]
+}

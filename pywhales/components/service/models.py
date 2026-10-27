@@ -1,3 +1,5 @@
+"""Typed Swarm service inspection snapshots and task-template configuration."""
+
 from datetime import datetime
 from typing import Annotated
 

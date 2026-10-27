@@ -1,3 +1,5 @@
+"""Swarm service administration, task discovery, and owned service-log streams."""
+
 from __future__ import annotations
 
 import builtins
@@ -55,6 +57,12 @@ type ServiceListFilter = (
 
 
 class Service(ReloadableObjectFromJson[ServiceInspectResult]):
+    """Reloadable Swarm service handle with context-exit removal.
+
+    Cleanup is attempted even if the body raises. If cleanup also fails, both
+    exceptions are preserved in an exception group.
+    """
+
     def __init__(
         self, client_config: ClientConfig, reference: str, is_immutable_id: bool = False
     ) -> None:
@@ -116,26 +124,13 @@ class Service(ReloadableObjectFromJson[ServiceInspectResult]):
         return self._get_inspect_result().update_status
 
     def ps(self) -> list[pywhales.components.task.cli_wrapper.Task]:
-        """Returns the list of tasks of this service."""
+        """Return task handles associated with this service."""
         return ServiceCLI(self.client_config).ps(self)
 
     def remove(self) -> None:
-        """Removes this service
+        """Remove this service from the Swarm.
 
-        It's also possible to use a service as a context manager.
-        By using a context manager, you ensures that the service will be removed even
-        if an exception occurs.
-
-        ```python
-        from pywhales import docker
-
-        docker.swarm.init()
-        with docker.service.create("ubuntu", ["sleep", "infinity"]) as my_service:
-            print("I'm doing things with the service here")
-            print(my_service.update_status)
-
-        print("I'm out of the context manager, the service has been removed.")
-        ```
+        A context manager attempts this removal even if its body raises.
         """
         ServiceCLI(self.client_config).remove(self)
 
@@ -156,7 +151,7 @@ class Service(ReloadableObjectFromJson[ServiceInspectResult]):
         quiet: bool = False,
         replicas: int | None = None,
     ) -> None:
-        """Updates a service
+        """Update this service.
 
         See the [`docker.service.update`](../sub-commands/service.md#update) command for
         information about the arguments.
@@ -166,9 +161,7 @@ class Service(ReloadableObjectFromJson[ServiceInspectResult]):
         )
 
     def exists(self) -> bool:
-        """Returns `True` if the service is still present in the swarm, `False`
-        if the service has been removed.
-        """
+        """Return whether this service can still be inspected in the Swarm."""
         return ServiceCLI(self.client_config).exists(self.id)
 
 
@@ -176,6 +169,8 @@ ValidService = str | Service
 
 
 class ServiceCLI(DockerCLICaller):
+    """Service commands requiring the configured CLI and a Swarm manager daemon."""
+
     def create(
         self,
         image: str,
@@ -214,15 +209,53 @@ class ServiceCLI(DockerCLICaller):
         secrets: builtins.list[dict[str, str]] | None = None,
         mounts: builtins.list[dict[str, str]] | None = None,
     ) -> Service:
-        """Creates a Docker swarm service.
+        """Create a Docker Swarm service.
 
-        Consider using 'docker stack deploy' instead as it's idempotent and
-        easier to read for complex applications.
-        docker stack deploy is basically docker compose for swarm clusters.
+        This requires a Swarm manager and changes daemon-managed service state.
+        Unless detach is True, Docker waits for service convergence.
 
-        Parameters:
+        Args:
             image: The image to use as the base for the service.
-            command: The command to execute in the container(s).
+            command: Container command arguments, or None to use the image default.
+            cap_add: Linux capabilities to add.
+            cap_drop: Linux capabilities to remove.
+            constraints: Scheduling constraints to apply.
+            detach: Return after submission instead of waiting for convergence.
+            dns: Custom DNS servers.
+            dns_options: DNS resolver options.
+            dns_search: DNS search domains.
+            endpoint_mode: Endpoint mode, or None to omit the option.
+            entrypoint: Entrypoint override, or None to use the image default.
+            envs: Environment variable values for service containers.
+            env_files: Local files supplying container environment variables.
+            generic_resources: Generic resource requirements for scheduling.
+            groups: Supplementary container groups.
+            healthcheck: Disable the image's health check when False.
+            health_cmd: Health-check command, or None to omit the option.
+            health_interval: Interval between health checks in seconds, or None
+                to omit the option.
+            health_retries: Failures before marking a container unhealthy.
+                None omits the option.
+            health_start_period: Health-check startup grace period in seconds,
+                or None to omit the option.
+            health_timeout: Health-check timeout in seconds, or None to omit it.
+            hosts: Host entries used to build repeated --host options.
+            hostname: Container hostname, or None to omit the option.
+            init: Run an init process inside service containers when True.
+            isolation: Container isolation mode, or None to omit the option.
+            labels: Service metadata labels.
+            limit_cpu: CPU limit, or None to omit the option.
+            limit_memory: Memory limit with Docker-supported units, or None to omit it.
+            limit_pids: PID limit, or None to omit the option.
+            log_driver: Logging driver, or None to omit the option.
+            network: Network attachment specification, or None to omit it.
+            restart_condition: Restart policy condition, or None to omit it.
+            restart_max_attempts: Maximum restart attempts, or None to omit the option.
+            secrets: Secret option mappings, or None to add no secrets.
+            mounts: Mount option mappings, or None to add no mounts.
+
+        Returns:
+            A handle to the created service without an initial inspect call.
         """
         full_cmd = Command([*self.docker_cmd, "service", "create", "--quiet"])
 
@@ -289,11 +322,21 @@ class ServiceCLI(DockerCLICaller):
     def inspect(self, x: builtins.list[str]) -> builtins.list[Service]: ...
 
     def inspect(self, x: str | builtins.list[str]) -> Service | builtins.list[Service]:
-        """Returns one or a list of `pywhales.Service` object(s).
+        """Inspect one or more Swarm services by name or ID.
 
-        # Raises
-            `pywhales.exceptions.NoSuchService` if one of the services
-            doesn't exists.
+        Args:
+            x: One name or ID, or a list of references. An empty list returns
+                without invoking the CLI.
+
+        Returns:
+            One handle for a string, otherwise handles in request order with
+            duplicates retained as distinct handles. All snapshots are validated
+            before any returned handle is hydrated.
+
+        Raises:
+            NoSuchService: If Docker reports that a requested service is absent.
+            ParsingError: If response identities cannot be associated unambiguously
+                with the requests or snapshots are inconsistent.
         """
         references = to_list(x)
         if not references:
@@ -315,13 +358,14 @@ class ServiceCLI(DockerCLICaller):
                 assert_never(unreachable)
 
     def exists(self, x: str) -> bool:
-        """Verify that a service exists.
+        """Return whether a service can be inspected.
 
-         It's just calling `docker.service.inspect(...)` and verifies that it doesn't throw
-         a `pywhales.exceptions.NoSuchService`.
+        Args:
+            x: Service name or ID to inspect.
 
-        # Returns
-            A `bool`
+        Returns:
+            False when Docker reports NoSuchService; True on successful inspection.
+            Other inspection failures propagate.
         """
         try:
             self.inspect(x)
@@ -400,40 +444,46 @@ class ServiceCLI(DockerCLICaller):
         *,
         timeout: float | None = None,
     ) -> str | Iterable[tuple[str, bytes]]:
-        """Returns the logs of a service as a string or an iterator.
+        """Return collected service logs or an owned byte stream.
 
-        Parameters:
-            service: The service to get the logs of
-            details: Show extra details provided to logs
-            since: Use a datetime or timedelta to specify the lower
-                date limit for the logs.
-            tail: Number of lines to show from the end of the logs (default all)
-            timestamps: Put timestamps next to lines.
-            follow: If `False` (the default), the logs returned are the logs up to the time
-                of the function call. If `True`, the logs of the container up to the time the
-                service is stopped (removed) are displayed.
-                Which is why you must use the `stream` option if you use the `follow` option.
-                Without `stream`, only a `str` will be returned, possibly much later in the
-                future (maybe never if the service is never removed). So this option is not
-                possible (You'll get an error if you use follow and not stream).
-                With `stream`, you'll be able to read the logs in real time and stop
-                whenever you need.
-            stream: Similar to the `stream` argument of `docker.run()`.
-                This function will then returns and iterator that will yield a
-                tuple `(source, content)` with `source` being `"stderr"` or
-                `"stdout"`. `content` is the content of the line as bytes.
-                Take a look at [the user guide](https://github.com/MaraClaw/PyWhales/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output)
-                to have an example of the output.
-            timeout: Positive finite seconds for the local logs CLI, or `None`.
-                Inspection runs outside this deadline. Expiry raises `DockerTimeout`
-                without stopping the service or changing post-exit pipe draining.
+        Service inspection runs first, outside the logs deadline. The logs CLI
+        starts before this call returns, including in streaming mode. Collection
+        blocks until the CLI exits and its pipes drain; follow=True can wait indefinitely
+        even when stream=False. Closing a stream only cancels the local CLI,
+        not the service. Exhaust the stream, use it as a context manager, or call
+        close() when stopping early; a bare loop break does not release it.
 
-        # Returns
-            `str` if `stream=False` (the default), `Iterable[Tuple[str, bytes]]`
-            if `stream=True`.
+        Args:
+            service: Service name, ID, or handle to read logs from.
+            details: Include additional log details.
+            since: Lower time bound, or None to omit it.
+            tail: Number of trailing lines; None leaves Docker's default of all lines.
+            timestamps: Include timestamps with log records.
+            follow: Keep following new log records instead of taking a snapshot.
+            raw: Omit Docker's log formatting.
+            task_ids: Include task IDs in formatted output.
+            resolve: Resolve IDs to names in formatted output.
+            truncate: Allow Docker to truncate IDs in formatted output.
+            stream: Return a closeable stream when True; otherwise collect decoded
+                stdout and stderr records into one string in arrival order.
+            timeout: Positive finite seconds for the local logs CLI, or None for
+                no deadline. Timing starts at launch and continues while iteration
+                pauses. Expiry kills and reaps the local CLI, preserving captured
+                output; natural post-exit pipe draining is unchanged.
 
-        # Raises
-            `pywhales.exceptions.NoSuchService` if the service does not exists.
+        Returns:
+            Collected text when stream=False; otherwise an owned stream of
+            (source, content) records, with source equal to stdout or stderr and
+            content containing bytes. It inherits the client's stream buffer budget.
+
+        Raises:
+            NoSuchService: If the service inspection reports that it is absent.
+            ValueError: If timeout is a Boolean or is neither None nor a positive
+                finite number of seconds.
+            DockerTimeout: If the logs CLI exceeds its deadline, delivered during
+                collection or stream consumption/clean context exit.
+            BufferError: If a record or retained stderr history exceeds the
+                configured stream buffer budget.
         """
         # first we verify that the service exists and raise an exception if not.
         self.inspect(str(service))
@@ -460,14 +510,15 @@ class ServiceCLI(DockerCLICaller):
     def list(
         self, filters: Iterable[ServiceListFilter] | Mapping[str, Any] = ()
     ) -> builtins.list[Service]:
-        """Returns the list of services
+        """List services in the selected Swarm.
 
-        Parameters:
-            filters: If you want to filter the results based on a given condition.
-                For example, `docker.service.list(filters=dict(label="my_label=hello"))`.
+        Args:
+            filters: Docker filter pairs; the default selects all services.
+                Mapping inputs are deprecated.
 
-        # Returns
-            A `List[pywhales.Services]`
+        Returns:
+            Service handles with full IDs. Nonempty results require a second CLI
+            call to resolve the truncated IDs returned by service list.
         """
         filter_items = filters.items() if isinstance(filters, Mapping) else filters
         if isinstance(filters, Mapping):
@@ -507,27 +558,16 @@ class ServiceCLI(DockerCLICaller):
     def ps(
         self, x: ValidService | Sequence[ValidService]
     ) -> builtins.list[pywhales.components.task.cli_wrapper.Task]:
-        """Returns the list of swarm tasks associated with this service.
+        """List Swarm tasks associated with one or more services.
 
-        You can pass multiple services at once at this function.
+        Args:
+            x: Service names, IDs, or handles to list tasks for.
 
-        ```python
-        from pywhales import docker
+        Returns:
+            Task handles in CLI output order, including any task history Docker lists.
 
-        tasks = docker.service.ps("my-service-name")
-        print(tasks[0].desired_state)
-        # running
-        ```
-
-        Parameters:
-            x: One or more services (can be id, name or `pywhales.Service` object.)
-
-        # Returns
-            `List[pywhales.Task]`
-
-        # Raises
-            `pywhales.exceptions.NoSuchService` if one of the services
-            doesn't exist.
+        Raises:
+            NoSuchService: If Docker reports that a requested service is absent.
         """
         full_cmd = [
             *self.docker_cmd,
@@ -546,14 +586,13 @@ class ServiceCLI(DockerCLICaller):
         ]
 
     def remove(self, services: ValidService | Sequence[ValidService]) -> None:
-        """Removes a service
+        """Remove one or more Swarm services.
 
-        Parameters:
-            services: One or a list of services to remove.
+        Args:
+            services: Service names, IDs, or handles. An empty list is a no-op.
 
-        # Raises
-            `pywhales.exceptions.NoSuchService` if one of the services
-            doesn't exist.
+        Raises:
+            NoSuchService: If Docker reports that a requested service is absent.
         """
         full_cmd = Command([*self.docker_cmd, "service", "remove"])
 
@@ -566,22 +605,23 @@ class ServiceCLI(DockerCLICaller):
         run(full_cmd)
 
     def rollback(self) -> None:
-        """Not yet implemented"""
+        """Reject service rollback because this operation is not implemented.
+
+        Raises:
+            NotImplementedError: Always.
+        """
         raise NotImplementedError
 
     def scale(self, new_scales: dict[ValidService, int], detach: bool = False) -> None:
         """Scale one or more services.
 
-        Parameters:
+        Args:
             new_scales: Mapping between services and the desired scales. For example
-                you can provide `new_scale={"service1": 4, "service2": 8}`
-            detach: If True, does not wait for the services to converge and return
-                immediately.
+                use new_scales={"service1": 4, "service2": 8}.
+            detach: Return after submission instead of waiting for convergence.
 
-        # Raises
-            `pywhales.exceptions.NoSuchService` if one of the services
-            doesn't exists.
-
+        Raises:
+            NoSuchService: If inspection reports that a requested service is absent.
         """
         # verify that the services exists
         self.inspect([str(service) for service in new_scales])
@@ -602,20 +642,20 @@ class ServiceCLI(DockerCLICaller):
         quiet: bool = False,
         replicas: int | None = None,
     ) -> None:
-        """Update a service
+        """Update a Swarm service.
 
-        More options coming soon
-
-        Parameters:
+        Args:
             service: The service to update
             detach: Exit immediately instead of waiting for the service to converge
             force: Force update even if no changes require it
-            image: Service image tag
+            image: Service image reference, or None to leave it unchanged.
             with_registry_authentication: Send registry authentication details
-                to swarm agents
+                to Swarm agents.
+            quiet: Request only the service ID from Docker.
+            replicas: Desired replica count, or None to leave it unchanged.
 
-        # Raises
-            `pywhales.exceptions.NoSuchService` if the service doesn't exists.
+        Raises:
+            NoSuchService: If Docker reports that the service is absent.
         """
         full_cmd = Command([*self.docker_cmd, "service", "update"])
         full_cmd.add_flag("--force", force)

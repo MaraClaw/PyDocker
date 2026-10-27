@@ -7,9 +7,12 @@ Paths below are relative to `tests/`. Repository-wide checks and tooling are in 
 | Area | Start here |
 | --- | --- |
 | Client configuration and mocked CLI regressions | `pywhales/test_client_config.py`, `pywhales/test_docker_client.py` |
+| Bulk reload grouping and deferred publication | `pywhales/test_bulk_reload.py` |
+| Safe/raw diagnostics, validation, and command-copy isolation | `pywhales/test_inspect_diagnostics.py`, `pywhales/test_logging.py`, `pywhales/test_exceptions.py` |
+| Automatic wrapper command/reference diagnostics | `pywhales/test_automatic_diagnostics.py` |
 | Process ownership, buffering, timeouts, and conversions | `pywhales/test_utils.py` |
 | Buildx and Compose option/return regressions | `pywhales/test_buildx_modernization.py`, `pywhales/test_compose_modernization.py` |
-| Deadline execution and forwarding | `pywhales/components/test_command_deadlines.py`, `pywhales/components/test_deadline_forwarding.py` |
+| Launch and subscription deadline execution/forwarding | `pywhales/components/test_command_deadlines.py`, `pywhales/components/test_deadline_forwarding.py` |
 | Command groups | `pywhales/components/test_<component>.py`; these can mix mocked, model, and integration tests |
 | Buildx and imagetools | `pywhales/components/buildx/test_buildx_cli_wrapper.py`, `pywhales/components/buildx/imagetools/` |
 | Model snapshots and enum/JSON regressions | `pywhales/components/jsons/`, `pywhales/test_container_image_enum_json.py` |
@@ -28,6 +31,22 @@ A focused model selection, with no runtime fixture or module-level availability 
 uv run --locked pytest tests/pywhales/components/buildx/imagetools/test_models.py -q
 ```
 
+## Runtime regression contracts
+
+- Deadline modules cover container/root/handle logs, Compose/service logs, and Compose/system events.
+  Keep keyword-only timeout forwarding, inspect preflights outside the selected deadline, typed event
+  mapping, partial captured output, once-only errors, and unchanged post-exit draining covered.
+- Use real child processes for lifecycle behavior: verify reaping, closed pipes, stopped reader/watchdog
+  threads, early close before consumption, and saturated-queue backpressure. A mocked launch alone
+  doesn't prove cleanup or launch-time policy snapshots.
+- Preserve command/list composition, `copy()`, and `deepcopy()` isolation across concurrent clients
+  in `test_logging.py`. Image stream tests cover operation snapshots across lazy and queued children.
+- Assert raw failure details through `stderr`, `stdout`, or `docker_command`, not safe exception text.
+  Test rendering separately in safe/raw modes, including full traceback chains and no inspect dumps in safe mode.
+- Wrapper diagnostics must remain safe with or without `PYDOCKER_DEBUG`; raw opt-in must not change returned payloads.
+- `test_bulk_reload.py` must cover all eleven kinds, exact config-identity grouping, upfront rejection,
+  and unchanged original caches/timestamps when any later group fails; publish once per distinct handle.
+
 ## Runtime fixtures and shared state
 
 - This directory's `conftest.py` supplies a session-scoped `docker_client`; function-scoped `ctr_client` returns that same client, not an isolated daemon.
@@ -36,6 +55,9 @@ uv run --locked pytest tests/pywhales/components/buildx/imagetools/test_models.p
 - `--docker-exe` configures only this fixture's client/probe. It doesn't redirect global or separately constructed clients.
 - `--no-runtime-skip` isn't a universal runtime/plugin gate; Compose's collection-time skip doesn't consult it.
 - Registry fixtures can pull `mhenry07/apache2-utils` and `registry:2`, bind host port 5000, and yield `localhost:5000`.
+- Colocate the test runner with the disposable daemon so `localhost` registries, published ports,
+  and bind-mount paths resolve consistently. A remote `DOCKER_HOST` alone doesn't provide that setup.
+  Don't run host CI provisioning scripts to fix workstation access; keep the root guide's safety rules.
 - `docker_registry` logs in with test credentials and logs out afterward, changing local login state; `docker_registry_without_login` omits both steps.
 - `swarm_mode` initializes with fixed advertise address `172.31.155.129`, then force-leaves Swarm during teardown.
 - Integration tests include daemon-wide pruning in `pywhales/components/test_system.py` and builder-cache pruning in the Buildx suite.
@@ -60,5 +82,6 @@ Preserve existing filenames and snapshot meaning; add a new numbered sample for 
 ## Static contracts
 
 `pywhales/test_type_contracts.py`, `pywhales/test_buildx_modern_types.py`, and `pywhales/test_compose_type_contracts.py` hold `_check_*` functions with `assert_type` calls.
+`pywhales/test_command_deadline_types.py` covers launch and log/event subscription shapes, including aliases and container handles.
 These functions aren't pytest tests and aren't collected or executed by pytest; the type checker validates their inferred types.
 When changing overloads or return types, update the relevant static contracts alongside runtime regressions, including top-level convenience aliases.

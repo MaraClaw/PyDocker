@@ -37,6 +37,17 @@
 - Live providers can pull images, create resources, install a plugin, and initialize Swarm.
   Cleanup can remove acquired resources and leave a Swarm initialized by the examples. Use a disposable daemon.
 
+## Diagnostic Examples
+
+- Keep `docs/template/user_guide/exceptions.md`, the root `README.md`, source docstrings, and
+  `skills/pywhales/references/client-and-errors.md` consistent. Edit these sources, not generated pages.
+- Examples should use safe summaries such as exit codes. PyWhales-owned automatic diagnostics withhold
+  arbitrary argv, environment values, and captured payloads by default. Describe `raw_diagnostics=True`
+  as a per-client opt-in for trusted troubleshooting; safe inspect errors don't dump responses or expose
+  input-bearing validation chains.
+- Raw exception attributes remain confidential and available. Explicit returned output, uncaptured
+  terminal output, and caller logging are outside the safe-diagnostic boundary; don't promise redaction there.
+
 ## Focused Tests
 
 All four modules are under `tests/pywhales/` and run without a real Docker daemon.

@@ -13,7 +13,7 @@ from unittest.mock import ANY, MagicMock, Mock, patch
 import pytest
 
 from pywhales import DockerClient, Image, docker
-from pywhales.client_config import Command
+from pywhales.client_config import Command, ParsingError
 from pywhales.components.image.models import ImageInspectResult
 from pywhales.components.image.streams import MultiImageStream
 from pywhales.exceptions import (
@@ -427,6 +427,26 @@ def test_archive_diagnostics_are_isolated_between_concurrent_clients() -> None:
     assert secret in str(raw)
     assert safe.stderr == raw.stderr == secret
     assert safe.return_code == raw.return_code == 7
+
+
+@pytest.mark.parametrize("raw_diagnostics", [False, True])
+def test_image_inspect_identity_error_keeps_reference_private_by_default(
+    raw_diagnostics: bool,
+) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    client.client_config.raw_diagnostics = raw_diagnostics
+    secret = "private-image-reference"
+    with (
+        patch(
+            "subprocess.run",
+            return_value=CompletedProcess([], 0, b'[{"Id": "sha256:other"}]', b""),
+        ),
+        pytest.raises(ParsingError) as raised,
+    ):
+        client.image.inspect([secret])
+
+    assert (secret in str(raised.value)) is raw_diagnostics
 
 
 @pytest.mark.parametrize("cancel", [False, True], ids=["drain", "saturated-close"])

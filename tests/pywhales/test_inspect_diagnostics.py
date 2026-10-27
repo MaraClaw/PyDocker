@@ -11,6 +11,7 @@ from pywhales import (
     Config,
     Container,
     Context,
+    DockerClient,
     Image,
     Network,
     Node,
@@ -38,6 +39,33 @@ type ResourceType = type[
     | Task
     | Volume
 ]
+
+
+@pytest.mark.parametrize("component", ["container", "image", "network", "volume"])
+@pytest.mark.parametrize("raw", [False, True])
+def test_inspect_mismatched_reference_renders_values_only_in_raw_mode(
+    component: str, raw: bool, tmp_path: Path
+) -> None:
+    secret = "reference-diagnostic-sentinel"
+    client = DockerClient(raw_diagnostics=raw)
+    client.client_config._client_call_with_path = ["mock-cli"]
+    api = {
+        "container": client.container,
+        "image": client.image,
+        "network": client.network,
+        "volume": client.volume,
+    }[component]
+    payload = json.dumps([{"Id": "unrelated", "Name": "unrelated"}]).encode()
+
+    with (
+        patch("subprocess.run", return_value=CompletedProcess([], 0, payload, b"")),
+        patch("pywhales.client_config.tempfile.tempdir", str(tmp_path)),
+        pytest.raises(ParsingError) as raised,
+    ):
+        api.inspect([secret])
+
+    assert (secret in "".join(traceback.format_exception(raised.value))) is raw
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.parametrize(

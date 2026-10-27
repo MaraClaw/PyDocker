@@ -1282,6 +1282,8 @@ class ContainerCLI(DockerCLICaller):
             ):
                 raise ParsingError(
                     f"Container inspect identity does not match {reference!r}"
+                    if self.client_config.raw_diagnostics
+                    else "Container inspect identity does not match the requested reference"
                 )
             container = Container(self.client_config, snapshot.id, is_immutable_id=True)
             container._set_inspect_result(snapshot)

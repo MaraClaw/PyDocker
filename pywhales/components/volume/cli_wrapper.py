@@ -201,6 +201,8 @@ class VolumeCLI(DockerCLICaller):
             if snapshot.name is None or snapshot.name != reference:
                 raise ParsingError(
                     f"Volume inspect identity does not match {reference!r}"
+                    if self.client_config.raw_diagnostics
+                    else "Volume inspect identity does not match the requested reference"
                 )
             volume = Volume(self.client_config, snapshot.name, is_immutable_id=True)
             volume._set_inspect_result(snapshot)

@@ -357,6 +357,8 @@ class ImageCLI(DockerCLICaller):
             ):
                 raise ParsingError(
                     f"Image inspect identity does not match {reference!r}"
+                    if self.client_config.raw_diagnostics
+                    else "Image inspect identity does not match the requested reference"
                 )
             image = Image(self.client_config, snapshot.id, is_immutable_id=True)
             image._set_inspect_result(snapshot)

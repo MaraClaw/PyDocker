@@ -300,6 +300,8 @@ class NetworkCLI(DockerCLICaller):
             ):
                 raise ParsingError(
                     f"Network inspect identity does not match {reference!r}"
+                    if self.client_config.raw_diagnostics
+                    else "Network inspect identity does not match the requested reference"
                 )
             network = Network(self.client_config, snapshot.id, is_immutable_id=True)
             network._set_inspect_result(snapshot)

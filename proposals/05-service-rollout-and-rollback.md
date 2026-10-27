@@ -1,6 +1,6 @@
 # Service rollout and rollback controls
 
-Status: Future (not approved or implemented)
+Status: Implemented (offline validation only; live scenario blocked)
 Tier: P1. Owner: SDK maintainer, with rollout policy set by the operator.
 
 ## Objective
@@ -11,16 +11,16 @@ command without implying that a submitted change is application-ready.
 ## Current evidence
 
 - [`ServiceCLI.update`](../pywhales/components/service/cli_wrapper.py) forwards
-  force, image, registry authentication, detach, quiet, and replicas.
-  `Service.update` delegates those options to the same CLI method.
-- `ServiceCLI.rollback` in that file is a parameterless stub raising
-  `NotImplementedError`; there is no existing `Service.rollback` handle method.
+  the legacy options and validated update and rollback policies. `Service.update`
+  delegates to the same CLI method. `ServiceCLI.rollback` targets one service;
+  there is no `Service.rollback` handle method.
 - [`ServiceSpec` and `ChangeConfig`](../pywhales/components/service/models.py)
   expose update and rollback configuration in inspection results, and
   `ServiceUpdateStatus` exposes status fields.
 - [`test_service.py`](../tests/pywhales/components/test_service.py) exercises
   batch inspect, service scaling, handle update, and manager errors. Its Swarm
-  cases use runtime fixtures. The tests were read, not run.
+  cases use runtime fixtures. Offline service and rollout tests passed; the
+  separately gated live scenario has not been executed.
 
 ## Proposed contract
 
@@ -76,6 +76,8 @@ Run unit, type, and local fake-child tests first. A real Swarm test requires
 separate authorization, an isolated manager, and verified removal of the owned
 service and any test-created Swarm state.
 
-The operator must choose acceptable rollout and rollback policy values; this
-blocks a deployment profile. The maintainer must choose supported CLI versions,
-duration representation, and exact range rules before implementation.
+The operator must choose acceptable rollout and rollback policy values and
+qualify CLI and daemon support before a live deployment. Scenario 4 remains
+unexecuted and requires separate authorization and a disposable manager.
+The CLI syntax references and exact representation and ranges are documented
+in the service API documentation; they do not qualify any supported version.

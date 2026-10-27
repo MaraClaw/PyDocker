@@ -1,3 +1,10 @@
+"""Docker CLI facade, version metadata, and registry authentication helpers.
+
+Clients share one config across command groups and convenience aliases.
+Construction does not probe the executable, daemon, or optional plugins;
+operations require their corresponding external CLI support when invoked.
+"""
+
 import base64
 import json
 import warnings
@@ -31,6 +38,12 @@ from .utils import DockerCamelModel, ValidPath, run
 
 
 class ClientVersion(DockerCamelModel):
+    """Client-side metadata from Docker-compatible version JSON.
+
+    Missing fields remain None. API-version and build-time aliases accommodate
+    the alternate spellings accepted by this model.
+    """
+
     platform: dict[str, str] | None = None
     version: str | None = None
     api_version: Annotated[
@@ -55,12 +68,16 @@ class ClientVersion(DockerCamelModel):
 
 
 class ServerVersionComponent(DockerCamelModel):
+    """Named daemon component and its optional version details."""
+
     name: str | None = None
     version: str | None = None
     details: dict[str, str] | None = None
 
 
 class ServerVersion(DockerCamelModel):
+    """Daemon version metadata and optional component descriptions."""
+
     platform: dict[str, str] | None = None
     components: list[ServerVersionComponent] | None = None
     version: str | None = None
@@ -85,89 +102,28 @@ class ServerVersion(DockerCamelModel):
 
 
 class Version(DockerCamelModel):
+    """Combined client and server version response.
+
+    Attributes:
+        client: Parsed client metadata, or ``None`` when absent from the response.
+        server: Parsed daemon metadata, or ``None`` when absent from the response.
+    """
+
     client: ClientVersion | None = None
     server: ServerVersion | None = None
 
 
 class DockerClient(DockerCLICaller):
-    """Creates a Docker client
+    """Typed facade for Docker-compatible CLI command groups.
 
-    Note that
-    ```python
-    from pywhales import docker
-    print(docker.run("hello-world"))
-    ```
-    is equivalent to
-    ```python
-    from pywhales import DockerClient
-    docker = DockerClient()
-    print(docker.run("hello-world")
-    ```
+    All groups and convenience aliases, such as run, ps, and build, share the
+    originating client config. Creating a client does not resolve an executable
+    or contact a daemon. Commands may require a running daemon or an installed
+    CLI plugin; options are forwarded without version probes or fallback.
 
-    Parameters:
-        config: Location of client config files (default "~/.docker")
-        context: Name of the context to use to connect to the
-            daemon (overrides DOCKER_HOST env var
-            and default context set with "docker context use")
-        debug: Enable debug mode
-        host: Daemon socket(s) to connect to
-        log_level: Set the logging level ("debug"|"info"|"warn"|"error"|"fatal")
-            (default "info")
-        tls:  Use TLS; implied by `tlsverify`
-        tlscacert: Trust certs signed only by this CA (default "~/.docker/ca.pem")
-        compose_files: Docker compose yaml file
-        compose_profiles: List of compose profiles to use. Take a look at
-            the [documentation for profiles](https://docs.docker.com/compose/profiles/).
-        compose_env_file: .env file containing the environments variables to inject
-            into the compose project. By default, it uses `./.env`.
-        compose_project_name: The name of the compose project. It will be prefixed to
-            networks, volumes and containers created by compose.
-        compose_project_directory: Use an alternate working directory. By default, it
-            uses the path of the compose file.
-        compose_compatibility: Use docker compose in compatibility mode.
-        client_call: Client binary to use and how to call it. Default is `["docker"]`. You can try with
-            for example `["docker", "--debug"]` or `["nerdctl"]`. The client must have the same commands and
-            outputs as Docker to work. Some best effort support is done in case of divergences,
-            meaning you can report issues occuring on some other binary than Docker, but
-            we don't guarantee that it will be fixed.
-            This option is a list because you can provide a list of command line arguments to be placed after `"docker"`.
-            For exemple `host="ssh://my_user@host.com"` is equivalent
-            to `client_call=["docker", "--host=ssh://my_user@host.com"]`.
-            This will allow you to use some exotic options that are not explicitly supported by PyWhales.
-            Let's say you want to use estargz to run a container immediately, without waiting for the "pull"
-            to finish (yes it's possible!), you can
-            do `nerdctl = DockerClient(client_call=["nerdctl", "--snapshotter=stargz"])`
-            and then `nerdctl.run("ghcr.io/stargz-containers/python:3.7-org", ["-c", "print('hi')"])`.
-            You can also use this system to call Docker with sudo with `client_call=["sudo", "docker"]`
-            (note that it won't ask for your password, so sudo should be passwordless during the python
-            program execution).
-        client_binary: Deprecated, use `client_call`. If you used before `client_binary="docker"`, now use
-            `client_call=["docker"]`.
-        client_type: The kind of client that is called by the Python process. It allows PyWhales to
-            adapt to the client's behavior if two client have a different behavior. The `client_call` is not
-            enough for PyWhales to know what kind of client you're using. For example, if you use
-            a symlink to call Docker, PyWhales will not know that you're using Docker.
-            Default is "unknown". If at some point, PyWhales has to choose
-            a behavior and `client_type` is `"unknown"`, it will raise an exception and ask you to specify
-            what kind of client you're working with. Valid values are `"docker"`, `"nerdctl"` and `"unknown"`.
-        compose_dry_run: Preview Compose operations without applying changes. Commands
-            returning containers (`compose.ps()` and detached `compose.run()`) are
-            incompatible with this option and raise `ValueError` before execution.
-        compose_parallel: Limit concurrent Compose engine calls. `None` leaves the
-            CLI default unchanged; `-1` requests unlimited parallelism.
-        compose_progress: Compose progress format (`"auto"`, `"tty"`, `"plain"`,
-            `"json"` or `"quiet"`). `None` leaves the CLI default unchanged.
-            An explicit `compose.build(progress=...)` overrides this per call.
-            New Compose options require a plugin version that supports them;
-            PyWhales forwards them without version probes or fallback.
-        stream_buffer_bytes: Positive retained-output budget for each new owned
-            subprocess stream. `None` is unbounded. Queued output, unfinished
-            records, and stderr history have separate limits, not a total-memory cap.
-        image_stream_buffer_bytes: Independent pull/push budget. A non-`None`
-            value overrides the general stream budget; `None` uses its current value.
-        raw_diagnostics: Include arbitrary command, environment, and captured-output
-            values in automatic diagnostics. Defaults to safe summaries. Enable
-            only on a troubleshooting client whose diagnostic output is trusted.
+    Attributes:
+        client_config: Mutable settings shared by command groups and resource
+            handles. Execution policies are snapshotted for each new launch.
     """
 
     def __init__(
@@ -201,6 +157,67 @@ class DockerClient(DockerCLICaller):
         stream_buffer_bytes: int | None = None,
         raw_diagnostics: bool = False,
     ) -> None:
+        """Configure command groups and aliases without invoking the CLI.
+
+        When client_config is supplied, retain it unchanged rather than applying
+        the other configuration arguments. Otherwise construct a shared config
+        from these arguments. A nondefault client_binary still emits its
+        deprecation warning before this choice.
+
+        Args:
+            config: Client configuration directory; ``None`` leaves CLI defaults.
+            context: Context override passed through ``--context``.
+            debug: Emit ``--debug`` only when true; otherwise omit it.
+            host: Daemon endpoint passed through ``--host``.
+            log_level: CLI logging level; ``None`` leaves the CLI default.
+            tls: Emit ``--tls`` only when true; otherwise omit it.
+            tlscacert: Trusted CA certificate path; ``None`` omits the option.
+            tlscert: Client certificate path; ``None`` omits the option.
+            tlskey: Client private-key path; ``None`` omits the option.
+            tlsverify: Emit ``--tlsverify`` only when true; otherwise omit it.
+            client_config: Existing settings to share instead of creating a new
+                config. ``None`` uses the remaining configuration arguments.
+            compose_files: Ordered Compose files; empty input leaves selection
+                to the CLI.
+            compose_profiles: Profiles enabled through repeated Compose options.
+            compose_env_file: Deprecated single environment file; ignored with
+                a warning when compose_env_files is nonempty.
+            compose_env_files: Ordered environment files. Nonempty input takes
+                precedence over compose_env_file; later files override earlier
+                values according to Compose semantics.
+            compose_project_name: Project-name override for Compose resources.
+            compose_project_directory: Compose project-directory override.
+            compose_compatibility: Emit Compose compatibility mode only when true.
+            client_binary: Deprecated executable selection. A value other than
+                ``docker`` warns and replaces client_call with that executable.
+            client_call: Nonempty executable prefix, optionally including fixed
+                arguments. Defaults to ``docker`` and is resolved lazily.
+                Alternate clients must support the commands and output consumed.
+            client_type: Declared client behavior: ``docker``, ``nerdctl``, or
+                ``unknown``. It is not inferred from the executable prefix.
+            compose_dry_run: Request Compose previews without applying changes.
+                APIs requiring real container handles reject incompatible modes.
+            compose_parallel: Compose concurrency limit; ``None`` omits it and
+                ``-1`` requests unlimited parallelism.
+            compose_progress: Default Compose progress mode; ``None`` leaves
+                the CLI default. An explicit build progress option overrides it
+                for that call only.
+            image_stream_buffer_bytes: Positive pull/push byte-budget override.
+                ``None`` uses the general budget at operation time.
+            stream_buffer_bytes: Positive byte budget for new owned subprocess
+                streams; ``None`` is unbounded. Queued payloads, unfinished
+                records, and stderr history have separate limits rather than a
+                single total-memory cap.
+            raw_diagnostics: Opt this client's automatic diagnostics into
+                confidential command, environment, and captured-output values.
+                Defaults to safe summaries. Returned data, raw exception
+                attributes, uncaptured output, and caller logging are not
+                redacted by this policy.
+
+        Raises:
+            ValueError: If a newly created config has a budget that is not a
+                positive integer or ``None``; booleans are rejected.
+        """
         if client_binary != "docker":
             warnings.warn(
                 "The usage of client_binary is deprecated, use `client_call` instead. For "
@@ -296,24 +313,19 @@ class DockerClient(DockerCLICaller):
         self.wait = self.container.wait
 
     def version(self) -> Version:
-        """
-        Get version information about the container client and server.
+        """Fetch client and daemon version metadata through the CLI.
 
-        # Returns
-            A `pywhales.Version` object
+        Block until the command completes. This requires the configured
+        executable and whatever daemon access that executable needs.
 
-        As an example:
+        Returns:
+            Parsed version metadata; client or server fields may be absent.
 
-        ```python
-        from pywhales import docker
-
-        version_info = docker.version()
-        print(version_info.client.version)
-        # 3.4.2
-        print(version_info.server.kernel_version)
-        # 5.15.133.1-microsoft-standard-WSL2
-        ...
-        ```
+        Raises:
+            ClientNotFoundError: If the configured executable cannot be found.
+            DockerException: If the version command fails.
+            json.JSONDecodeError: If command output is not valid JSON.
+            pydantic.ValidationError: If the JSON fails version-model validation.
         """
         full_cmd = Command([*self.docker_cmd, "version", "-f", "{{json .}}"])
         return Version(**json.loads(run(full_cmd)))
@@ -326,13 +338,18 @@ class DockerClient(DockerCLICaller):
     ) -> None:
         """Log in to a Docker registry.
 
-        If no server is specified, the default is defined by the daemon.
+        Block until the CLI finishes and allow it to write directly to the
+        terminal. Credentials may be stored by the CLI's credential mechanism.
 
-        Parameters:
-            server: The server to log into. For example, with a self-hosted registry
-                it might be something like `server="192.168.0.10:5000"`
-            username: The username
-            password: The password
+        Args:
+            server: Registry address; ``None`` leaves the CLI's default registry.
+            username: Login name; ``None`` omits the username option.
+            password: Secret sent through stdin, not argv. ``None`` inherits
+                stdin while still requesting ``--password-stdin``.
+
+        Raises:
+            ClientNotFoundError: If the configured executable cannot be found.
+            DockerException: If the login command fails.
         """
         full_cmd = Command([*self.docker_cmd, "login", "--password-stdin"])
 
@@ -348,11 +365,16 @@ class DockerClient(DockerCLICaller):
         )
 
     def logout(self, server: str | None = None) -> None:
-        """Logout from a Docker registry
+        """Log out of a registry through the CLI's credential mechanism.
 
-        Parameters:
-            server: The server to logout from. For example, with a self-hosted registry
-                it might be something like `server="192.168.0.10:5000"`
+        Block until completion and write command output directly to the terminal.
+
+        Args:
+            server: Registry address; ``None`` leaves the CLI's default registry.
+
+        Raises:
+            ClientNotFoundError: If the configured executable cannot be found.
+            DockerException: If the logout command fails.
         """
         full_cmd = Command([*self.docker_cmd, "logout"])
 
@@ -368,25 +390,26 @@ class DockerClient(DockerCLICaller):
         region_name: str | None = None,
         registry: str | None = None,
     ) -> None:
-        """Login to the aws ECR registry. Credentials are taken from the
-        environment variables as defined in
-        [the aws docs](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-envvars.html).
+        """Fetch an AWS ECR token and log in using the configured Docker CLI.
 
-        If you don't have a profile or your environment variables configured, you can also
-        use the function arguments `aws_access_key_id`, `aws_secret_access_key`, `region_name`.
+        Require the optional botocore dependency and network access to ECR.
+        Credential and region arguments pass directly to botocore's client
+        creation; omitted values use its normal configuration resolution.
+        Use the first authorization response, then perform a blocking login
+        whose output is not captured. Botocore service failures propagate.
 
-        Behind the scenes, those arguments are passed directly to
-        ```python
-        botocore.session.get_session().create_client(...)
-        ```
+        Args:
+            aws_access_key_id: Explicit AWS access key, or ``None`` for botocore
+                credential resolution.
+            aws_secret_access_key: Explicit AWS secret, or ``None`` for botocore
+                credential resolution.
+            region_name: ECR region, or ``None`` for botocore configuration.
+            registry: Registry override; ``None`` uses the token response's
+                proxy endpoint.
 
-        You need botocore to run this function. Use `pip install botocore` to install it.
-
-        The `registry` parameter can be used to override the registry that is guessed from the authorization token
-        request's response.
-        In other words: If the registry is `None` (the default) then it will be assumed that it's the ECR registry linked to the credentials provided.
-        It is especially useful if the aws account you use can access several repositories and you
-        need to explicitly define the one you want to use
+        Raises:
+            ModuleNotFoundError: If botocore is not installed.
+            DockerException: If the subsequent CLI login fails.
         """
         import botocore.session
 

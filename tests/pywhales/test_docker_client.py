@@ -177,6 +177,20 @@ def test_version(ctr_client: DockerClient) -> None:
 def _isolated_auth_client(
     docker_client: DockerClient, config_dir: Path, registry: str
 ) -> DockerClient:
+    """Create separate auth storage while retaining the selected Docker context.
+
+    Inspect the source context, link its disk-backed metadata when present, and
+    write a fresh config.json without copied credentials. In-memory contexts
+    need no metadata symlink; the remaining client configuration is retained.
+
+    Args:
+        docker_client: Source client used for context inspection and options.
+        config_dir: Existing writable directory for new local auth configuration.
+        registry: Registry key initialized with empty authentication settings.
+
+    Returns:
+        A client using config_dir; the caller owns that directory's cleanup.
+    """
     current_context = docker_client.context.inspect()
     storage = current_context.storage
     assert storage is not None

@@ -1,12 +1,36 @@
 # Stable inventory and bounded inspection
 
-Status: Future (not approved or implemented)
+Status: Implemented (opt-in SDK API; offline validation only)
 Tier: P1. Owner: SDK maintainer, with an operator defining observation budgets.
 
 ## Objective
 
 Provide detached inventory values and opt-in bounded inspection without changing
 the behavior of existing live resource handles.
+
+## Implemented surface
+
+`capture_inventory()` accepts `InventoryRequest` values and existing handles for
+containers, images, networks, volumes, nodes, services, configs, secrets, tasks,
+plugins, and contexts. `InventorySnapshot` records the UTC capture interval and
+ordered `InventoryRecord` values with frozen identities and independently deep
+copied typed payloads. Callers may mutate their payloads without changing live
+handles or other records.
+
+`InspectionPolicy` requires explicit reference, encoded argv, and combined raw
+stdout/stderr byte limits. `observation()` adds a context-local absolute monotonic
+deadline and cancellation token to synchronous captured launches, including list
+and inspect calls. `bulk_reload(..., policy=...)` or an enclosing observation
+selects bounded staging; ordinary calls retain their existing behavior.
+
+Offline evidence is in `test_inventory.py`, `test_inventory_cli.py`,
+`test_inventory_types.py`, `test_bulk_reload_bounded.py`,
+`test_bounded_capture.py`, `test_launch_limits.py`, and `test_observation.py` under
+`tests/pywhales/`. Fake CLI and local child tests cover the acceptance scenarios,
+including later-chunk failure before cache publication and child cleanup.
+Native child execution was validated on macOS; Windows pipe readiness still
+requires execution on Windows. No live Docker workload or fleet qualification
+was performed.
 
 ## Current evidence
 
@@ -88,6 +112,8 @@ boundaries and cleanup; do not infer whole-process memory bounds from them.
 Only with separate authorization, inspect disposable Docker resources and
 record configuration, observations, and teardown of resources created.
 
-The operator must choose workload-derived byte, item, and time budgets; this
-blocks deployment defaults and capacity claims. The maintainer must choose the
-public record and policy names and supported resource kinds before implementation.
+The operator must still choose workload-derived byte, item, and time budgets;
+this blocks deployment defaults and capacity claims. Public record and policy
+names and the eleven supported resource kinds are specified above. Per-launch
+limits do not bound aggregate memory or turn the capture interval into a daemon
+transaction.

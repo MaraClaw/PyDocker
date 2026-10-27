@@ -1,3 +1,10 @@
+"""Compose command, model, process-lifecycle, and live Docker regressions.
+
+Importing this module probes Compose availability before marker deselection.
+Tests mix mocked transports, real Python children, and live Compose projects;
+live cases require a disposable daemon and can remove fixed-name images.
+"""
+
 import contextlib
 import json
 import os
@@ -66,7 +73,7 @@ def test_top_uses_project_configuration_when_selecting_services(
     )
     run_mock.assert_called_once_with(
         [
-            Path(sys.executable),
+            sys.executable,
             "engine",
             "--context",
             "remote",
@@ -946,7 +953,7 @@ def test_entrypoint_loaded_in_config() -> None:
 
 
 def test_config_complexe_compose() -> None:
-    """Checking that the pydantic model does its job"""
+    """Verify nested model fields from the complex Compose configuration."""
     compose_file = PROJECT_ROOT / "tests/pywhales/components/complex-compose.yml"
     docker = DockerClient(compose_files=[compose_file], compose_compatibility=True)
     config = docker.compose.config()
@@ -1213,10 +1220,7 @@ def test_compose_run_volume() -> None:
 def test_compose_run_volume_with_parameter() -> None:
     with (
         tempfile.NamedTemporaryFile() as read_only_file,
-        pytest.raises(
-            DockerException,
-            match=r".*can't create /mounted/read_only_file\.txt: Read-only file system.*",
-        ),
+        pytest.raises(DockerException) as error,
     ):
         docker.compose.run(
             "dodo",
@@ -1225,10 +1229,15 @@ def test_compose_run_volume_with_parameter() -> None:
             remove=True,
             tty=False,
         )
+    assert error.value.stderr is not None
+    assert (
+        "can't create /mounted/read_only_file.txt: Read-only file system"
+        in error.value.stderr
+    )
 
 
 def test_compose_run_service_ports_flag() -> None:
-    """Test that --service-ports flag is included in the command."""
+    """Include --service-ports in the mocked detached-run command."""
 
     with patch("pywhales.components.compose.cli_wrapper.run") as mock_run:
         mock_run.return_value = ""
@@ -1246,7 +1255,11 @@ def test_compose_run_service_ports_flag() -> None:
 
 @pytest.mark.parametrize("service_ports", [True, False])
 def test_compose_run_service_ports_integration(service_ports: bool) -> None:
-    """Test that service ports are correctly mapped when using --service-ports."""
+    """Verify live port publication is controlled by service_ports.
+
+    Requires Docker and Compose on a disposable daemon with host port 8074 free.
+    Stop and remove the returned container after inspecting its bindings.
+    """
 
     docker_client = DockerClient(
         compose_files=[PROJECT_ROOT / "tests/pywhales/components/service_ports.yml"],
@@ -1689,11 +1702,13 @@ def test_compose_port() -> None:
 
     with pytest.raises(DockerException) as err:
         d.compose.port(service, "4000", protocol="tcp")
-    assert "no port 4000/tcp for container components-busybox-1" in str(err)
+    assert err.value.stderr is not None
+    assert "no port 4000/tcp for container components-busybox-1" in err.value.stderr
 
     with pytest.raises(DockerException) as err:
         d.compose.port(service, "1111")
-    assert "no port 1111/tcp for container components-busybox-1" in str(err)
+    assert err.value.stderr is not None
+    assert "no port 1111/tcp for container components-busybox-1" in err.value.stderr
 
     with pytest.raises(ValueError) as err:
         d.compose.port("", "123")
@@ -1737,13 +1752,18 @@ def test_compose_ls_project_multiple_statuses() -> None:
 def check_number_of_running_containers(
     docker_client: DockerClient, expected: int, countable_container_ids: Iterable[str]
 ) -> None:
-    """
-    Check that we have the expected number of running containers out of the specified ones,
-    Running containers that do not have their id in the list won't be counted.
-    :param docker_client: docker client to use
-    :param expected: the number of expected running containers
-    :param countable_container_ids: a list of container ids
-    :return: None
+    """Check the current running count within a selected set of container IDs.
+
+    Query once without waiting for convergence; unrelated running containers
+    do not affect the count.
+
+    Args:
+        docker_client: Client used to list currently running containers.
+        expected: Required number of selected IDs in that listing.
+        countable_container_ids: IDs eligible to contribute to the count.
+
+    Raises:
+        AssertionError: If the selected running count differs from expected.
     """
     containers = docker_client.ps()
     container_ids = {container.id for container in containers}
@@ -1985,17 +2005,11 @@ WD_APP_IMAGE = "withdeps_app"
 
 @pytestmark
 def test_compose_build_with_dependencies(tmp_path: Path) -> None:
-    """
-    This test demonstrates that the pywhales `compose.build` wrapper
-    correctly passes through `--with-dependencies` to `docker compose`.
+    """Build the app alone, then include its database dependency when requested.
 
-    It uses a tiny compose project with:
-      - `db` service (image: withdeps_db)
-      - `app` service (image: withdeps_app, depends_on: db)
-
-    We check that:
-      1. Building only `app` does NOT build `db`.
-      2. Building `app` WITH dependencies builds BOTH `app` and `db`.
+    Requires Docker, Compose, and Buildx on a disposable daemon. The temporary
+    project copy does not isolate daemon image state: this test deletes and
+    rebuilds fixed tags withdeps_app and withdeps_db under project withdeps-test.
     """
 
     # Copy the small compose project into a temp directory so the project name

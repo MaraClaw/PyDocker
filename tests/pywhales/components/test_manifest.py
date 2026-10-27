@@ -16,6 +16,15 @@ from pywhales.test_utils import get_all_jsons, random_name
 
 @pytest.fixture
 def manifest(docker_client: DockerClient) -> Generator[ManifestList]:
+    """Pull fixed BusyBox tags and yield a temporary manifest list.
+
+    Requires a disposable Docker daemon and registry access. The manifest context
+    owns its removal; normal teardown also removes both pulled tags, even if they
+    existed before the fixture.
+
+    Yields:
+        The manifest handle while its context is active.
+    """
     manifest_name = random_name()
     # utilizing old, pre-manifest-list images
     images = ["busybox:1.26", "busybox:1.27.1"]
@@ -29,6 +38,14 @@ def manifest(docker_client: DockerClient) -> Generator[ManifestList]:
 def platform_variant_manifest(
     docker_client: DockerClient, request: pytest.FixtureRequest
 ) -> Image:
+    """Pull and inspect an ARMv7 image with removal registered before acquisition.
+
+    Requires Docker and registry access. The finalizer removes the fixed image
+    tag, including a pre-existing tag, so use a disposable daemon.
+
+    Returns:
+        The inspected platform-specific image handle, valid until teardown.
+    """
     image_with_platform_variant = "arm32v7/busybox:1.35"
 
     def remove_docker_image() -> None:

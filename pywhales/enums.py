@@ -5,6 +5,8 @@ from typing import Literal
 
 
 class ContainerStatus(StrEnum):
+    """Known lifecycle states reported for Docker containers."""
+
     CREATED = "created"
     RESTARTING = "restarting"
     RUNNING = "running"
@@ -15,6 +17,8 @@ class ContainerStatus(StrEnum):
 
 
 class HealthStatus(StrEnum):
+    """Known container health states, including absence of a health check."""
+
     STARTING = "starting"
     HEALTHY = "healthy"
     UNHEALTHY = "unhealthy"
@@ -22,6 +26,8 @@ class HealthStatus(StrEnum):
 
 
 class RestartPolicyName(StrEnum):
+    """Known container restart-policy names used in Docker metadata."""
+
     NO = "no"
     ALWAYS = "always"
     ON_FAILURE = "on-failure"
@@ -29,6 +35,8 @@ class RestartPolicyName(StrEnum):
 
 
 class MountType(StrEnum):
+    """Known mount source kinds reported by Docker."""
+
     BIND = "bind"
     VOLUME = "volume"
     TMPFS = "tmpfs"
@@ -38,6 +46,8 @@ class MountType(StrEnum):
 
 
 class BindPropagation(StrEnum):
+    """Known bind-mount propagation modes used by Docker."""
+
     PRIVATE = "private"
     RPRIVATE = "rprivate"
     SHARED = "shared"
@@ -47,12 +57,16 @@ class BindPropagation(StrEnum):
 
 
 class Isolation(StrEnum):
+    """Container isolation modes accepted by the constrained command inputs."""
+
     DEFAULT = "default"
     PROCESS = "process"
     HYPERV = "hyperv"
 
 
 class TaskState(StrEnum):
+    """Known lifecycle states reported for Swarm tasks."""
+
     NEW = "new"
     ALLOCATED = "allocated"
     PENDING = "pending"
@@ -71,23 +85,31 @@ class TaskState(StrEnum):
 
 
 class RestartCondition(StrEnum):
+    """Swarm restart conditions accepted by constrained command inputs."""
+
     NONE = "none"
     ON_FAILURE = "on-failure"
     ANY = "any"
 
 
 class NodeRole(StrEnum):
+    """Swarm node roles distinguishing workers from managers."""
+
     WORKER = "worker"
     MANAGER = "manager"
 
 
 class NodeAvailability(StrEnum):
+    """Known Swarm node scheduling-availability modes."""
+
     ACTIVE = "active"
     PAUSE = "pause"
     DRAIN = "drain"
 
 
 class NodeState(StrEnum):
+    """Known operational states reported for Swarm nodes."""
+
     UNKNOWN = "unknown"
     DOWN = "down"
     READY = "ready"
@@ -95,39 +117,53 @@ class NodeState(StrEnum):
 
 
 class NodeReachability(StrEnum):
+    """Known reachability states reported for Swarm managers."""
+
     UNKNOWN = "unknown"
     UNREACHABLE = "unreachable"
     REACHABLE = "reachable"
 
 
 class EndpointMode(StrEnum):
+    """Swarm service endpoint-discovery modes."""
+
     VIP = "vip"
     DNSRR = "dnsrr"
 
 
 class PublishMode(StrEnum):
+    """Swarm port-publication modes for ingress or direct host binding."""
+
     INGRESS = "ingress"
     HOST = "host"
 
 
 class NetworkProtocol(StrEnum):
+    """Known transport-protocol names in Docker port metadata."""
+
     TCP = "tcp"
     UDP = "udp"
     SCTP = "sctp"
 
 
 class UpdateOrder(StrEnum):
+    """Task replacement ordering for Swarm updates and rollbacks."""
+
     STOP_FIRST = "stop-first"
     START_FIRST = "start-first"
 
 
 class FailureAction(StrEnum):
+    """Known actions for handling Swarm service-update failures."""
+
     PAUSE = "pause"
     CONTINUE = "continue"
     ROLLBACK = "rollback"
 
 
 class ServiceUpdateState(StrEnum):
+    """Known progress states for Swarm service updates and rollbacks."""
+
     UPDATING = "updating"
     PAUSED = "paused"
     COMPLETED = "completed"
@@ -137,12 +173,16 @@ class ServiceUpdateState(StrEnum):
 
 
 class ResourceScope(StrEnum):
+    """Resource scopes accepted by constrained Docker command inputs."""
+
     SWARM = "swarm"
     GLOBAL = "global"
     LOCAL = "local"
 
 
 class SwarmState(StrEnum):
+    """Known local Swarm participation states reported by Docker."""
+
     INACTIVE = "inactive"
     PENDING = "pending"
     ACTIVE = "active"
@@ -151,12 +191,16 @@ class SwarmState(StrEnum):
 
 
 class ComposeDependencyCondition(StrEnum):
+    """Known conditions gating startup on a Compose dependency."""
+
     SERVICE_STARTED = "service_started"
     SERVICE_HEALTHY = "service_healthy"
     SERVICE_COMPLETED_SUCCESSFULLY = "service_completed_successfully"
 
 
 class ComposeProgress(StrEnum):
+    """Compose progress formats accepted by constrained command inputs."""
+
     AUTO = "auto"
     TTY = "tty"
     PLAIN = "plain"
@@ -165,6 +209,8 @@ class ComposeProgress(StrEnum):
 
 
 class ComposePullPolicy(StrEnum):
+    """Known Compose pull policies, with command-specific input subsets."""
+
     ALWAYS = "always"
     MISSING = "missing"
     NEVER = "never"
@@ -172,6 +218,8 @@ class ComposePullPolicy(StrEnum):
 
 
 class BuildxProgressMode(StrEnum):
+    """Buildx progress-display modes represented by the input aliases."""
+
     AUTO = "auto"
     NONE = "none"
     PLAIN = "plain"
@@ -181,6 +229,8 @@ class BuildxProgressMode(StrEnum):
 
 
 class BuildxCallMethod(StrEnum):
+    """Buildx frontend methods for builds and report-only calls."""
+
     BUILD = "build"
     CHECK = "check"
     OUTLINE = "outline"
@@ -188,18 +238,24 @@ class BuildxCallMethod(StrEnum):
 
 
 class ClientType(StrEnum):
+    """Explicit client behavior selections, independent of executable names."""
+
     DOCKER = "docker"
     NERDCTL = "nerdctl"
     UNKNOWN = "unknown"
 
 
 class Orchestrator(StrEnum):
+    """Known orchestrator selectors used by Docker stack operations."""
+
     SWARM = "swarm"
     KUBERNETES = "kubernetes"
     ALL = "all"
 
 
 class ImageResolutionMode(StrEnum):
+    """Image-resolution policies for Docker stack deployment."""
+
     ALWAYS = "always"
     CHANGED = "changed"
     NEVER = "never"

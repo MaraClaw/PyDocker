@@ -1,3 +1,5 @@
+"""Buildx registry-manifest operations that do not pull local images."""
+
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -11,8 +13,17 @@ from .models import Manifest
 
 
 class ImagetoolsCLI(DockerCLICaller):
+    """Registry manifest commands using the configured Docker Buildx plugin."""
+
     def inspect(self, name: str) -> Manifest:
-        """Returns the manifest of a Docker image in a registry without pulling it"""
+        """Return a registry manifest or index without pulling the image.
+
+        Args:
+            name: Registry image reference accepted by Buildx imagetools.
+
+        Returns:
+            The parsed raw registry manifest, not a local image handle.
+        """
         full_cmd = Command(
             [*self.docker_cmd, "buildx", "imagetools", "inspect", "--raw", name]
         )
@@ -66,22 +77,30 @@ class ImagetoolsCLI(DockerCLICaller):
         dry_run: bool = False,
         builder: str | None = None,
     ) -> Manifest | None:
-        """
-        Create a new manifest list based on source manifests.
-        The source manifests can be manifest lists or single platform distribution manifests and
-        must already exist in the registry where the new manifest is created.
-        If only one source is specified, create performs a carbon copy.
+        """Create a registry manifest from existing source manifests.
 
-        The CLI docs is [here](https://docs.docker.com/engine/reference/commandline/buildx_imagetools_create/)
-        and it contains a lot more information.
+        Sources must already exist in the destination registry. The call waits
+        for Buildx to finish; normal creation publishes to the registry, whereas
+        dry-run mode returns the proposed manifest without publishing it.
 
-        Parameters:
-            sources: The sources manifest to create, change
-            append: Append to existing manifest
-            annotations: Add annotations to the image as a dict of key-value pairs
-            dry_run: Show final image instead of pushing
-            files: Read source descriptor from file
-            builder: The builder to use.
+        Args:
+            sources: Sequence of source manifest or index references. A bare
+                string is rejected; the default passes no source references.
+            tags: Sequence of destination tags; a bare string is rejected.
+            append: Append sources to an existing manifest.
+            annotations: Mapping of annotation names to values.
+            files: Sequence of source-descriptor paths; a bare string is rejected.
+            dry_run: Return the proposed manifest instead of publishing it.
+            builder: Builder name; `None` leaves selection to Buildx.
+
+        Returns:
+            The parsed proposed manifest when `dry_run=True`; otherwise `None`
+            after the publishing command completes.
+
+        Raises:
+            TypeError: `sources`, `tags`, or `files` is not a non-string sequence,
+                or `annotations` is not a mapping.
+            DockerException: The Buildx command fails.
         """
         if not isinstance(sources, Sequence) or isinstance(sources, str):
             raise TypeError(

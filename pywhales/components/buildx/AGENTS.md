@@ -15,7 +15,11 @@ This guide also applies to `imagetools/`; paths below are relative to this direc
 - Blocking `call="check"`, `"outline"`, or `"targets"` returns captured report text and skips builder/image recovery.
 - `stream_logs=True` returns `MappedProcessStream[str]` before recovery or report capture.
   `stream_buildx_logs()` decodes `(source, bytes)` tuples with replacement and discards the source labels.
+  The mapped helper inherits the originating client's general `stream_buffer_bytes` at the shared
+  stream boundary; keep its policy carrier and transport ownership through mapping.
 - Build streaming rejects `progress=False`, `"tty"`, `"none"`, and `"quiet"`.
+- Safe diagnostics withhold arbitrary build argv, environment values, and captured output.
+  Raw exception attributes remain available and confidential; don't include them in safe automatic logs.
 
 ## Bake configuration
 

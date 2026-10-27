@@ -1,3 +1,5 @@
+"""Local Docker CLI context metadata, endpoint configuration, and handles."""
+
 from __future__ import annotations
 
 import builtins
@@ -10,6 +12,7 @@ from typing import Any, Self, overload, override
 
 from pydantic import JsonValue
 
+from pywhales._inspect_validation import parse_namespace_inspect_results
 from pywhales.client_config import (
     ClientConfig,
     Command,
@@ -26,6 +29,12 @@ from pywhales.utils import custom_parse_object_as, run, to_list
 
 
 class Context(ReloadableObjectFromJson[ContextInspectResult, str | None]):
+    """Reloadable Docker context identified by its name.
+
+    Context-manager exit attempts forced removal, even if the body raises.
+    Body and cleanup failures are preserved together when both occur.
+    """
+
     def __init__(
         self,
         client_config: ClientConfig,
@@ -81,16 +90,24 @@ class Context(ReloadableObjectFromJson[ContextInspectResult, str | None]):
         return self._get_inspect_result().storage
 
     def remove(self, force: bool = False) -> None:
-        """Removes this context"""
+        """Remove this context, optionally forcing removal of the current context.
+
+        Args:
+            force: Forward Docker's forced-removal option when True.
+        """
         ContextCLI(self.client_config).remove(self, force)
 
     def update(self) -> None:
-        """Update this context, not yet implemented."""
+        """Reject context updates because this operation is not implemented.
+
+        Raises:
+            NotImplementedError: Always.
+        """
         raise NotImplementedError
         ContextCLI(self.client_config).update(self)
 
     def use(self) -> None:
-        """Use this context"""
+        """Set this context as Docker's default context."""
         ContextCLI(self.client_config).use(self)
 
     @override
@@ -103,6 +120,8 @@ ValidContext = Context | str
 
 @dataclass
 class DockerContextConfig:
+    """Mutable Docker endpoint options for creating a context."""
+
     from_: ValidContext | None = None
     host: str | None = None
     certificate_authority: Path | str | None = None
@@ -111,6 +130,7 @@ class DockerContextConfig:
     skip_tls_verify: bool = False
 
     def format_for_docker_cli(self) -> str:
+        """Return comma-separated endpoint options, omitting None-valued fields."""
         list_of_args = []
         if self.from_ is not None:
             list_of_args.append(f"from={self.from_}")
@@ -129,12 +149,15 @@ class DockerContextConfig:
 
 @dataclass
 class KubernetesContextConfig:
+    """Mutable Kubernetes endpoint options for creating a context."""
+
     from_: ValidContext | None = None
     config_file: str | Path | None = None
     context_override: str | None = None
     namespace_override: str | None = None
 
     def format_for_docker_cli(self) -> str:
+        """Return comma-separated endpoint options, omitting None-valued fields."""
         list_of_args = []
         if self.from_ is not None:
             list_of_args.append(f"from={self.from_}")
@@ -148,6 +171,8 @@ class KubernetesContextConfig:
 
 
 class ContextCLI(DockerCLICaller):
+    """Context commands for local CLI configuration, not daemon resources."""
+
     def create(
         self,
         context_name: str,
@@ -157,17 +182,18 @@ class ContextCLI(DockerCLICaller):
         docker: dict[str, Any] | DockerContextConfig | None = None,
         kubernetes: dict[str, Any] | KubernetesContextConfig | None = None,
     ) -> Context:
-        """Creates a new context
+        """Create and inspect a Docker context.
 
-        Parameters:
-            context_name: name of the context to create
-            default_stack_orchestrator: Default orchestrator for stack operations to use with this context (swarm|kubernetes|all)
-            description: Description of the context
-            docker: Set the docker endpoint, you can use a dict of a class to
-                specify the options. The class is `pywhales.DockerContextConfig`.
-            from_: Create context from a named context
-            kubernetes: Set the kubernetes endpoint. You can use a dict or a class to specify the options. The class
-                is `pywhales.KubernetesContextConfig`.
+        Args:
+            context_name: Name for the new context.
+            default_stack_orchestrator: Stack orchestrator, or None to omit the option.
+            description: Context description, or None to omit the option.
+            from_: Existing context to copy from, or None to omit the option.
+            docker: Docker endpoint options; None omits endpoint configuration.
+            kubernetes: Kubernetes endpoint options; None omits their configuration.
+
+        Returns:
+            A freshly inspected handle to the created context.
         """
         if isinstance(docker, dict):
             docker = DockerContextConfig(**docker)
@@ -198,18 +224,42 @@ class ContextCLI(DockerCLICaller):
     def inspect(
         self, x: str | builtins.list[str] | None = None
     ) -> Context | builtins.list[Context]:
-        """Returns the context object. If no argument is provided, returns the
-        current context."""
+        """Inspect the current context or one or more named contexts.
+
+        Args:
+            x: A context name or list of names. None selects the current context;
+                an empty list returns without invoking the CLI.
+
+        Returns:
+            One handle for a string or None, otherwise handles in request order.
+            List results preserve duplicates as distinct handles and validate the
+            whole response before hydrating any handle.
+
+        Raises:
+            ParsingError: If a batch response has invalid shape, inconsistent
+                snapshots, or names that do not exactly match the requests.
+        """
         if isinstance(x, str) or x is None:
             return Context(self.client_config, x)
         else:
-            return [Context(self.client_config, ref) for ref in x]
+            if not x:
+                return []
+            parser = Context(self.client_config, x[0], is_immutable_id=True)
+            snapshots = parse_namespace_inspect_results(
+                parser, run([*self.docker_cmd, "context", "inspect", *x]), x
+            )
+            contexts = []
+            for identity, snapshot in snapshots:
+                context = Context(self.client_config, identity, is_immutable_id=True)
+                context._set_inspect_result(snapshot)
+                contexts.append(context)
+            return contexts
 
     def list(self) -> builtins.list[Context]:
-        """List all Docker contexts available
+        """List available Docker contexts.
 
-        # Returns
-            `List[pywhales.Context]`
+        Returns:
+            Context handles in CLI output order.
         """
 
         full_cmd = Command([*self.docker_cmd, "context", "list", "--quiet"])
@@ -220,11 +270,11 @@ class ContextCLI(DockerCLICaller):
     def remove(
         self, x: ValidContext | Sequence[ValidContext], force: bool = False
     ) -> None:
-        """Removes one or more contexts
+        """Remove one or more contexts.
 
-        Parameters:
+        Args:
             x: One or more contexts, empty list means no-op.
-            force: Force the removal of this context
+            force: Force removal, including the current context.
         """
         full_cmd = Command([*self.docker_cmd, "context", "remove"])
         full_cmd.add_flag("--force", force)
@@ -234,14 +284,21 @@ class ContextCLI(DockerCLICaller):
         run(full_cmd)
 
     def update(self) -> None:
-        """Not yet implemented"""
+        """Reject context updates because this operation is not implemented.
+
+        Raises:
+            NotImplementedError: Always.
+        """
         raise NotImplementedError
 
     def use(self, context: ValidContext) -> Context:
-        """Set the default context
+        """Set Docker's default context and inspect it.
 
-        Parameters:
-            context: The context to set as default
+        Args:
+            context: Context handle or name to select as the default.
+
+        Returns:
+            A freshly inspected handle to the selected context.
         """
         full_cmd = Command([*self.docker_cmd, "context", "use", context])
         run(full_cmd)

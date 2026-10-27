@@ -1,3 +1,10 @@
+"""Static enum-input, overload, and JSON-model boundary contracts.
+
+The ty check analyzes _check_* bodies without running their Docker operations.
+Pytest does not collect these functions; runtime model behavior is covered in
+the neighboring enum and JSON regression modules.
+"""
+
 from collections.abc import Iterable
 from typing import assert_type
 

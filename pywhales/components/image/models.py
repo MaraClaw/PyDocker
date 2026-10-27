@@ -1,3 +1,5 @@
+"""Typed local-image inspection snapshots using shared container config models."""
+
 from datetime import datetime
 
 from pydantic import JsonValue

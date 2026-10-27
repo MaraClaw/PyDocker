@@ -1,4 +1,6 @@
 import json
+import sys
+import traceback
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from datetime import datetime
@@ -9,9 +11,89 @@ from unittest.mock import patch
 import pytest
 from pytest_mock import MockerFixture
 
-from pywhales import Config, DockerClient, Node, Secret, Service, docker
+from pywhales import Config, DockerClient, Node, Secret, Service, Volume
+from pywhales._execution_policy import get_execution_policy
 from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.utils import PROJECT_ROOT
+
+
+@pytest.mark.parametrize("budget", [True, False, 0, -1, 1.5, "8", b"8"])
+def test_general_stream_budget_rejects_invalid_config_before_lookup(
+    budget: int | None,
+) -> None:
+    with patch("shutil.which") as lookup, pytest.raises(ValueError):
+        ClientConfig(stream_buffer_bytes=budget)
+
+    lookup.assert_not_called()
+
+
+@pytest.mark.parametrize("budget", [None, 1, 1024])
+def test_general_stream_budget_preserves_independent_image_override(
+    budget: int | None,
+) -> None:
+    config = ClientConfig(stream_buffer_bytes=budget)
+
+    assert config.stream_buffer_bytes == budget
+    assert config.image_stream_buffer_bytes is None
+    assert config.raw_diagnostics is False
+
+
+@pytest.mark.parametrize("raw", [False, True])
+def test_inspect_validation_suppresses_dump_and_chain_unless_raw(
+    raw: bool, tmp_path: Path
+) -> None:
+    secret = "inspect-secret-sentinel"
+    payload = {**fake_json_message, "Driver": [secret]}
+    client = DockerClient(raw_diagnostics=raw)
+    with (
+        patch(
+            "pywhales.components.volume.cli_wrapper.Volume._fetch_inspect_result_json",
+            return_value=payload,
+        ),
+        patch("pywhales.client_config.tempfile.tempdir", str(tmp_path)),
+        pytest.raises(ParsingError) as raised,
+    ):
+        client.volume.inspect("volume")
+
+    assert (secret in "".join(traceback.format_exception(raised.value))) is raw
+    dumps = list(tmp_path.glob("*.json"))
+    assert bool(dumps) is raw
+    if raw:
+        assert json.loads(dumps[0].read_text()) == payload
+
+
+@pytest.mark.parametrize("raw", [False, True])
+def test_batch_inspect_invalid_json_exposes_validation_chain_only_in_raw_mode(
+    raw: bool,
+) -> None:
+    resource = Volume(ClientConfig(raw_diagnostics=raw), "volume", is_immutable_id=True)
+    secret = "batch-inspect-secret-sentinel"
+    payload = json.dumps([secret])
+
+    with pytest.raises(ParsingError) as raised:
+        resource._parse_inspect_results(payload, ["volume"])
+
+    assert (secret in "".join(traceback.format_exception(raised.value))) is raw
+
+
+def test_docker_command_policy_does_not_replace_cached_executable_prefix() -> None:
+    config = ClientConfig(
+        client_call=[sys.executable, "engine"],
+        stream_buffer_bytes=17,
+        raw_diagnostics=True,
+    )
+    cached = config.get_client_call_with_path()
+
+    command = config.docker_cmd
+    command.append("version")
+    config.stream_buffer_bytes = 31
+
+    assert config.get_client_call_with_path() is cached
+    assert cached == [Path(sys.executable), "engine"]
+    assert isinstance(cached[0], Path)
+    assert isinstance(command[0], str)
+    assert get_execution_policy(command).stream_buffer_bytes == 31
+    assert get_execution_policy(command).raw_diagnostics is True
 
 
 @pytest.mark.parametrize("budget", [True, False, 0, -1, 1.5, "8", b"8"])
@@ -253,7 +335,7 @@ def test_pretty_exception_message_and_report(mocker: MockerFixture) -> None:
         lambda x, y: fake_json_message,
     )
     with pytest.raises(ParsingError) as err:
-        docker.volume.inspect("random_volume")
+        DockerClient(raw_diagnostics=True).volume.inspect("random_volume")
     error_message = str(err.value)
 
     assert "This is a bug with pywhales itself" in error_message
@@ -266,10 +348,11 @@ def test_pretty_exception_message_and_report(mocker: MockerFixture) -> None:
         raise IndexError
 
     assert Path(word).read_text() == json.dumps(fake_json_message, indent=2)
+    Path(word).unlink()
 
 
 def test_compose_env_file() -> None:
-    """Test that the deprecated `compose_env_file` gives a warning, and adds the `--env-file` argument to the compose command"""
+    """Verify the legacy env-file warning and its single command-line option."""
     with pytest.warns(UserWarning):
         example_env_file_name = "example.env"
         client_config = ClientConfig(compose_env_file=example_env_file_name)
@@ -288,7 +371,7 @@ def test_compose_env_file() -> None:
     ids=["multiple_files", "single_file"],
 )
 def test_compose_env_files(compose_env_files: Sequence[str]) -> None:
-    """Test that using only `compose_env_files` adds all the files to the command line arguments"""
+    """Preserve every configured env-file argument in input order."""
     client_config = ClientConfig(compose_env_files=compose_env_files)
     # Since we are operating of a list of commands, we first find the indices of the `--env-file` argument, then we check that the next argument is the file name.
     indices = [
@@ -302,7 +385,7 @@ def test_compose_env_files(compose_env_files: Sequence[str]) -> None:
 
 
 def test_compose_env_files_and_env_file() -> None:
-    """Test that using both `compose_env_files` and `compose_env_file` gives a warning, and only uses `compose_env_files`"""
+    """Prefer env-files over the deprecated single-file option and warn."""
     env_files_input = "example1.env"
     env_file_input = "example2.env"
 
@@ -320,7 +403,15 @@ def test_compose_env_files_and_env_file() -> None:
 
 @contextmanager
 def _create_temp_env_files() -> Generator[tuple[Path, Path]]:
-    """Creates two temporary env files and yields their paths. The files are deleted after the context manager is exited."""
+    """Write fixed-name env files on context entry and yield them in order.
+
+    Files live in the checkout's component fixture directory, not a private temp
+    directory. Existing contents are overwritten; unlinking occurs only when
+    execution resumes normally after the yield, not on an exception in the body.
+
+    Yields:
+        The file defining A=1 and B=1, followed by the file overriding B=2.
+    """
     path = PROJECT_ROOT / "tests/pywhales/components"
     env_file_1 = path / "example1.env"
     with env_file_1.open("w") as f:
@@ -335,18 +426,11 @@ def _create_temp_env_files() -> Generator[tuple[Path, Path]]:
 
 
 def test_run_compose_command_with_env_file() -> None:
-    """Test that checks the configuration for the compose stack and checks that the env files are loaded correctly
+    """Verify Compose interpolation defaults and ordered env-file overrides.
 
-    The docker compose service, `service_using_env_variables`, is defined in `dummy_compose.yml` and uses the env variables `A` and `B`.
-    If no env files are provided, the values of `A` and `B` are set to a default value of `0` in the service.
-    We check if the values of `A` and `B` are set to the values in the env files.
-
-    The cases tested are:
-    * Single env file using the old `compose_env_file` argument
-    * Single env file using the new `compose_env_files` argument
-    * Multiple env files using the new `compose_env_files` argument
-        * Later env files should override the values of earlier env files
-        * The order of the env files should matter
+    Requires the Docker CLI and Compose plugin to render configuration. Exercise
+    both single-file APIs and both file orders; later files override earlier B
+    values while absent A and B values use the service's zero defaults.
     """
     with _create_temp_env_files() as (env_file_1, env_file_2):
         COMPOSE_FILE = PROJECT_ROOT / "tests/pywhales/components/dummy_compose.yml"

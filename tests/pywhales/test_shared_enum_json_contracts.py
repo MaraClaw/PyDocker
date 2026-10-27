@@ -77,13 +77,15 @@ def test_shared_json_parser_preserves_snapshot_when_cache_is_seeded(
     assert network.options == payload["Options"]
 
 
-def test_shared_json_parser_keeps_validation_cause_and_json_report_when_invalid(
+def test_shared_json_parser_keeps_validation_cause_and_json_report_in_raw_mode(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(
         "pywhales.client_config.tempfile.mkstemp", partial(mkstemp, dir=tmp_path)
     )
-    network = Network(ClientConfig(), "network-id", is_immutable_id=True)
+    network = Network(
+        ClientConfig(raw_diagnostics=True), "network-id", is_immutable_id=True
+    )
     payload: dict[str, JsonValue] = {"Driver": ["invalid-driver"]}
 
     with pytest.raises(ParsingError) as failure:

@@ -1,3 +1,9 @@
+"""Offline generation and staged-publication contracts with mocked live providers.
+
+Templates and generated output live under a temporary project root. External
+commands and real Docker access are rejected by the fixture.
+"""
+
 import runpy
 import sys
 from pathlib import Path
@@ -25,6 +31,15 @@ EXAMPLES: Final = (
 
 @pytest.fixture
 def docs_root(tmp_path: Path, mocker: MockerFixture) -> Path:
+    """Copy templates into a temporary project and reject external operations.
+
+    Args:
+        tmp_path: Per-test project root owned by pytest.
+        mocker: Redirects generator paths and disables real Docker/subprocess use.
+
+    Returns:
+        The root containing the copied docs/template tree.
+    """
     copytree(PROJECT_ROOT / "docs" / "template", tmp_path / "docs" / "template")
     mocker.patch.object(autogen, "PROJECT_ROOT", tmp_path)
     mocker.patch("pywhales.utils.PROJECT_ROOT", tmp_path)
@@ -34,6 +49,7 @@ def docs_root(tmp_path: Path, mocker: MockerFixture) -> Path:
 
 
 def snapshot_tree(root: Path) -> list[tuple[Path, bytes | None]]:
+    """Return sorted relative paths with file bytes or None for directories."""
     return [
         (path.relative_to(root), path.read_bytes() if path.is_file() else None)
         for path in sorted(root.rglob("*"))

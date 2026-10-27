@@ -1,3 +1,9 @@
+"""Container handles and Docker CLI operations on the selected daemon.
+
+Foreground text, detached resource handles, and owned process streams are
+distinct execution modes. Local CLI cleanup does not remove daemon resources.
+"""
+
 from __future__ import annotations
 
 import builtins
@@ -95,6 +101,14 @@ class ExecuteArgs(TypedDict, total=False, closed=True):
 
 
 class Container(ReloadableObjectFromJson[ContainerInspectResult]):
+    """Reloadable container handle retaining its originating configuration.
+
+    Inspection-backed properties may refresh through the Docker CLI. Context
+    exit stops a running container, then removes it and its anonymous volumes
+    unless automatic removal is enabled. Cleanup tolerates an already missing
+    container; using an existing handle as a context manager opts into cleanup.
+    """
+
     def __init__(
         self, client_config: ClientConfig, reference: str, is_immutable_id: bool = False
     ) -> None:
@@ -286,13 +300,25 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         )
 
     def copy_from(self, container_path: ValidPath, local_path: ValidPath) -> None:
+        """Copy a container path to the Python host's filesystem.
+
+        Args:
+            container_path: Source path inside this container.
+            local_path: Destination path on the Python host, not the daemon host.
+        """
         return ContainerCLI(self.client_config).copy((self, container_path), local_path)
 
     def copy_to(self, local_path: ValidPath, container_path: ValidPath) -> None:
+        """Copy a local path into this container.
+
+        Args:
+            local_path: Source path on the Python host, not the daemon host.
+            container_path: Destination path inside this container.
+        """
         return ContainerCLI(self.client_config).copy(local_path, (self, container_path))
 
     def diff(self) -> dict[str, str]:
-        """Returns the diff of this container filesystem.
+        """Return filesystem change codes keyed by paths in this container.
 
         See the [`docker.container.diff`](../sub-commands/container.md) command for
         information about the arguments.
@@ -363,10 +389,19 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         *,
         timeout: float | None = None,
     ) -> str | ProcessStream | None:
-        """Execute a command in this container
+        """Execute a command in this container.
 
         See the [`docker.container.execute`](../sub-commands/container.md#execute)
         command for information about the arguments.
+
+        The CLI starts during the call. For a streamed result, use its context
+        manager or `close()` on early exit; a bare loop break does not close it.
+        Cleanup affects the local CLI, not the container or its command.
+
+        Returns:
+            `None` when detached, an owned `(source, bytes)` stream when streaming,
+            or captured stdout otherwise. With TTY output, the returned text is
+            empty because output is forwarded to the terminal.
         """
         validate_timeout(timeout)
         return ContainerCLI(self.client_config).execute(
@@ -386,11 +421,9 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         )
 
     def exists(self) -> bool:
-        """Returns `True` if the docker container exists and `False` if it doesn't exists.
+        """Return whether this container's immutable ID still exists.
 
-        If it doesn't exists, it most likely mean that it was removed.
-
-         See the `docker.container.exists` command for information about the arguments.
+        Only `NoSuchContainer` becomes `False`; other CLI failures propagate.
         """
         return ContainerCLI(self.client_config).exists(self.id)
 
@@ -403,7 +436,7 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         return ContainerCLI(self.client_config).export(self, output)
 
     def kill(self, signal: int | str | None = None) -> None:
-        """Kill this container
+        """Kill this container.
 
         See the [`docker.container.kill`](../sub-commands/container.md#kill) command for
         information about the arguments.
@@ -418,11 +451,28 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         tail: int | None = None,
         timestamps: bool = False,
         until: datetime | timedelta | None = None,
+        timeout: float | None = None,
     ) -> str:
-        """Returns the logs of the container
+        """Return collected log text for this container.
 
         See the [`docker.container.logs`](../sub-commands/container.md#logs) command for
         information about the arguments.
+
+        Args:
+            details: Include additional logging details.
+            since: Lower log timestamp or relative time limit; `None` omits it.
+            tail: Number of trailing lines; `None` keeps the CLI default of all.
+            timestamps: Include timestamps in log records.
+            until: Upper log timestamp or relative time limit; `None` omits it.
+            timeout: Positive finite seconds for the local logs CLI, or `None`
+                for no deadline. Inspection before launch is outside the budget.
+
+        Returns:
+            Decoded stdout and stderr records joined in arrival order.
+
+        Raises:
+            DockerTimeout: The local logs CLI exceeds its deadline and is killed
+                and reaped; the container is not stopped.
         """
         return ContainerCLI(self.client_config).logs(
             self,
@@ -431,6 +481,7 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
             tail=tail,
             timestamps=timestamps,
             until=until,
+            timeout=timeout,
         )
 
     def pause(self) -> None:
@@ -442,7 +493,7 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         return ContainerCLI(self.client_config).pause(self)
 
     def unpause(self) -> None:
-        """Unpause the container
+        """Unpause the container.
 
         See the [`docker.container.unpause`](../sub-commands/container.md#unpause) command for
         information about the arguments.
@@ -450,7 +501,7 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         return ContainerCLI(self.client_config).unpause(self)
 
     def rename(self, new_name: str) -> None:
-        """Rename this container
+        """Rename this container.
 
         See the [`docker.container.rename`](../sub-commands/container.md#rename) command for
         information about the arguments.
@@ -458,7 +509,7 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         return ContainerCLI(self.client_config).rename(self, new_name)
 
     def restart(self, time: int | timedelta | None = None) -> None:
-        """Restarts this container.
+        """Restart this container.
 
         See the [`docker.container.restart`](../sub-commands/container.md#restart) command for
         information about the arguments.
@@ -519,17 +570,23 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         stream: bool = False,
         detach_keys: str | None = None,
     ) -> str | ProcessStream | None:
-        """Starts this container.
+        """Start this container.
 
         See the [`docker.container.start`](../sub-commands/container.md#start) command for
         information about the arguments.
+
+        Returns:
+            `None` without attachment, captured stdout when attached without
+            streaming, or an owned `(source, bytes)` stream when streaming.
+            Streaming requires `attach=True`; close the eager stream on early
+            exit or use its context manager to release the local CLI.
         """
         return ContainerCLI(self.client_config).start(
             self, attach, interactive, stream, detach_keys
         )
 
     def stop(self, time: int | timedelta | None = None) -> None:
-        """Stops this container.
+        """Stop this container.
 
         See the [`docker.container.stop`](../sub-commands/container.md#stop) command for
         information about the arguments.
@@ -639,6 +696,8 @@ class RunArgs(TypedDict, total=False, closed=True):
 
 
 class ContainerCLI(DockerCLICaller):
+    """Container commands using the selected Docker daemon and client policy."""
+
     def attach(
         self,
         container: ValidContainer,
@@ -646,18 +705,19 @@ class ContainerCLI(DockerCLICaller):
         stdin: bool = True,
         sig_proxy: bool = True,
     ) -> None:
-        """Attach local standard input, output, and error streams to a running container
+        """Attach the caller's terminal streams to a running container.
 
         Alias: `docker.attach(...)`
 
-        Parameters:
+        Args:
             container: The running container to attach to
             detach_keys: Override the key sequence for detaching a container
             stdin: Attach STDIN
             sig_proxy: Proxy all received signals to the process (default true)
 
-        # Raises
-            `pywhales.exceptions.NoSuchContainer` if the container does not exists.
+        Raises:
+            NoSuchContainer: The container does not exist during inspection or
+                attachment.
         """
         self.inspect(container)
 
@@ -677,14 +737,18 @@ class ContainerCLI(DockerCLICaller):
         message: str | None = None,
         pause: bool = True,
     ) -> pywhales.components.image.cli_wrapper.Image:
-        """Create a new image from a container's changes
+        """Create a new image from a container's changes.
 
-        Parameters:
+        Args:
             container: The container to create the image from
             tag: tag to apply on the image produced
             author: Author (e.g., "John Hannibal Smith <hannibal@a-team.com>")
             message: Commit message
-            pause: Pause container during commit
+            pause: Accepted but currently not forwarded; Docker's pause default
+                applies regardless of this value.
+
+        Returns:
+            The committed image using the originating client configuration.
         """
         full_cmd = Command([*self.docker_cmd, "container", "commit"])
 
@@ -707,28 +771,18 @@ class ContainerCLI(DockerCLICaller):
         source: ValidPath | ContainerPath,
         destination: ValidPath | ContainerPath,
     ) -> None:
-        """Copy files/folders between a container and the local filesystem
+        """Copy files or folders between a container and the local filesystem.
 
         Alias: `docker.copy(...)`
 
-        ```python
-        from pywhales import docker
+        Byte iterators are not supported. The call waits for the local copy CLI.
 
-        docker.run("ubuntu", ["sleep", "infinity"], name="dodo", remove=True, detach=True)
-
-        docker.copy("/tmp/my_local_file.txt", ("dodo", "/path/in/container.txt"))
-        docker.copy(("dodo", "/path/in/container.txt"), "/tmp/my_local_file2.txt")
-        ```
-
-        Doesn't yet support sending or receiving iterators of Python bytes.
-
-        Parameters:
-            source: Local path or tuple. When using a tuple, the first element
-                of the tuple is the container, the second element is the path in
-                the container. ex: `source=("my-container", "/usr/bin/something")`.
-            destination: Local path or tuple. When using a tuple, the first element
-                of the tuple is the container, the second element is the path in
-                the container. ex: `source=("my-container", "/usr/bin/something")`.
+        Args:
+            source: Local source path on the Python host, or a
+                `(container_reference, path_in_container)` endpoint.
+            destination: Local destination path on the Python host, or a
+                `(container_reference, path_in_container)` endpoint. Docker
+                requires exactly one container endpoint.
         """
         full_cmd = Command([*self.docker_cmd, "container", "cp"])
 
@@ -843,20 +897,23 @@ class ContainerCLI(DockerCLICaller):
         volumes_from: Iterable[ValidContainer] = (),
         workdir: ValidPath | None = None,
     ) -> Container:
-        """Creates a container, but does not start it.
+        """Create a container without starting it.
 
         Alias: `docker.create(...)`
 
-        Start it then with the `.start()` method.
+        Start the returned handle with `.start()`. Image acquisition for
+        `pull="missing"` or `"always"` occurs before the create CLI. The shared
+        creation options follow [`docker.run`](#run). Although accepted by this
+        signature, `detach=True` is forwarded to the create CLI rather than
+        providing a separate return mode.
 
-        It might be useful if you want to delay the start of a container,
-        to do some preparations beforehand. For example, it's common to do this
-        workflow: `docker create` -> `docker cp` -> `docker start` to put files
-        in the container before starting.
+        Returns:
+            The created container using the originating client configuration.
+            Using it as a context manager opts into stopping and removal on exit.
 
-        There is no `detach` argument since it's a runtime option.
-
-        The arguments are the same as [`docker.run`](#run).
+        Raises:
+            TypeError: `command` is a shell string rather than an argv sequence.
+            DockerException: Image acquisition or container creation fails.
         """
         if isinstance(command, str):
             error_message = textwrap.dedent(
@@ -1028,13 +1085,12 @@ class ContainerCLI(DockerCLICaller):
 
         Alias: `docker.diff(...)`
 
-        Parameters:
+        Args:
             container: The container to inspect
 
-        # Returns
-            `Dict[str, str]` Something like
-            `{"/some_path": "A", "/some_file": "M", "/tmp": "D"}` for example.
-
+        Returns:
+            Filesystem paths mapped to the change codes emitted by Docker, such
+            as `A` for added, `C` for changed, or `D` for deleted.
         """
         full_cmd = Command([*self.docker_cmd, "diff", container])
 
@@ -1113,15 +1169,19 @@ class ContainerCLI(DockerCLICaller):
         *,
         timeout: float | None = None,
     ) -> str | ProcessStream | None:
-        """Execute a command inside a container
+        """Execute a command inside an existing container.
 
         Alias: `docker.execute(...)`
 
-        Parameters:
+        The local CLI starts during the call. Exhaust streamed output, use its
+        context manager, or call `close()` on early exit. Closing or timing out
+        the CLI does not guarantee termination of the container-side command.
+
+        Args:
             container: The container to execute the command in.
-            command: The command to execute.
-            detach: if `True`, returns immediately with `None`. If `False`,
-                returns the command stdout as string.
+            command: Command argv sequence; a shell-command string is rejected.
+            detach: Return `None` after the detached local CLI completes, without
+                waiting for the container-side command to finish.
             envs: Set environment variables
             env_files: Read one or more files of environment variables
             interactive: Leave stdin open during the duration of the process
@@ -1134,14 +1194,26 @@ class ContainerCLI(DockerCLICaller):
                 to write on it.
             user: Username or UID, format: `"<name|uid>[:<group|gid>]"`
             workdir: Working directory inside the container
-            stream: Similar to `docker.run(..., stream=True)`.
+            stream: Return an owned stream of `("stdout", bytes)` and
+                `("stderr", bytes)` records. Incompatible with TTY or detach.
             detach_keys: Override the key sequence for detaching a container.
+            timeout: Positive finite seconds from local exec CLI launch, or
+                `None` for no deadline. A stream's deadline advances even before
+                or between iterations.
 
         Returns:
-            Optional[str]
+            `None` when `detach=True`, an eager owned stream when `stream=True`,
+            or captured stdout otherwise. With TTY output, the returned string
+            is empty because output is forwarded to the terminal.
 
-        # Raises
-            `pywhales.exceptions.NoSuchContainer` if the container does not exists.
+        Raises:
+            TypeError: `command` is a string rather than an argv sequence.
+            ValueError: Streaming conflicts with TTY or detach, or `timeout` is
+                not positive and finite.
+            NoSuchContainer: The selected container does not exist.
+            DockerTimeout: The local CLI exceeds its deadline and is killed and
+                reaped, without guaranteeing container-command cancellation.
+            DockerException: The local exec CLI exits unsuccessfully.
         """
         validate_timeout(timeout)
         if isinstance(command, str):
@@ -1198,13 +1270,14 @@ class ContainerCLI(DockerCLICaller):
                 return result
 
     def exists(self, x: ValidContainer) -> bool:
-        """Returns `True` if the container exists. `False` otherwise.
+        """Return whether a container can be inspected in the selected daemon.
 
-         It's just calling `docker.container.inspect(...)` and verifies that it doesn't throw
-         a `pywhales.exceptions.NoSuchContainer`.
+        Args:
+            x: Container name, ID, or handle to inspect.
 
-        # Returns
-            A `bool`
+        Returns:
+            `False` only for `NoSuchContainer`, and `True` on success. Other
+            inspection failures propagate.
         """
         try:
             self.inspect(x)
@@ -1214,17 +1287,17 @@ class ContainerCLI(DockerCLICaller):
             return True
 
     def export(self, container: ValidContainer, output: ValidPath) -> None:
-        """Export a container's filesystem as a tar archive
+        """Export a container's filesystem to a local tar archive.
 
         Alias: `docker.export(...)`
 
-        Parameters:
+        Args:
             container: The container to export.
             output: The path of the output tar archive. Returning a generator of bytes
                 is not yet implemented.
 
-        # Raises
-            `pywhales.exceptions.NoSuchContainer` if the container does not exists.
+        Raises:
+            NoSuchContainer: The selected container does not exist.
         """
         full_cmd = Command([*self.docker_cmd, "container", "export"])
         full_cmd.add_simple_arg("--output", output)
@@ -1246,18 +1319,23 @@ class ContainerCLI(DockerCLICaller):
     def inspect(
         self, x: ValidContainer | Iterable[ValidContainer], /
     ) -> Container | builtins.list[Container]:
-        """Returns a container object from a name or ID.
+        """Inspect container references and return handles with stable IDs.
 
-        Parameters:
-            x: A container name or ID, or a list of container names
-                and/or IDs
+        Iterable input uses one CLI invocation and validates all snapshots before
+        returning handles with seeded inspection caches. Empty input skips the CLI.
+
+        Args:
+            x: A container name, ID, or handle, or an iterable of those references.
 
         Returns:
-            A `pywhales.Container` object or a list of those
-            if a list of IDs was passed as input.
+            One handle for scalar input, or a list in request order for iterable
+            input. Duplicates are preserved as separate handles; empty input
+            returns `[]`. Handles retain the originating client configuration.
 
-        # Raises
-            `pywhales.exceptions.NoSuchContainer` if the container does not exists.
+        Raises:
+            NoSuchContainer: A requested container does not exist.
+            ParsingError: A batch snapshot is malformed or does not match its
+                requested container name or ID prefix.
         """
 
         if isinstance(x, str | Container):
@@ -1280,6 +1358,8 @@ class ContainerCLI(DockerCLICaller):
             ):
                 raise ParsingError(
                     f"Container inspect identity does not match {reference!r}"
+                    if self.client_config.raw_diagnostics
+                    else "Container inspect identity does not match the requested reference"
                 )
             container = Container(self.client_config, snapshot.id, is_immutable_id=True)
             container._set_inspect_result(snapshot)
@@ -1295,14 +1375,12 @@ class ContainerCLI(DockerCLICaller):
 
         Alias: `docker.kill(...)`
 
-        Parameters:
+        Args:
             containers: One or more containers to kill
             signal: The signal to send the container
 
-        # Raises
-            `pywhales.exceptions.NoSuchContainer` if any of the
-            containers do not exist.
-
+        Raises:
+            NoSuchContainer: A selected container does not exist.
         """
         container_list = (
             [containers]
@@ -1331,6 +1409,7 @@ class ContainerCLI(DockerCLICaller):
         until: datetime | timedelta | None = None,
         follow: bool = False,
         stream: Literal[False] = False,
+        timeout: float | None = None,
     ) -> str: ...
 
     @overload
@@ -1345,6 +1424,7 @@ class ContainerCLI(DockerCLICaller):
         until: datetime | timedelta | None = None,
         follow: bool = False,
         stream: Literal[True],
+        timeout: float | None = None,
     ) -> ProcessStream: ...
 
     @overload
@@ -1359,6 +1439,7 @@ class ContainerCLI(DockerCLICaller):
         until: datetime | timedelta | None = None,
         follow: bool = False,
         stream: bool = False,
+        timeout: float | None = None,
     ) -> str | ProcessStream: ...
 
     def logs(
@@ -1372,12 +1453,18 @@ class ContainerCLI(DockerCLICaller):
         until: datetime | timedelta | None = None,
         follow: bool = False,
         stream: bool = False,
+        timeout: float | None = None,
     ) -> str | ProcessStream:
-        """Returns the logs of a container as a string or an iterator.
+        """Collect or stream a container's log output.
 
         Alias: `docker.logs(...)`
 
-        Parameters:
+        Inspection precedes the logs CLI and is outside its timeout budget. The
+        logs CLI starts before the call returns. Exhaust a returned stream or use
+        its context manager or `close()` on early exit; a bare loop break does not
+        release it. Cleanup and timeout affect only the local CLI, not the container.
+
+        Args:
             container: The container to get the logs of
             details: Show extra details provided to logs
             since: Use a datetime or timedelta to specify the lower
@@ -1393,26 +1480,24 @@ class ContainerCLI(DockerCLICaller):
                 Which is why it is advised to use the `stream` option if you use the `follow` option.
                 Without `stream`, only a `str` will be returned, possibly much later in the
                 future. With `stream`, you'll be able to read the logs in real time.
-            stream: Similar to the `stream` argument of `docker.run`.
-                This function will then return an iterator that will yield a
-                tuple `(source, content)` with `source` being `"stderr"` or
-                `"stdout"`. `content` is the content of the line as bytes.
-                Take a look at [the user guide](https://github.com/MaraClaw/PyWhales/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output)
-                to have an example of the output.
+            stream: Return an owned output stream instead of collecting text.
+                Records are `("stdout", bytes)` and `("stderr", bytes)` pairs.
+            timeout: Positive finite seconds from local logs CLI launch, or `None`
+                for no deadline. Timing advances while consumption pauses.
+                Inspection runs outside this deadline. Expiry raises `DockerTimeout`
+                without stopping the container or changing post-exit pipe draining.
 
-        # Returns
-            `str` if `stream=False` (the default), `Iterable[Tuple[str, bytes]]`
-            if `stream=True`.
+        Returns:
+            Decoded stdout and stderr joined in arrival order when `stream=False`,
+            or an eager owned stream of `(source, bytes)` records otherwise.
+            Following without streaming can block until the logs CLI ends.
 
-        # Raises
-            `pywhales.exceptions.NoSuchContainer` if the container does not exist.
-
-        If you are a bit confused about `follow` and `stream`, here are some use cases.
-
-        * If you want to have the logs up to this point as a `str`, don't use those args.
-        * If you want to stream the output in real time, use `follow=True, stream=True`
-        * If you want the logs up to this point, but you don't want to fit all the logs
-        in memory because they are too big, use `stream=True`.
+        Raises:
+            ValueError: `timeout` is not positive and finite.
+            NoSuchContainer: The selected container does not exist.
+            DockerTimeout: The local logs CLI exceeds its deadline and is killed
+                and reaped without stopping the container.
+            DockerException: The logs CLI exits unsuccessfully.
         """
 
         # first we verify that the container exists and raise an exception if not.
@@ -1427,7 +1512,7 @@ class ContainerCLI(DockerCLICaller):
         full_cmd.add_flag("--follow", follow)
         full_cmd.append(container)
 
-        iterator = stream_stdout_and_stderr(full_cmd)
+        iterator = stream_stdout_and_stderr(full_cmd, timeout=timeout)
 
         if stream:
             return iterator
@@ -1440,16 +1525,16 @@ class ContainerCLI(DockerCLICaller):
         all: bool = False,
         filters: Iterable[ContainerListFilter] | Mapping[str, Any] = (),
     ) -> builtins.list[Container]:
-        """List the containers on the host.
+        """List containers on the selected daemon, which may be remote.
 
         Alias: `docker.ps(...)`
 
-        Parameters:
+        Args:
             all: If `True`, also returns containers that are not running.
             filters: Filters to apply when listing containers.
 
-        # Returns
-            A `List[pywhales.Container]`
+        Returns:
+            Container handles in CLI order using the originating configuration.
         """
         filter_items = filters.items() if isinstance(filters, Mapping) else filters
         if isinstance(filters, Mapping):
@@ -1473,15 +1558,15 @@ class ContainerCLI(DockerCLICaller):
         ]
 
     def pause(self, containers: ValidContainer | Iterable[ValidContainer]) -> None:
-        """Pauses one or more containers
+        """Pause one or more containers.
 
         Alias: `docker.pause(...)`
 
-        Parameters:
+        Args:
             containers: One or more containers to pause
 
-        # Raises
-            `pywhales.exceptions.NoSuchContainer` if the container does not exists.
+        Raises:
+            NoSuchContainer: A selected container does not exist.
         """
         container_list = (
             [containers]
@@ -1525,12 +1610,17 @@ class ContainerCLI(DockerCLICaller):
     ) -> Iterable[tuple[str, bytes]] | None:
         """Remove containers that are not running.
 
-        Parameters:
+        Streaming starts the local CLI before returning. Exhaust the owned stream
+        or close it on early exit; closing does not undo container removal.
+
+        Args:
             filters: Filters to apply when pruning.
-            stream_logs: If `True` this function will return an iterator of strings.
-                You can then read the logs as they arrive. If `False` (the default value), then
-                the function returns `None`, but when it returns, then the prune operation has already been
-                done.
+            stream_logs: Return an owned stdout/stderr byte stream instead of
+                waiting for command completion.
+
+        Returns:
+            An owned stream of `(source, bytes)` records when `stream_logs=True`;
+            otherwise `None` after the local prune CLI completes.
         """
         filter_items = filters.items() if isinstance(filters, Mapping) else filters
         if isinstance(filters, Mapping):
@@ -1548,16 +1638,16 @@ class ContainerCLI(DockerCLICaller):
         run(full_cmd)
 
     def rename(self, container: ValidContainer, new_name: str) -> None:
-        """Changes the name of a container.
+        """Change the name of a container.
 
         Alias: `docker.rename(...)`
 
-        Parameters:
+        Args:
             container: The container to rename
             new_name: The new name of the container.
 
-        # Raises
-            `pywhales.exceptions.NoSuchContainer` if the container does not exist.
+        Raises:
+            NoSuchContainer: The selected container does not exist.
         """
         full_cmd = Command(
             [*self.docker_cmd, "container", "rename", str(container), new_name]
@@ -1569,17 +1659,17 @@ class ContainerCLI(DockerCLICaller):
         containers: ValidContainer | Iterable[ValidContainer],
         time: int | timedelta | None = None,
     ) -> None:
-        """Restarts one or more container.
+        """Restart one or more containers.
 
         Alias: `docker.restart(...)`
 
-        Parameters:
+        Args:
             containers: One or more containers to restart
-            time: Amount of to wait for stop before killing the container (default 10s).
-                If `int`, the unit is seconds.
+            time: Shutdown grace period in seconds or as a timedelta. `None`
+                leaves Docker's default unchanged; not a local CLI deadline.
 
-        # Raises
-            `pywhales.exceptions.NoSuchContainer` if the container does not exists.
+        Raises:
+            NoSuchContainer: A selected container does not exist.
         """
         container_list = (
             [containers]
@@ -1606,17 +1696,17 @@ class ContainerCLI(DockerCLICaller):
         force: bool = False,
         volumes: bool = False,
     ) -> None:
-        """Removes a container
+        """Remove one or more containers.
 
         Alias: `docker.remove(...)`
 
-        Parameters:
+        Args:
             containers: One or more containers.
             force: Force the removal of a running container (uses SIGKILL)
             volumes: Remove anonymous volumes associated with the container
 
-        # Raises
-            `pywhales.exceptions.NoSuchContainer` if the container does not exists.
+        Raises:
+            NoSuchContainer: A selected container does not exist.
         """
         container_list = (
             [containers]
@@ -1780,81 +1870,28 @@ class ContainerCLI(DockerCLICaller):
         workdir: ValidPath | None = None,
         timeout: float | None = None,
     ) -> Container | str | Iterable[tuple[str, bytes]]:
-        """Runs a container
+        """Run a container on the selected Docker daemon.
 
-        You can use `docker.run` or `docker.container.run` to call this function.
+        Require the Docker CLI and a reachable daemon. Image lookup or pulling
+        happens before the selected run subprocess and is outside `timeout`.
+        Foreground calls block until the CLI exits. Streaming starts the local CLI
+        immediately; exhaust the returned stream or use its context manager or
+        `close()` when stopping early. Closing or timing out the local CLI does
+        not guarantee that the daemon-side container stops or is removed.
 
-        For a deeper dive into the arguments and what they do, visit
-        <https://docs.docker.com/engine/reference/run/>
-
-        If you want to know exactly how to call `docker.run()` depending on your
-        use case (detach, stream...), take a look at
-        the [`docker.run()` guide](../user_guide/docker_run.md).
-
-        ```python
-        >>> from pywhales import docker
-        >>> returned_string = docker.run("hello-world")
-        >>> print(returned_string)
-
-        Hello from Docker!
-        This message shows that your installation appears to be working correctly.
-
-        To generate this message, Docker took the following steps:
-         1. The Docker client contacted the Docker daemon.
-         2. The Docker daemon pulled the "hello-world" image from the Docker Hub.
-            (amd64)
-         3. The Docker daemon created a new container from that image which runs the
-            executable that produces the output you are currently reading.
-         4. The Docker daemon streamed that output to the Docker client, which sent it
-            to your terminal.
-
-        To try something more ambitious, you can run an Ubuntu container with:
-         $ docker run -it ubuntu bash
-
-        Share images, automate workflows, and more with a free Docker ID:
-         https://hub.docker.com/
-
-        For more examples and ideas, visit:
-         https://docs.docker.com/get-started/
-        ```
-
-        ```python
-        >>> from pywhales import docker
-        >>> result_string = docker.run("ubuntu", ["ls", "/host"], volumes=[("/", "/host", "ro")])
-        >>> print(result_string)
-        bin
-        boot
-        dev
-        etc
-        home
-        init
-        lib
-        lib64
-        lost+found
-        media
-        mnt
-        opt
-        proc
-        projects
-        root
-        run
-        sbin
-        snap
-        srv
-        sys
-        tmp
-        usr
-        var
-        ```
-
-        Parameters:
+        Args:
             image: The image to use for the container.
-            command: Sequence of arguments to provide to the container.
-            add_hosts: hosts to add in the format of a tuple. For example,
-                `add_hosts=[("my_host_1", "192.168.30.31"), ("host2", "192.168.80.81")]`
-            blkio_weight: Block IO (relative weight), between 10 and 1000,
-                or 0 to disable (default 0)
+            command: Argument tokens after the image; empty uses its default
+                command. A shell command string is not accepted.
+            add_hosts: Hostname/address pairs to add to the container's hosts file,
+                such as `[("build.example", "192.0.2.1")]`.
+            blkio_weight: Relative block-I/O weight; None leaves Docker's default.
+            blkio_weight_device: Per-device block-I/O weights in Docker syntax.
+            cap_add: Linux capabilities to add.
+            cap_drop: Linux capabilities to drop.
+            cgroup_parent: Parent cgroup; None omits the option.
             cgroupns: Cgroup namespace mode to use, one of 'host' or 'private'.
+            cidfile: Local file in which the CLI writes the container ID.
             cpu_period: Limit CPU CFS (Completely Fair Scheduler) period
             cpu_quota: Limit CPU CFS (Completely Fair Scheduler) quota
             cpu_rt_period: Limit CPU real-time period in microseconds
@@ -1862,26 +1899,37 @@ class ContainerCLI(DockerCLICaller):
             cpu_shares: CPU shares (relative weight)
             cpus: The maximal amount of cpu the container can use.
                 `1` means one cpu core.
-            cpuset_cpus: CPUs in which to allow execution. Accepts a list of
-                CPU indices (e.g. `[0, 2]`) or a cpuset string as understood by
-                the docker CLI (e.g. `"0-3"`, `"0,2"`, `"0-3,7"`).
-            cpuset_mems: MEMs in which to allow execution. Accepts a list of
-                memory-node indices or a cpuset string (same format as
-                `cpuset_cpus`).
-            detach: If `False`, returns the ouput of the container as a string.
-                If `True`, returns a `pywhales.Container` object.
+            cpuset_cpus: Allowed CPU indices, such as `[0, 2]`, or Docker cpuset
+                notation, such as `"0-3"`, `"0,2"`, or `"0-3,7"`.
+            cpuset_mems: Allowed NUMA memory-node indices, using the same notation
+                as `cpuset_cpus`; None omits the option.
+            detach: Return a container handle without waiting for container exit.
+            devices: Host device mappings in Docker syntax.
+            device_cgroup_rules: Device cgroup permission rules.
+            device_read_bps: Per-device read limits in bytes per second.
+            device_read_iops: Per-device read limits in operations per second.
+            device_write_bps: Per-device write limits in bytes per second.
+            device_write_iops: Per-device write limits in operations per second.
+            content_trust: Enable content-trust verification when true.
+            dns: DNS server addresses.
+            dns_options: Resolver options.
             dns_search: Set custom DNS search domains
             domainname: Container NIS domain name
             entrypoint: Overwrite the default ENTRYPOINT of the image
-            envs: Environment variables as a `dict`.
-                For example: `{"OMP_NUM_THREADS": 3}`
-            env_files: One or a list of env files.
-            gpus: For this to work, you need the
-                [Nvidia container runtime](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html#install-guide)
-                The value needed is a `str` or `int`. Some examples of valid argument
-                are `"all"` or `"device=GPU-3a23c669-1f69-c64e-cf85-44e9b07e7a2a"` or
-                `"device=0,2"`. If you want 3 gpus, just write `gpus=3`.
+            envs: Environment variable names mapped to their values.
+            env_files: Local environment files, forwarded in supplied order.
+            expose: Container ports to expose without publishing them.
+            gpus: GPU count or device-selection expression, such as "all" or
+                "device=0,2"; requires suitable daemon-side GPU support.
+            groups_add: Supplementary groups for the container process.
+            healthcheck: Disable the image healthcheck when false.
+            health_cmd: Healthcheck command.
+            health_interval: Healthcheck interval in seconds.
+            health_retries: Failures needed to mark the container unhealthy.
+            health_start_period: Initial healthcheck grace period in seconds.
+            health_timeout: Healthcheck execution timeout in seconds.
             hostname: Container host name
+            init: Run an init process inside the container.
             interactive: Leave stdin open during the duration of the process
                 to allow communication with the parent process.
                 Currently only works with `tty=True` for interactive use
@@ -1890,23 +1938,25 @@ class ContainerCLI(DockerCLICaller):
             ip6: IPv6 address (e.g., 2001:db8::33)
             ipc: IPC mode to use
             isolation: Container isolation technology
-            kernel_memory: Kernel memory limit. `int` represents the number of bytes,
-                but you can use `"4k"` or `2g` for example.
-            labels: Set meta data on a container. The labels can be used later when filtering
-                containers with `docker.ps(filters='...')`. The labels can also be found on
-                each container with the attribute `my_container.config.labels`.
+            kernel_memory: Kernel-memory limit in bytes or Docker size notation.
+            labels: Container metadata names mapped to their values.
+            label_files: Local files containing labels.
+            link: Containers to link using Docker's legacy linking mechanism.
+            link_local_ip: Link-local addresses.
             log_driver: Logging driver for the container
+            log_options: Logging driver options in Docker syntax.
             mac_address: Container MAC address (e.g., `"92:d0:c6:0a:29:33"`)
-            memory:  Memory limit, valid values are `1024` (ints are bytes) or
-                `"43m"` or `"6g"`.
+            memory: Memory limit in bytes or Docker size notation.
             memory_reservation: Memory soft limit
             memory_swap: Swap limit equal to memory plus swap: '-1'
                 to enable unlimited swap.
-            memory_swappiness: Tune container memory swappiness (0 to 100) (default -1)
-            name: The container name. If not provided, one is automatically genrated for
-                you.
-            healthcheck: Set to `False` to disable container periodic healthcheck.
+            memory_swappiness: Swappiness percentage; None omits the option.
+            mounts: Mount option tokens joined with commas for each mount.
+            name: Container name; None lets Docker choose one.
+            networks: Networks to connect during creation.
+            network_aliases: Network-scoped aliases.
             oom_kill: Set to `False` to disable the OOM killer for this container.
+            oom_score_adj: Container OOM score adjustment.
             pid: PID namespace to use
             pids_limit: Tune container pids limit (set `-1` for unlimited)
             platform: Set platform if server is multi-platform capable.
@@ -1919,28 +1969,44 @@ class ContainerCLI(DockerCLICaller):
             publish_all: Publish all exposed ports to random ports.
             pull: Pull image before running ("always"|"missing"|"never") (default "missing").
             read_only: Mount the container's root filesystem as read only.
-            restart: Restart policy to apply when a container exits (default "no")
+            restart: Docker restart policy; None omits the option.
             remove: Automatically remove the container when it exits.
             runtime: Runtime to use for this container.
             security_options: Security options
             service_ports: Enable service's ports to be created and mapped to the host (disabled by default)
-            shm_size: Size of /dev/shm. `int` is for bytes. But you can use `"512m"` or
-                `"4g"` for example.
-            stop_timeout: Signal to stop a container (default "SIGTERM")
+            shm_size: Shared-memory size in bytes or Docker size notation.
+            sig_proxy: Disable signal proxying when false.
+            stop_signal: Signal Docker uses to stop the container.
+            stop_timeout: Container shutdown grace period in seconds, distinct
+                from the local CLI timeout.
             storage_options: Storage driver options for the container
+            stream: Return an owned stream instead of collecting output.
+            sysctl: Kernel parameter names mapped to their values.
+            tmpfs: Temporary filesystem mount specifications.
             tty: Allocate a pseudo-TTY. Allow the process to access your terminal
                 to write on it.
+            ulimit: Resource-limit specifications in Docker syntax.
             user: Username or UID (format: `<name|uid>[:<group|gid>]`)
             userns:  User namespace to use
             uts:  UTS namespace to use
-            volumes:  Bind mount a volume. Some examples:
-                `[("/", "/host"), ("/etc/hosts", "/etc/hosts", "rw")]`.
+            volumes: Source, destination, and optional mode tuples. Bind-mount
+                sources refer to the daemon host, which may be remote.
             volume_driver: Optional volume driver for the container
+            volumes_from: Containers whose volumes should be mounted.
             workdir: The directory in the container where the process will be executed.
+            timeout: Positive finite seconds from run subprocess launch, or None
+                for no deadline. Does not budget image preflight or handle lookup.
 
-        # Returns
-            The container output as a string if detach is `False` (the default),
-            and a `pywhales.Container` if detach is `True`.
+        Returns:
+            A container handle with detach=True; an owned stream of
+            ("stdout" or "stderr", bytes) records with stream=True; otherwise
+            captured stdout text, or an empty string when tty=True.
+
+        Raises:
+            TypeError: If command is a shell command string.
+            ValueError: If timeout is invalid or detach and stream are both true.
+            DockerTimeout: If the selected local run subprocess exceeds timeout.
+            DockerException: If image preflight or the Docker command fails.
         """
         validate_timeout(timeout)
         if isinstance(command, str):
@@ -2175,17 +2241,30 @@ class ContainerCLI(DockerCLICaller):
         stream: bool = False,
         detach_keys: str | None = None,
     ) -> str | ProcessStream | None:
-        """Starts one or more created/stopped containers.
+        """Start one or more created or stopped containers.
 
         Aliases: `docker.start`, `docker.container.start`,
         `pywhales.Container.start`.
 
-        Parameters:
-            containers: One or a list of containers.
+        Streaming starts the local CLI immediately. Exhaust the stream or close
+        it explicitly or through its context manager when stopping early. Closing
+        the stream does not stop the daemon-side container.
+
+        Args:
+            containers: Containers to start; an empty iterable skips execution.
             attach: Attach stdout/stderr and forward signals.
             interactive: Attach stdin (ensure it is open).
-            stream: Stream output as a generator.
+            stream: Return an owned output stream; requires attach=True.
             detach_keys: Override the key sequence for detaching a container.
+
+        Returns:
+            None for empty input or unattached execution; captured text when
+            attached without streaming; otherwise an owned stream of
+            ("stdout" or "stderr", bytes) records.
+
+        Raises:
+            ValueError: If attaching multiple containers or streaming unattached.
+            NoSuchContainer: If a selected container does not exist.
         """
         container_list = (
             [containers]
@@ -2220,32 +2299,19 @@ class ContainerCLI(DockerCLICaller):
         containers: ValidContainer | Iterable[ValidContainer] | None = None,
         all: bool = False,
     ) -> builtins.list[ContainerStats]:
-        """Get containers resource usage statistics
+        """Return one resource-usage snapshot for selected containers.
 
-        Alias: `docker.stats(...)`
+        Require the Docker CLI and a reachable daemon. Byte-valued measurements
+        are parsed from Docker's formatted sizes; percentage values remain in
+        percentage units rather than fractions.
 
-        Usage:
-        ```python
-        from pywhales import docker
+        Args:
+            containers: Containers to sample; None selects Docker's default set.
+                Empty input returns [] unless all=True, which queries all.
+            all: Include stopped containers as well as running containers.
 
-        docker.run("redis", detach=True)
-        print(docker.stats())
-        # [<<class 'pywhales.components.container.ContainerStats'> object,
-        # attributes are block_read=0, block_write=0, cpu_percentage=0.08,
-        # container=e90ae41a5b17,
-        # container_id=e90ae41a5b17df998584141692f1e361c485e8d00c37ee21fdc360d3523dd1c1,
-        # memory_percentage=0.18, memory_used=11198791, memory_limit=6233071288,
-        # container_name=crazy_northcutt, net_upload=696, net_download=0>]
-        ```
-
-        The data unit is the byte.
-
-        Parameters:
-            all: Get the stats of all containers, not just running ones.
-            containers: One or a list of containers.
-
-        # Returns
-            A `List[pywhales.ContainerStats]`.
+        Returns:
+            Parsed usage records in CLI output order.
         """
         containers_list = to_list(containers) if containers else []
         if len(containers_list) == 0 and containers is not None and not all:
@@ -2274,20 +2340,20 @@ class ContainerCLI(DockerCLICaller):
         containers: ValidContainer | Iterable[ValidContainer],
         time: int | timedelta | None = None,
     ) -> None:
-        """Stops one or more running containers
+        """Stop one or more running containers.
 
         Alias: `docker.stop(...)`
 
         Aliases: `docker.stop`, `docker.container.stop`,
         `pywhales.Container.stop`.
 
-        Parameters:
-            containers: One or a list of containers.
-            time: Seconds to wait for stop before killing a container (default 10)
+        Args:
+            containers: Containers to stop; empty input skips execution.
+            time: Shutdown grace period in seconds before Docker kills the
+                container; None leaves the option unset for Docker to decide.
 
-        # Raises
-            `pywhales.exceptions.NoSuchContainer` if any of the
-            containers do not exist.
+        Raises:
+            NoSuchContainer: If a selected container does not exist.
         """
         container_list = (
             [containers]
@@ -2335,21 +2401,21 @@ class ContainerCLI(DockerCLICaller):
         *,
         raw: bool = False,
     ) -> ContainerTopResult | str:
-        """Get a container's running processes without changing its state.
+        """Return a container's running processes without changing its state.
 
         Alias: `docker.top(...)`.
 
-        Parameters:
-            container: Container name, id, or Container object.
+        Args:
+            container: Container whose processes should be listed.
             ps_args: Docker ps option tokens, forwarded after the container.
                 Defaults to the Engine's ps selection (normally -ef).
             raw: Return the output from the existing CLI execution path as text
                 instead of parsing it. Required for ambiguous field selections.
 
         Returns:
-            ContainerTopResult with original headings, ordered string rows, and
-            raw_output. Supported selections have scalar fields and optionally
-            one final command/free-text field. No fixed process schema is imposed.
+            Unparsed CLI text when raw=True. Otherwise, original headings,
+            ordered string rows, and raw_output. Supported selections have scalar
+            fields and optionally one final command/free-text field.
 
         Raises:
             TopParseError: Unsupported or malformed parsed layout; use raw=True.
@@ -2362,16 +2428,15 @@ class ContainerCLI(DockerCLICaller):
         return ContainerTopResult(table.headings, table.rows, output)
 
     def unpause(self, x: ValidContainer | Iterable[ValidContainer], /) -> None:
-        """Unpause all processes within one or more containers
+        """Unpause all processes within one or more containers.
 
         Alias: `docker.unpause(...)`
 
-        Parameters:
-            x: One or more containers (name, id or `pywhales.Container` object).
+        Args:
+            x: Containers to unpause; empty input skips execution.
 
-        # Raises
-            `pywhales.exceptions.NoSuchContainer` if any of the
-            containers do not exist.
+        Raises:
+            NoSuchContainer: If a selected container does not exist.
         """
         containers = [x] if isinstance(x, str | Container) else list(x)
         if len(containers) == 0:
@@ -2402,12 +2467,12 @@ class ContainerCLI(DockerCLICaller):
         pids_limit: int | None = None,
         restart: str | None = None,
     ) -> None:
-        """Update configuration of one or more containers
+        """Update configuration of one or more containers.
 
         Alias: `docker.update(...)`
 
-        Parameters:
-            x: One or a list of containers to update.
+        Args:
+            x: Containers to update; empty input skips execution.
             blkio_weight: Block IO (relative weight), between 10 and 1000,
                 or 0 to disable (default 0)
             cpu_period: Limit CPU CFS (Completely Fair Scheduler) period
@@ -2417,21 +2482,20 @@ class ContainerCLI(DockerCLICaller):
             cpu_shares: CPU shares (relative weight)
             cpus: The maximal amount of cpu the container can use.
                 `1` means one cpu core.
-            cpuset_cpus: CPUs in which to allow execution, as a cpuset string
-                understood by the docker CLI (e.g. `"0-3"`, `"0,2"`,
-                `"0-3,7"`).
-            cpuset_mems: MEMs in which to allow execution, as a cpuset string
-                (same format as `cpuset_cpus`).
-            memory:  Memory limit, valid values are `1024` (ints are bytes) or
-                `"43m"` or `"6g"`.
+            cpuset_cpus: Allowed CPU indices in Docker cpuset notation, such as
+                `"0-3"`, `"0,2"`, or `"0-3,7"`.
+            cpuset_mems: Allowed NUMA memory nodes in the same notation as
+                `cpuset_cpus`; None omits the option.
+            kernel_memory: Kernel-memory limit in bytes or Docker size notation.
+            memory: Memory limit in bytes or Docker size notation, such as `"43m"`.
             memory_reservation: Memory soft limit
             memory_swap: Swap limit equal to memory plus swap: '-1'
                 to enable unlimited swap.
             pids_limit: Tune container pids limit (set `-1` for unlimited)
             restart: Restart policy to apply when a container exits (default "no")
 
-        # Raises
-            `pywhales.exceptions.NoSuchContainer` if the container does not exists.
+        Raises:
+            NoSuchContainer: If a selected container does not exist.
         """
         containers = [x] if isinstance(x, str | Container) else list(x)
         if containers == []:
@@ -2465,43 +2529,20 @@ class ContainerCLI(DockerCLICaller):
     def wait(
         self, x: ValidContainer | Iterable[ValidContainer]
     ) -> int | builtins.list[int]:
-        """Block until one or more containers stop, then returns their exit codes
+        """Block until selected containers stop and return their exit codes.
 
         Alias: `docker.wait(...)`
 
 
-        Parameters:
-            x: One or a list of containers to wait for.
+        Args:
+            x: Containers to wait for; an empty iterable skips execution.
 
-        # Returns
-            An `int` if a single container was passed as argument or a list of ints
-            if multiple containers were passed as arguments.
+        Returns:
+            One exit code for a scalar reference, or codes in Docker's output
+            order for iterable input, including [] for empty input.
 
-        Some Examples:
-
-        ```python
-        cont = docker.run("ubuntu", ["bash", "-c", "sleep 2 && exit 8"], detach=True)
-
-        exit_code = docker.wait(cont)
-
-        print(exit_code)
-        # 8
-        docker.container.remove(cont)
-        ```
-
-        ```python
-        cont_1 = docker.run("ubuntu", ["bash", "-c", "sleep 4 && exit 8"], detach=True)
-        cont_2 = docker.run("ubuntu", ["bash", "-c", "sleep 2 && exit 10"], detach=True)
-
-        exit_codes = docker.wait([cont_1, cont_2])
-
-        print(exit_codes)
-        # [8, 10]
-        docker.container.remove([cont_1, cont_2])
-        ```
-
-        # Raises
-            `pywhales.exceptions.NoSuchContainer` if the container does not exists.
+        Raises:
+            NoSuchContainer: If a selected container does not exist.
         """
         containers = to_list(x)
         if len(containers) == 0:
@@ -2517,9 +2558,14 @@ class ContainerCLI(DockerCLICaller):
 
 
 class ContainerStats:
+    """Parsed container usage snapshot with byte counts and percentage values."""
+
     def __init__(self, json_dict: dict[str, str]) -> None:
-        """Takes a json_dict with container stats from the CLI and
-        parses it.
+        """Parse one formatted JSON record from Docker container stats.
+
+        Args:
+            json_dict: CLI record containing formatted I/O, CPU, memory, identity,
+                and network measurements.
         """
         self.block_read: int = custom_parse_object_as(
             pydantic.ByteSize, json_dict["BlockIO"].split("/")[0]

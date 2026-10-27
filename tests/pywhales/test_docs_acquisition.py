@@ -1,3 +1,9 @@
+"""Mocked documentation acquisition, partial-failure, and cleanup-order contracts.
+
+The daemon fixture replaces Docker resources and inventory operations; these
+tests exercise live-provider code without a real Docker daemon.
+"""
+
 from collections.abc import Callable
 from typing import Final
 from unittest.mock import MagicMock

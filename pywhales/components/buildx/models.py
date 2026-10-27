@@ -1,3 +1,5 @@
+"""Typed builder-list snapshots, separate from live Buildx handles."""
+
 from __future__ import annotations
 
 import datetime as dt

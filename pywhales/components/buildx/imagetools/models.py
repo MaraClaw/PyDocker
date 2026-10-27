@@ -1,3 +1,5 @@
+"""Registry manifest and index models with explicit Docker wire aliases."""
+
 from __future__ import annotations
 
 from typing import Annotated
@@ -32,6 +34,8 @@ class ImageVariantManifest(pydantic.BaseModel):
 
 
 class Manifest(pydantic.BaseModel):
+    """Manifest or index snapshot, not a daemon-local image or pull operation."""
+
     media_type: Annotated[str | None, pydantic.Field(alias="mediaType")]
     schema_version: Annotated[int | None, pydantic.Field(alias="schemaVersion")]
     layers: list[ManifestLayer] | None = None

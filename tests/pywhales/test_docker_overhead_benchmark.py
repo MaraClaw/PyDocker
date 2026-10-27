@@ -1,3 +1,9 @@
+"""Simulated-wrapper benchmark contracts without Docker execution.
+
+CLI coverage starts real Python children with Docker unavailable on PATH. The
+benchmark itself substitutes subprocess responses and denies process launches.
+"""
+
 import json
 import os
 import subprocess

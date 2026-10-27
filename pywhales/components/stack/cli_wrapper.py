@@ -1,3 +1,5 @@
+"""Swarm stack deployment and discovery through the configured Docker CLI."""
+
 from __future__ import annotations
 
 import builtins
@@ -13,6 +15,13 @@ from pywhales.utils import ValidPath, read_env_files, run, to_list
 
 
 class Stack:
+    """Named stack handle delegating operations to its originating client.
+
+    Attributes:
+        client_config: Shared mutable client configuration used for each operation.
+        name: Stack name used in subsequent commands.
+    """
+
     def __init__(self, client_config: ClientConfig, name: str) -> None:
         self.client_config = client_config
         self.name = name
@@ -33,12 +42,15 @@ class Stack:
         return f"pywhales.Stack(name='{self.name}')"
 
     def remove(self) -> None:
+        """Remove this stack through the configured Docker CLI."""
         StackCLI(self.client_config).remove(self)
 
     def ps(self) -> list[pywhales.components.task.cli_wrapper.Task]:
+        """Return task handles associated with this stack."""
         return StackCLI(self.client_config).ps(self)
 
     def services(self) -> list[pywhales.components.service.cli_wrapper.Service]:
+        """Return service handles associated with this stack."""
         return StackCLI(self.client_config).services(self)
 
 
@@ -46,6 +58,8 @@ ValidStack = str | Stack
 
 
 class StackCLI(DockerCLICaller):
+    """Stack administration against a Swarm manager, with local deployment files."""
+
     def deploy(
         self,
         name: str,
@@ -57,13 +71,15 @@ class StackCLI(DockerCLICaller):
         env_files: Sequence[ValidPath] = (),
         variables: Mapping[str, str] = MappingProxyType({}),
     ) -> Stack:
-        """Deploys a stack.
+        """Deploy a stack from Compose files.
 
-        Parameters:
+        This changes daemon-managed services and displays Docker's stdout.
+
+        Args:
             name: The name of the stack to deploy. Mandatory.
             compose_files: One or more docker-compose files. If there are more than
                 one, they will be fused together.
-            orchestrator: The orchestrator to use, `"swarm" or "kubernetes" or "all".
+            orchestrator: Orchestrator selection, or None to omit the option.
             prune: Prune services that are no longer referenced
             resolve_image: Query the registry to resolve image digest
                 and supported platforms `"always"|"changed"|"never"` (default `"always"`).
@@ -76,12 +92,12 @@ class StackCLI(DockerCLICaller):
                 `.env` files. If both `env_files` and `variables` are used, `variables`
                 have priority. This behavior is similar to the one you would experience with
                 compose.
-            variables: A dict dictating by what to replace the variables declared in
-                the docker-compose files. In the docker CLI, you would use
-                environment variables for this.
+            variables: Environment overrides for interpolating Compose file
+                variables, taking precedence over values loaded from `env_files`.
 
-        # Returns
-            A `pywhales.Stack` object.
+        Returns:
+            A named stack handle after the deploy CLI exits, not a guarantee that
+            all deployed service tasks have converged.
         """
         full_cmd = Command([*self.docker_cmd, "stack", "deploy"])
 
@@ -99,10 +115,10 @@ class StackCLI(DockerCLICaller):
         return Stack(self.client_config, name)
 
     def list(self) -> builtins.list[Stack]:
-        """Returns a list of `pywhales.Stack`
+        """List stacks using the configured Docker CLI.
 
-        # Returns
-            A `List[pywhales.Stack]`.
+        Returns:
+            Stack handles in CLI output order.
         """
         full_cmd = Command([*self.docker_cmd, "stack", "ls", "--format", "{{.Name}}"])
         stacks_names = run(full_cmd).splitlines()
@@ -111,21 +127,13 @@ class StackCLI(DockerCLICaller):
     def ps(
         self, x: ValidStack
     ) -> builtins.list[pywhales.components.task.cli_wrapper.Task]:
-        """Returns the list of swarm tasks in this stack.
+        """List Swarm tasks associated with a stack.
 
-        ```python
-        from pywhales import docker
+        Args:
+            x: Stack name or handle to list tasks for.
 
-        tasks = docker.stack.ps("my-stack")
-        print(tasks[0].desired_state)
-        # running
-        ```
-
-        Parameters:
-            x: A stack . It can be name or a `pywhales.Stack` object.
-
-        # Returns
-            `List[pywhales.Task]`
+        Returns:
+            Task handles in CLI output order, including any task history Docker lists.
         """
         full_cmd = Command(
             [*self.docker_cmd, "stack", "ps", "--quiet", "--no-trunc", x]
@@ -140,11 +148,10 @@ class StackCLI(DockerCLICaller):
         ]
 
     def remove(self, x: ValidStack | Sequence[ValidStack]) -> None:
-        """Removes one or more stacks.
+        """Remove one or more stacks.
 
-        Parameters:
+        Args:
             x: One or more stacks, empty list means nothing will be done.
-
         """
         if x == []:
             return
@@ -156,11 +163,12 @@ class StackCLI(DockerCLICaller):
     ) -> builtins.list[pywhales.components.service.cli_wrapper.Service]:
         """List the services present in the stack.
 
-        Parameters:
+        Args:
             stack: A docker stack or the name of a stack.
 
-        # Returns
-            A `List[pywhales.Stack]`
+        Returns:
+            Service handles in CLI output order, inspected individually to resolve
+            their full IDs.
         """
         full_cmd = Command([*self.docker_cmd, "stack", "services", "--quiet", stack])
         ids = run(full_cmd).splitlines()

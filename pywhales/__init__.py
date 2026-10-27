@@ -1,3 +1,10 @@
+"""Public Docker CLI clients, resource handles, models, and enums.
+
+Importing this package constructs the shared ``docker`` client without looking up
+the executable or contacting a daemon. Operations resolve their CLI prerequisites
+when needed.
+"""
+
 from . import enums
 from .client_config import ClientNotFoundError
 from .components.buildx.cli_wrapper import Builder

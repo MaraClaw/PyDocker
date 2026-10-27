@@ -1,3 +1,10 @@
+"""Conversion and process-stream lifecycle regressions using real local children.
+
+These tests launch Python and shell commands to exercise pipes, threads, buffering,
+and deadlines. Docker wrapper paths are patched where used; daemon availability
+does not replace the local process requirements.
+"""
+
 import os
 import select
 import signal
@@ -9,6 +16,8 @@ from time import monotonic
 import pytest
 
 import pywhales.utils
+from pywhales.client_config import ClientConfig
+from pywhales.components.buildx.cli_wrapper import stream_buildx_logs
 from pywhales.exceptions import DockerException, DockerTimeout, NoSuchContainer
 from pywhales.utils import (
     MappedProcessStream,
@@ -89,7 +98,7 @@ def test_stream_stdout_and_stderr_interactive_multiple_lines() -> None:
 
 
 def test_stream_stdout_and_stderr_non_interactive() -> None:
-    """Non-interactive mode returns ProcessStream with stdin=None."""
+    """Leave stdin unavailable when streaming without an interactive input pipe."""
     result = stream_stdout_and_stderr(["echo", "hi"])
     assert isinstance(result, ProcessStream)
     assert result.stdin is None
@@ -108,6 +117,7 @@ def test_process_stream_close_after_eof() -> None:
 
 
 def _assert_process_released(stream: ProcessStream) -> None:
+    """Check child reaping, reader and watchdog shutdown, and pipe closure."""
     assert stream._process.poll() is not None
     assert all(not thread.is_alive() for thread in stream._threads)
     assert not stream._watchdog.is_alive()
@@ -116,6 +126,139 @@ def _assert_process_released(stream: ProcessStream) -> None:
         for pipe in (stream.stdin, stream._process.stdout, stream._process.stderr)
         if pipe is not None
     )
+
+
+def test_client_stream_budget_is_live_for_new_launches_but_frozen_after_start() -> None:
+    config = ClientConfig(client_call=[sys.executable], stream_buffer_bytes=3)
+    command = [
+        *config.docker_cmd,
+        "-c",
+        "input(); print('long-record', flush=True); input()",
+    ]
+    stream = stream_stdout_and_stderr(command, pipe_stdin=True)
+    config.stream_buffer_bytes = None
+    try:
+        assert stream.stdin is not None
+        stream.stdin.write(b"go\n")
+        stream.stdin.flush()
+        with pytest.raises(BufferError):
+            next(stream)
+        _assert_process_released(stream)
+        with stream_stdout_and_stderr(command, pipe_stdin=True) as fresh:
+            assert fresh.stdin is not None
+            fresh.stdin.write(b"go\n")
+            fresh.stdin.flush()
+            assert next(fresh) == ("stdout", b"long-record\n")
+        _assert_process_released(fresh)
+    finally:
+        stream.close()
+
+
+def test_explicit_unbounded_buffer_does_not_fall_back_to_client_budget() -> None:
+    config = ClientConfig(client_call=[sys.executable], stream_buffer_bytes=3)
+
+    stream = stream_stdout_and_stderr(
+        [*config.docker_cmd, "-c", "print('long-record')"], buffer_bytes=None
+    )
+
+    assert list(stream) == [("stdout", b"long-record\n")]
+    _assert_process_released(stream)
+
+
+def test_buildx_mapped_stream_applies_client_budget_without_wrapper_override() -> None:
+    config = ClientConfig(client_call=[sys.executable], stream_buffer_bytes=3)
+
+    stream = stream_buildx_logs([*config.docker_cmd, "-c", "print('oversized')"])
+
+    with pytest.raises(BufferError):
+        list(stream)
+    _assert_process_released(stream._stream)
+
+
+@pytest.mark.parametrize("raw", [False, True])
+def test_run_timeout_keeps_client_diagnostics_and_raw_output(raw: bool) -> None:
+    secret = "timeout-secret-sentinel"
+    config = ClientConfig(client_call=[sys.executable], raw_diagnostics=raw)
+
+    with pytest.raises(DockerTimeout) as raised:
+        pywhales.utils.run(
+            [
+                *config.docker_cmd,
+                "-c",
+                f"print({secret!r}, flush=True); __import__('threading').Event().wait()",
+            ],
+            input=b"",
+            timeout=0.5,
+        )
+
+    assert (secret in str(raised.value)) is raw
+    assert raised.value.stdout == secret + "\n"
+
+
+def test_mapped_client_stream_applies_backpressure_and_cancels_saturated_child() -> (
+    None
+):
+    config = ClientConfig(client_call=[sys.executable], stream_buffer_bytes=3)
+    child = stream_stdout_and_stderr(
+        [
+            *config.docker_cmd,
+            "-c",
+            "import os; os.write(1, b'ab\\n' * 100000); input()",
+        ],
+        pipe_stdin=True,
+    )
+    stream = MappedProcessStream(child, (line for _, line in child))
+    try:
+        with child._queue.condition:
+            assert child._queue.condition.wait_for(
+                lambda: child._queue._bytes == 3 and bool(child._inflight["stdout"]),
+                timeout=3,
+            )
+
+        assert next(stream) == b"ab\n"
+        stream.close()
+
+        _assert_process_released(child)
+    finally:
+        stream.close()
+
+
+@pytest.mark.parametrize("raw", [False, True])
+@pytest.mark.parametrize("failure", ["natural", "owner", "timeout"])
+def test_stream_diagnostics_snapshot_client_policy_at_launch(
+    raw: bool, failure: str
+) -> None:
+    secret = "stream-secret-sentinel"
+    config = ClientConfig(client_call=[sys.executable], raw_diagnostics=raw)
+    action = "input()" if failure == "timeout" else "raise SystemExit(7)"
+    command = [
+        *config.docker_cmd,
+        "-c",
+        f"import sys; print({secret!r}, file=sys.stderr, flush=True); input(); {action}",
+    ]
+    stream = stream_stdout_and_stderr(
+        command, pipe_stdin=True, timeout=1 if failure == "timeout" else None
+    )
+    errors: list[OSError | BufferError | DockerException] = []
+    if failure == "owner":
+        stream._on_failure(errors.append)
+    config.raw_diagnostics = not raw
+    try:
+        assert next(stream) == ("stderr", (secret + "\n").encode())
+        assert stream.stdin is not None
+        stream.stdin.write(b"go\n")
+        stream.stdin.flush()
+        expected = DockerTimeout if failure == "timeout" else DockerException
+        with pytest.raises(expected) as raised:
+            list(stream)
+
+        assert (secret in str(raised.value)) is raw
+        assert raised.value.stderr == secret + "\n"
+        if failure == "owner":
+            assert errors == [raised.value]
+        _assert_process_released(stream)
+    finally:
+        stream.close()
 
 
 @pytest.mark.parametrize("consume", [False, True])

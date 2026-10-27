@@ -1,9 +1,13 @@
 import json
 from pathlib import Path
+from subprocess import CompletedProcess
+from unittest.mock import patch
 
 import pytest
 
 from pywhales import DockerClient
+from pywhales.client_config import ParsingError
+from pywhales.components.context.cli_wrapper import Context
 from pywhales.components.context.models import ContextInspectResult
 from pywhales.test_utils import get_all_jsons
 
@@ -61,3 +65,81 @@ def test_remove_empty_context_list(docker_client: DockerClient) -> None:
     all_contexts = set(docker_client.context.list())
     docker_client.context.remove([])
     assert all_contexts == set(docker_client.context.list())
+
+
+def test_batch_inspect_preserves_context_order_and_duplicate_handles() -> None:
+    client = DockerClient(host="inventory-host")
+    client.client_config._client_call_with_path = ["docker-test"]
+    references = ["second", "first", "second"]
+    payload = [{"Name": reference} for reference in references]
+    with patch(
+        "subprocess.run",
+        return_value=CompletedProcess([], 0, json.dumps(payload).encode(), b""),
+    ) as command:
+        resources = client.context.inspect(references)
+
+    assert [resource.name for resource in resources] == references
+    assert resources[0] is not resources[2]
+    assert all(resource._inspect_result is not None for resource in resources)
+    assert all(resource.client_config is client.client_config for resource in resources)
+    command.assert_called_once()
+    assert command.call_args.args[0] == [
+        "docker-test",
+        "--host",
+        "inventory-host",
+        "context",
+        "inspect",
+        *references,
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "{}",
+        "null",
+        "[1, 2]",
+        "[]",
+        '[{"Name": "first"}]',
+        '[{"Name": "first"}, {"Name": "first"}, {"Name": "first"}]',
+        '[{"Name": "first"}, {"Name": 2}]',
+        '[{"Name": "first"}, {"Name": ""}]',
+        '[{"Name": "first"}, {}]',
+        '[{"Name": "first"}, {"Name": "first-longer"}]',
+        '[{"Name": "first"}, {"Name": "first", "Metadata": {"changed": true}}]',
+    ],
+)
+def test_batch_inspect_validates_all_contexts_before_hydration(payload: str) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    with (
+        patch(
+            "subprocess.run",
+            return_value=CompletedProcess([], 0, payload.encode(), b""),
+        ) as command,
+        patch.object(Context, "_set_inspect_result") as hydrate,
+        pytest.raises(ParsingError),
+    ):
+        client.context.inspect(["first", "first"])
+    command.assert_called_once()
+    hydrate.assert_not_called()
+
+
+def test_batch_inspect_empty_contexts_avoids_lookup() -> None:
+    with patch("shutil.which") as lookup, patch("subprocess.run") as command:
+        assert DockerClient().context.inspect([]) == []
+    lookup.assert_not_called()
+    command.assert_not_called()
+
+
+def test_scalar_inspect_context_none_keeps_current_context_lookup() -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    with patch(
+        "subprocess.run",
+        return_value=CompletedProcess([], 0, b'[{"Name": "current"}]', b""),
+    ) as command:
+        resource = client.context.inspect(None)
+    assert resource.name == "current"
+    command.assert_called_once()
+    assert command.call_args.args[0] == ["docker-test", "context", "inspect"]

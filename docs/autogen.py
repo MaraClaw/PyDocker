@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""Mapped Markdown generation with staged publication and opt-in Docker examples.
+
+Run as ``python -m docs.autogen`` from the repository root. Default generation
+uses templates and offline placeholders; ``--live-examples`` permits Docker
+resource creation, plugin installation, and Swarm changes on a disposable daemon.
+"""
 
 import argparse
 from collections.abc import Mapping, Sequence
@@ -68,6 +74,17 @@ TEMPLATE_FILES: Final = {
 def md_generate(
     pages: Mapping[str, Sequence[str]], template_path: Path, destination_path: Path
 ) -> None:
+    """Render mapped templates and insert their API directives.
+
+    Only missing templates receive API-only fallback content. Existing templates
+    without the insertion marker remain unchanged, and unmapped files are omitted.
+
+    Args:
+        pages: Output paths relative to the destination, mapped to API symbols
+            in directive order.
+        template_path: Template root, including any legacy filename aliases.
+        destination_path: Output root; parent directories are created as needed.
+    """
     for md_file, module_list in pages.items():
         template_file_path = template_path / TEMPLATE_FILES.get(md_file, md_file)
         target_file_path = destination_path / md_file
@@ -92,7 +109,17 @@ def md_generate(
 
 
 def mkdoc_autogen(live_examples: bool = False) -> None:
-    """Finish rendering before replacing the previous generated source tree."""
+    """Render documentation in staging before replacing generated sources.
+
+    Template or provider failures during rendering leave the previous tree intact.
+    Successful rendering deletes that tree before renaming staging into place;
+    replacement is not atomic and removes hand-added generated files.
+
+    Args:
+        live_examples: Invoke Docker-backed providers instead of offline
+            placeholders. Requires a disposable daemon and the relevant plugins;
+            providers can pull images, install a plugin, and initialize Swarm.
+    """
     template_path = PROJECT_ROOT / "docs" / "template"
     destination_path = PROJECT_ROOT / "docs" / "generated_sources"
     with TemporaryDirectory(

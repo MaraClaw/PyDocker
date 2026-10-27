@@ -1,3 +1,5 @@
+"""Docker CLI manifest-list handles, local assembly, and registry publication."""
+
 import json
 from collections.abc import Sequence
 from types import TracebackType
@@ -18,6 +20,12 @@ from pywhales.utils import custom_parse_object_as, run, to_list
 
 
 class ManifestList(ReloadableObjectFromJson[ManifestListInspectResult]):
+    """Reloadable manifest-list handle retaining its inspection reference.
+
+    Context-manager exit attempts to remove the local manifest list. A failure
+    in both the body and cleanup is reported as an exception group.
+    """
+
     def __init__(
         self,
         client_config: ClientConfig,
@@ -76,10 +84,9 @@ class ManifestList(ReloadableObjectFromJson[ManifestListInspectResult]):
         return f"pywhales.ManifestList(name='{self.name}')"
 
     def remove(self) -> None:
-        """Removes this Docker manifest list.
+        """Remove this local Docker manifest list.
 
-        Rather than removing it manually, you can use a context manager to
-        make sure the manifest list is deleted even if an exception is raised.
+        A context manager attempts this removal even if its body raises.
         """
         ManifestCLI(self.client_config).remove(self)
 
@@ -88,6 +95,8 @@ ValidManifestList = ManifestList | str
 
 
 class ManifestCLI(DockerCLICaller):
+    """Manifest-list commands using local CLI state and registry access."""
+
     def annotate(
         self,
         name: str,
@@ -98,16 +107,16 @@ class ManifestCLI(DockerCLICaller):
         os_version: str | None = None,
         variant: str | None = None,
     ) -> None:
-        """Annotates a Docker manifest list.
+        """Annotate an individual manifest in a local Docker manifest list.
 
-        Parameters:
+        Args:
             name: The name of the manifest list
             manifest: The individual manifest to annotate
-            arch: The manifest's architecture
-            os: The manifest's operating system
-            os_features: The manifest's operating system features
-            os_version: The manifest's operating system version
-            variant: The manifest's architecture variant
+            arch: Architecture override, or None to omit it.
+            os: Operating-system override, or None to omit it.
+            os_features: Operating-system features, or None to omit the option.
+            os_version: Operating-system version override, or None to omit it.
+            variant: Architecture variant override, or None to omit it.
         """
         full_cmd = Command([*self.docker_cmd, "manifest", "annotate"])
         full_cmd.add_simple_arg("--arch", arch)
@@ -126,14 +135,16 @@ class ManifestCLI(DockerCLICaller):
         ammend: bool = False,
         insecure: bool = False,
     ) -> ManifestList:
-        """Creates a Docker manifest list.
+        """Create a local Docker manifest list.
 
-        Parameters:
-            name: The name of the manifest list
-            manifests: The list of manifests to add to the manifest list
+        Args:
+            name: Name for the manifest list.
+            manifests: Manifest references to include.
+            ammend: Amend an existing list rather than creating a new one.
+            insecure: Allow communication with an insecure registry during creation.
 
-        # Returns
-            A `pywhales.ManifestList`.
+        Returns:
+            A handle to the created manifest list.
         """
         full_cmd = Command([*self.docker_cmd, "manifest", "create"])
         full_cmd.add_flag("--amend", ammend)
@@ -145,14 +156,24 @@ class ManifestCLI(DockerCLICaller):
         )
 
     def inspect(self, x: str, insecure: bool = False) -> ManifestList:
-        """Returns a Docker manifest list object."""
+        """Inspect a Docker manifest list.
+
+        Args:
+            x: Manifest-list reference to inspect.
+            insecure: Allow inspection through an insecure registry.
+
+        Returns:
+            A handle with the inspected manifest-list data.
+        """
         return ManifestList(self.client_config, x, insecure=insecure)
 
     def push(self, x: str, purge: bool = False, quiet: bool = False) -> None:
         """Push a manifest list to a repository.
 
-        # Options
-            purge: Remove the local manifest list after push
+        Args:
+            x: Manifest-list reference to inspect and push.
+            purge: Remove the local manifest list after pushing.
+            quiet: Capture and discard push output instead of displaying it.
         """
         # this is just to raise a correct exception if the manifest list doesn't exist
         self.inspect(x)
@@ -165,10 +186,10 @@ class ManifestCLI(DockerCLICaller):
     def remove(
         self, manifest_lists: ValidManifestList | Sequence[ValidManifestList]
     ) -> None:
-        """Removes a Docker manifest list or lists.
+        """Remove one or more local Docker manifest lists.
 
-        Parameters:
-            manifest_lists: One or more manifest lists.
+        Args:
+            manifest_lists: Manifest-list names or handles. An empty list is a no-op.
         """
         if manifest_lists == []:
             return

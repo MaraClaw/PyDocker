@@ -61,18 +61,21 @@ def test_swarm_join_token_not_swarm_manager(docker_client: DockerClient) -> None
     with pytest.raises(NotASwarmManager) as e:
         docker_client.swarm.join_token("manager")
 
-    assert "not a swarm manager" in str(e.value).lower()
+    assert e.value.stderr is not None
+    assert "not a swarm manager" in e.value.stderr.lower()
 
 
 def test_update_not_swarm_manager(docker_client: DockerClient) -> None:
     with pytest.raises(NotASwarmManager) as e:
         docker_client.swarm.update(autolock=True)
 
-    assert "not a swarm manager" in str(e.value).lower()
+    assert e.value.stderr is not None
+    assert "not a swarm manager" in e.value.stderr.lower()
 
 
 def test_unlock_key_not_swarm_manager(docker_client: DockerClient) -> None:
     with pytest.raises(NotASwarmManager) as e:
         docker_client.swarm.unlock_key()
 
-    assert "not a swarm manager" in str(e.value).lower()
+    assert e.value.stderr is not None
+    assert "not a swarm manager" in e.value.stderr.lower()

@@ -1,3 +1,9 @@
+"""Docker Compose commands using the client's project and connection settings.
+
+Commands require an available Compose plugin. Resource handles retain the
+originating configuration; returned output is not diagnostic redaction output.
+"""
+
 from __future__ import annotations
 
 import json
@@ -57,6 +63,16 @@ class ComposeRunArgs(TypedDict, total=False, closed=True):
 
 
 class ComposeCLI(DockerCLICaller):
+    """Compose project commands with blocking and owned-stream output modes.
+
+    Nonempty streaming commands launch the local CLI before returning. Exhaust
+    the stream, use its context manager, or call `close()` on early exit; a bare
+    loop break does not release it. Closing kills and reaps the local CLI, not
+    daemon-managed services, and does not undo completed changes. Byte-output
+    streams yield records with `"stdout"` or `"stderr"` source labels and byte
+    payloads; `events()` returns a stream of parsed `ComposeEvent` objects.
+    """
+
     @overload
     def build(
         self,
@@ -139,14 +155,15 @@ class ComposeCLI(DockerCLICaller):
         sbom: bool | str | None = None,
         push: bool = False,
     ) -> Iterable[tuple[str, bytes]] | None:
-        """Build services declared in a yaml compose file.
+        """Build services declared in the configured Compose project.
 
-        Parameters:
-            services: The services to build (as list of strings).
-                If `None` (default), all services are built.
-                An empty list means that nothing will be built.
-            build_args: Set build-time variables for services. For example
-                 `build_args={"PY_VERSION": "3.7.8", "UBUNTU_VERSION": "20.04"}`.
+        New flags require a supporting Compose plugin. No version probe or
+        automatic downgrade is performed.
+
+        Args:
+            services: Services to build. `None` selects all services; `[]` skips
+                execution after validating the output-mode combination.
+            build_args: Build-time variable names and values for services.
             cache: Set to `False` if you don't want to use the cache to build your images
             progress: Set type of progress output (auto, tty, plain, json, quiet).
                 Overrides `compose_progress` for this call only; `None` uses the
@@ -157,12 +174,8 @@ class ComposeCLI(DockerCLICaller):
             with_dependencies: Also build dependencies (transitively)
             ssh: Set SSH authentications used when building service images.
                 (use `'default'` for using your default SSH Agent)
-            stream_logs: If `False` this function returns None. If `True`, this
-                function returns an Iterable of `Tuple[str, bytes]` where the first element
-                is the type of log (`"stdin"` or `"stdout"`). The second element is the log itself,
-                as bytes, you'll need to call `.decode()` if you want the logs as `str`.
-                See [the streaming guide](https://github.com/MaraClaw/PyWhales/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output) if you are
-                not familiar with the streaming of logs in PyWhales.
+            stream_logs: Return an owned stdout/stderr byte stream instead of
+                waiting for the CLI to complete.
             builder: Select the builder used for this build.
             check: Check the build configuration instead of building images.
             print: Print the equivalent Bake definition instead of building.
@@ -174,8 +187,13 @@ class ComposeCLI(DockerCLICaller):
                 attestation parameters. `None` leaves the CLI default unchanged.
             push: Push the built service images.
 
-        New flags require a supporting Compose plugin. No version probe or
-        automatic downgrade is performed.
+        Returns:
+            An owned stream of `(source, bytes)` records when `stream_logs=True`
+            and services are selected. Otherwise `None`, including for `[]`.
+            `print=True` does not change this result shape.
+
+        Raises:
+            ValueError: `quiet=True` is combined with `stream_logs=True`.
         """
         if quiet and stream_logs:
             raise ValueError(
@@ -232,26 +250,15 @@ class ComposeCLI(DockerCLICaller):
     ) -> ComposeConfig | dict[str, JsonValue]: ...
 
     def config(self, return_json: bool = False) -> ComposeConfig | dict[str, JsonValue]:
-        """Returns the configuration of the compose stack for further inspection.
+        """Return the resolved Compose project configuration.
 
-        For example
-        ```python
-        from pywhales import docker
-        project_config = docker.compose.config()
-        print(project_config.services["my_first_service"].image)
-        "redis"
-        ```
+        Args:
+            return_json: Preserve all JSON fields in a dictionary when `True`;
+                otherwise parse the fields supported by the typed model.
 
-        Parameters:
-            return_json: If `False`, a `ComposeConfig` object will be returned, and you
-                'll be able to take advantage of your IDE autocompletion. If you want the
-                full json output, you may use `return_json`. In this case, you'll get
-                lists and dicts corresponding to the json response, unmodified.
-                It may be useful if you just want to print the config or want to access
-                a field that was not in the `ComposeConfig` class.
-
-        # Returns
-            A `ComposeConfig` object if `return_json` is `False`, and a `dict` otherwise.
+        Returns:
+            The typed configuration by default, or the complete decoded JSON
+            dictionary when `return_json=True`.
         """
         full_cmd = Command([*self.docker_compose_cmd, "config", "--format", "json"])
         result = run(full_cmd, capture_stdout=True)
@@ -307,28 +314,28 @@ class ComposeCLI(DockerCLICaller):
         pull: ComposeCreatePullPolicy | None = None,
         stream_logs: bool = False,
     ) -> Iterable[tuple[str, bytes]] | None:
-        """Creates containers for a service.
+        """Create service containers without starting them.
 
-        Parameters:
+        Args:
             services: The name of the services for which the containers will
                 be created. The default `None` means that the containers for all
                 services will be created. A single string means we will create the
                 container for a single service. A list of string means we will create
                 the containers for each service in the list. An empty list means nothing
                 will be created, the function call is then a no-op.
-            build: Build images before starting containers.
+            build: Build images before creating containers.
             force_recreate: Recreate containers even if their configuration and
                 image haven't changed.
             no_build: Don't build an image, even if it's missing.
             no_recreate: If containers already exist, don't recreate them.
                 Incompatible with `force_recreate=True`.
             pull: Pull image before running ("always"|"missing"|"never"|"build").
-            stream_logs: If `False` this function returns None. If `True`, this
-                function returns an Iterable of `Tuple[str, bytes]` where the first element
-                is the type of log (`"stdin"` or `"stdout"`). The second element is the log itself,
-                as bytes, you'll need to call `.decode()` if you want the logs as `str`.
-                See [the streaming guide](https://github.com/MaraClaw/PyWhales/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output) if you are
-                not familiar with the streaming of logs in PyWhales.
+            stream_logs: Return an owned stdout/stderr byte stream instead of
+                waiting for command completion.
+
+        Returns:
+            An owned stream of `(source, bytes)` records when `stream_logs=True`
+            and services are selected; otherwise `None`, including for `[]`.
         """
         full_cmd = Command([*self.docker_compose_cmd, "create"])
         full_cmd.add_flag("--build", build)
@@ -341,7 +348,8 @@ class ComposeCLI(DockerCLICaller):
         elif services is not None:
             full_cmd += to_list(services)
         if stream_logs:
-            print(full_cmd)
+            if self.client_config.raw_diagnostics:
+                print(full_cmd)
             return stream_stdout_and_stderr(full_cmd)
         else:
             run(full_cmd, capture_stdout=False)
@@ -393,9 +401,9 @@ class ComposeCLI(DockerCLICaller):
         quiet: bool = False,
         stream_logs: bool = False,
     ) -> Iterable[tuple[str, bytes]] | None:
-        """Stops and removes the containers
+        """Stop and remove project containers and selected related resources.
 
-        Parameters:
+        Args:
             services: The services to stop. If `None` (default), all services are
                 stopped. If an empty list is provided, the function call does nothing, it's
                 a no-op.
@@ -404,12 +412,22 @@ class ComposeCLI(DockerCLICaller):
             remove_images: Remove images used by services.
                 `"local"` remove only images that don't have a custom
                 tag. Possible values are `"local"` and `"all"`.
-            timeout: Specify a shutdown timeout in seconds (default 10).
+            timeout: Container shutdown grace period in seconds. `None` leaves
+                the Compose default unchanged; this is not a local CLI deadline.
             volumes: Remove named volumes declared in the
                 volumes section of the Compose file and anonymous
                 volumes attached to containers.
             quiet: If `False`, send to stderr and stdout the progress spinners with
                 the messages. If `True`, do not display anything.
+            stream_logs: Return an owned stdout/stderr byte stream instead of
+                waiting for command completion.
+
+        Returns:
+            An owned stream of `(source, bytes)` records when `stream_logs=True`
+            and services are selected; otherwise `None`, including for `[]`.
+
+        Raises:
+            ValueError: `quiet=True` is combined with `stream_logs=True`.
         """
         if quiet and stream_logs:
             raise ValueError(
@@ -448,19 +466,24 @@ class ComposeCLI(DockerCLICaller):
     ) -> str | None:
         """Execute a command in a running container.
 
-        Parameters:
+        Args:
             service: The name of the service.
             command: The command to execute.
-            detach: If `True`, detach from the container after the command exits. In this case,
-                 nothing is returned by the function. By default, the execute command returns only when the
-                 command has finished running, and the function will raise an exception `DockerException` if the command
-                 exits with a non-zero exit code. If `False`, the command is executed and the stdout is returned.
-            envs: A dictionary of environment variables to set in the container.
+            detach: Let the container command continue after the local CLI exits.
+                Detached calls return `None`, not a container handle.
+            envs: Environment variable names and values for the container command.
             index: The index of the container to execute the command in (default 1) if there are multiple containers for this service.
             tty: If `True`, allocate a pseudo-TTY. Use `False` to get the output of the command.
             privileged: If `True`, run the command in privileged mode.
             user: The username to use inside the container.
             workdir: The working directory inside the container.
+
+        Returns:
+            Captured stdout when `detach=False` and `tty=False`; otherwise `None`.
+            With the default `tty=True`, output goes to the caller's terminal.
+
+        Raises:
+            DockerException: The local Compose CLI exits unsuccessfully.
         """
         full_cmd = Command([*self.docker_compose_cmd, "exec"])
         full_cmd.add_flag("--detach", detach)
@@ -484,9 +507,9 @@ class ComposeCLI(DockerCLICaller):
         services: str | list[str] | None = None,
         signal: int | str | None = None,
     ) -> None:
-        """Kills the container(s) of a service
+        """Send a signal to the containers of selected services.
 
-        Parameters:
+        Args:
             services: One or more service(s) to kill. The default (`None`) is to kill all services.
                 A string means the call will kill one single service. A list of service names can
                 be provided to kill multiple services in one function call.
@@ -513,6 +536,8 @@ class ComposeCLI(DockerCLICaller):
         since: str | None = None,
         until: str | None = None,
         stream: Literal[False] = False,
+        *,
+        timeout: float | None = None,
     ) -> str: ...
 
     @overload
@@ -527,6 +552,7 @@ class ComposeCLI(DockerCLICaller):
         until: str | None = None,
         *,
         stream: Literal[True],
+        timeout: float | None = None,
     ) -> Iterable[tuple[str, bytes]]: ...
 
     @overload
@@ -540,6 +566,8 @@ class ComposeCLI(DockerCLICaller):
         since: str | None = None,
         until: str | None = None,
         stream: bool = False,
+        *,
+        timeout: float | None = None,
     ) -> str | Iterable[tuple[str, bytes]]: ...
 
     def logs(
@@ -552,29 +580,43 @@ class ComposeCLI(DockerCLICaller):
         since: str | None = None,
         until: str | None = None,
         stream: bool = False,
+        *,
+        timeout: float | None = None,
     ) -> str | Iterable[tuple[str, bytes]]:
-        """View output from containers
+        """Collect or stream output from service containers.
 
-        Parameters:
-            services: One or more service(s) to view
+        The local logs CLI starts during the call. Blocking collection joins
+        decoded stdout and stderr records in arrival order. When streaming,
+        exhaust the owned stream or close it on early exit; a bare loop break
+        does not close it. Closing affects the local CLI, not running services.
+
+        Args:
+            services: Services to view. An empty sequence selects all services,
+                unlike commands where `services=[]` is a no-op.
             tail: Number of lines to show from the end of the logs for each container. (default "all")
-            follow: Follow log output ***WARNING***: With this
-                option, `docker.compose.logs()` will not return at all. Use it exclusively with
-                `stream=True`. You can loop on the logs but the loop will never end.
-
+            follow: Keep following new output. Blocking collection waits for the
+                CLI to end, which may be indefinite; use streaming to consume
+                records as they arrive.
             no_log_prefix: Don't print prefix in logs
             timestamps: Show timestamps
             since: Show logs since timestamp (e.g. 2013-01-02T13:23:37Z) or relative (e.g. 42m for 42 minutes)
             until: Show logs before a timestamp (e.g. 2013-01-02T13:23:37Z) or relative (e.g. 42m for 42 minutes)
-            stream: Similar to the `stream` argument of `docker.run()`.
-                This function will then return and iterator that will yield a
-                tuple `(source, content)` with `source` being `"stderr"` or
-                `"stdout"`. `content` is the content of the line as bytes.
-                Take a look at [the user guide](https://github.com/MaraClaw/PyWhales/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output)
-                to have an example of the output.
-        # Returns
-            `str` if `stream=False` (the default), `Iterable[Tuple[str, bytes]]`
-            if `stream=True`.
+            stream: Return an owned stream of `("stdout", bytes)` and
+                `("stderr", bytes)` records instead of collecting text.
+            timeout: Positive finite seconds from local logs CLI launch, or `None`
+                for no deadline. Timing continues while consumption pauses.
+                Expiry raises `DockerTimeout` without stopping services or changing
+                post-exit pipe draining.
+
+        Returns:
+            Collected log text when `stream=False`, or an owned stream of
+            `(source, bytes)` records when `stream=True`.
+
+        Raises:
+            ValueError: `timeout` is not positive and finite.
+            DockerTimeout: The local logs CLI exceeds its deadline and is killed
+                and reaped.
+            DockerException: The local logs CLI exits unsuccessfully.
         """
         full_cmd = Command([*self.docker_compose_cmd, "logs", "--no-color"])
         full_cmd.add_simple_arg("--tail", tail)
@@ -585,7 +627,7 @@ class ComposeCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--until", until)
         full_cmd += to_list(services)
 
-        iterator = stream_stdout_and_stderr(full_cmd)
+        iterator = stream_stdout_and_stderr(full_cmd, timeout=timeout)
         if stream:
             return iterator
         else:
@@ -593,9 +635,9 @@ class ComposeCLI(DockerCLICaller):
                 return "".join(x[1].decode() for x in iterator)
 
     def pause(self, services: str | list[str] | None = None) -> None:
-        """Pause one or more services
+        """Pause one or more services.
 
-        Parameters:
+        Args:
             services: `None` (the default) means pause all containers of all
                 compose services. A string means that the call will pause the container
                 of a specific service. A list of string means the call will pause
@@ -616,16 +658,19 @@ class ComposeCLI(DockerCLICaller):
         index: int = 1,
         protocol: str = "tcp",
     ) -> tuple[str | None, int | None]:
-        """Returns the public port for a port binding.
+        """Return the published host and port for a service port binding.
 
-        Parameters:
+        Args:
             service: The name of the service.
             private_port: The private port.
             index: Index of the container if service has multiple replicas (default 1)
             protocol: tcp or udp (default "tcp").
 
-        # Returns
-            tuple with (host, port). If port is unknown, then host and port are None.
+        Returns:
+            The `(host, port)` pair, or `(None, None)` when the CLI reports `:0`.
+
+        Raises:
+            ValueError: `service` or `private_port` is an empty string.
         """
         full_cmd = Command([*self.docker_compose_cmd, "port"])
         if service == "":
@@ -651,10 +696,16 @@ class ComposeCLI(DockerCLICaller):
         services: list[str] | None = None,
         all: bool = False,
     ) -> list[pywhales.components.container.cli_wrapper.Container]:
-        """Returns the containers that were created by the current project.
+        """Return containers created by the current Compose project.
 
-        # Returns
-            A `List[pywhales.Container]`
+        Args:
+            services: Limit results to these services. `None` and `[]` both
+                select all services, rather than skipping execution.
+            all: Include stopped containers.
+
+        Returns:
+            Container handles in CLI output order, retaining the originating
+            client configuration.
 
         Raises:
             ValueError: Dry-run output cannot be interpreted as container IDs.
@@ -678,14 +729,15 @@ class ComposeCLI(DockerCLICaller):
     def ls(
         self, all: bool = False, filters: Mapping[str, str] = MappingProxyType({})
     ) -> list[ComposeProject]:
-        """Returns a list of docker compose projects
+        """Return Docker Compose projects reported by the CLI.
 
-        Parameters:
+        Args:
             all: Results include all stopped compose projects.
             filters: Filter results based on conditions provided.
 
-        # Returns
-            A `List[pywhales.ComposeProject]`
+        Returns:
+            Project summaries in CLI order, including parsed status counts and
+            configuration-file paths when available.
         """
         full_cmd = Command([*self.docker_compose_cmd, "ls", "--format", "json"])
         full_cmd.add_flag("--all", all)
@@ -722,7 +774,7 @@ class ComposeCLI(DockerCLICaller):
     ) -> None:
         """Publish compose application.
 
-        Parameters:
+        Args:
             repository: Repository to publish compose application
             oci_version: OCI image/artifact specification version (automatically determined by default)
             resolve_image_digests: Pin image tags to digests
@@ -777,9 +829,9 @@ class ComposeCLI(DockerCLICaller):
         quiet: bool = False,
         stream_logs: bool = False,
     ) -> Iterable[tuple[str, bytes]] | None:
-        """Pull service images
+        """Pull images for selected Compose services.
 
-        Parameters:
+        Args:
             services: The list of services to select. Only the images of those
                 services will be pulled. If no services are specified (`None`) (the default
                 behavior) all images of all services are pulled.
@@ -788,13 +840,15 @@ class ComposeCLI(DockerCLICaller):
             include_deps: Also pull services declared as dependencies
             quiet: By default, the progress bars are printed in stdout and stderr (both).
                 To disable all output, use `quiet=True`
-            stream_logs: If `False` this function returns None. If `True`, this
-                function returns an Iterable of `Tuple[str, bytes]` where the first element
-                is the type of log (`"stdin"` or `"stdout"`). The second element is the log itself,
-                as bytes, you'll need to call `.decode()` if you want the logs as `str`.
-                See [the streaming guide](https://github.com/MaraClaw/PyWhales/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output) if you are
-                not familiar with the streaming of logs in PyWhales.
+            stream_logs: Return an owned stdout/stderr byte stream instead of
+                waiting for command completion.
 
+        Returns:
+            An owned stream of `(source, bytes)` records when `stream_logs=True`
+            and services are selected; otherwise `None`, including for `[]`.
+
+        Raises:
+            ValueError: `quiet=True` is combined with `stream_logs=True`.
         """
         if quiet and stream_logs:
             raise ValueError(
@@ -816,9 +870,9 @@ class ComposeCLI(DockerCLICaller):
             run(full_cmd, capture_stdout=False, capture_stderr=False)
 
     def push(self, services: list[str] | None = None) -> None:
-        """Push service images
+        """Push service images.
 
-        Parameters:
+        Args:
             services: The list of services to select. Only the images of those
                 services will be pushed. If no services are specified (`None`, the default
                 behavior) all images of all services are pushed.
@@ -836,16 +890,15 @@ class ComposeCLI(DockerCLICaller):
         services: str | list[str] | None = None,
         timeout: int | timedelta | None = None,
     ) -> None:
-        """Restart containers
+        """Restart containers for selected services.
 
-        Parameters:
-            services: The names of one or more services to restart (str or list of str).
+        Args:
+            services: Names of one or more services to restart.
                 If the argument is not specified, `services` is `None` and all services are restarted.
                 If `services` is an empty list, then the function call is a no-op.
-            timeout: The shutdown timeout (`int` are interpreted as seconds).
-                `None` means the CLI default value (10s).
-                See [the docker stop docs](https://docs.docker.com/engine/reference/commandline/stop/)
-                for more details about this argument.
+            timeout: Container shutdown grace period in seconds, or a duration
+                truncated to whole seconds. `None` leaves the CLI default unchanged;
+                this is not a local subprocess deadline.
         """
         full_cmd = Command([*self.docker_compose_cmd, "restart"])
 
@@ -865,16 +918,15 @@ class ComposeCLI(DockerCLICaller):
         stop: bool = False,
         volumes: bool = False,
     ) -> None:
-        """
-        Removes stopped service containers
+        """Remove stopped service containers.
 
         By default, anonymous volumes attached to containers will not be removed. You
         can override this with `volumes=True`.
 
         Any data which is not in a volume will be lost.
 
-        Parameters:
-            services: The names of one or more services to remove (str or list of str).
+        Args:
+            services: Names of one or more services whose containers to remove.
                 If `None` (the default) then all services are removed.
                 If an empty list is provided, this function call is a no-op.
             stop: Stop the containers, if required, before removing
@@ -984,32 +1036,53 @@ class ComposeCLI(DockerCLICaller):
     ):
         """Run a one-off command on a service.
 
-        Parameters:
+        The CLI starts during the call. With `stream=True`, close the owned
+        stream on early exit or use its context manager. Closing or timing out
+        the local CLI does not guarantee that the container command stops.
+
+        Args:
             service: The name of the service.
-            command: The command to execute.
-            detach: if `True`, returns immediately with the Container.
-                    Incompatible with `compose_dry_run=True` because a preview
-                    does not create a container. If `False`, returns stdout as string.
+            command: Argument sequence overriding the service command; the empty
+                default keeps the service command.
+            build: Build the service image before running.
+            detach: Return a container handle after the detached CLI completes.
+                Requires `tty=False` and cannot be combined with streaming or
+                `compose_dry_run=True`.
             entrypoint: The entrypoint to execute.
-            envs: A dictionary of environment variables to set in the container.
+            envs: Environment variable names and values for the container command.
             labels: Add or override labels
             name: Assign a name to the container.
+            tty: Allocate a pseudo-TTY and forward output to the caller's terminal.
+                Defaults to `True`; set `False` for streaming or detached runs.
+            stream: Return an owned stream of `("stdout", bytes)` and
+                `("stderr", bytes)` records. Requires `tty=False` and `detach=False`.
             dependencies: Also start linked services.
             publish: Publish a container's port(s) to the host.
-            service_ports: Enable service's ports and map them to the host.
             remove: Automatically remove the container when it exits.
+            service_ports: Enable service's ports and map them to the host.
             use_aliases: Use the service's network aliases in the connected network(s).
-            tty: Allocate a pseudo-TTY. Allow the process to access your terminal
-                to write on it.
-            stream: Similar to `docker.run(..., stream=True)`.
             user: Username or UID, format: `"<name|uid>[:<group|gid>]"`
-            volumes:  Bind mount a volume. Some examples:
-                `[("/", "/host"), ("/etc/hosts", "/etc/hosts", "rw")]`.
+            volumes: Mount definitions containing a source, container destination,
+                and optional mode. Bind sources refer to the daemon host, which
+                may differ from the Python host; avoid exposing sensitive paths.
             workdir: Working directory inside the container
+            timeout: Positive finite seconds from local CLI launch, or `None`
+                for no deadline. Timing advances even when a returned stream is
+                not consumed. This is not a Compose shutdown or health-wait timeout.
 
         Returns:
-            Optional[str]
+            A container handle retaining the originating configuration when
+            detached, an owned byte-record stream when streaming, or captured
+            stdout otherwise. With the default `tty=True`, output is forwarded
+            to the terminal and the returned string is empty. Attached dry-run
+            calls with `tty=False` can return preview text.
 
+        Raises:
+            ValueError: Streaming conflicts with TTY or detach, detach conflicts
+                with TTY or dry-run mode, or `timeout` is not positive and finite.
+            DockerTimeout: The local CLI exceeds its deadline and is killed and
+                reaped, without guaranteeing container termination.
+            DockerException: The local Compose CLI exits unsuccessfully.
         """
 
         validate_timeout(timeout)
@@ -1093,16 +1166,16 @@ class ComposeCLI(DockerCLICaller):
     ) -> Iterable[tuple[str, bytes]] | None:
         """Start the specified services.
 
-        Parameters:
+        Args:
             services: The names of one or more services to start.
                 If `None` (the default), it means all services will start.
                 If an empty list is provided, this function call is a no-op.
-            stream_logs: If `False` this function returns None. If `True`, this
-                function returns an Iterable of `Tuple[str, bytes]` where the first element
-                is the type of log (`"stdin"` or `"stdout"`). The second element is the log itself,
-                as bytes, you'll need to call `.decode()` if you want the logs as `str`.
-                See [the streaming guide](https://github.com/MaraClaw/PyWhales/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output) if you are
-                not familiar with the streaming of logs in PyWhales.
+            stream_logs: Return an owned stdout/stderr byte stream instead of
+                waiting for command completion.
+
+        Returns:
+            An owned stream of `(source, bytes)` records when `stream_logs=True`
+            and services are selected; otherwise `None`, including for `[]`.
         """
         full_cmd = Command([*self.docker_compose_cmd, "start"])
         if services == []:
@@ -1145,20 +1218,21 @@ class ComposeCLI(DockerCLICaller):
         timeout: int | timedelta | None = None,
         stream_logs: bool = False,
     ) -> Iterable[tuple[str, bytes]] | None:
-        """Stop services
+        """Stop services.
 
-        Parameters:
-            services: The names of one or more services to stop (str or list of str).
+        Args:
+            services: Names of one or more services to stop.
                 If `None` (the default), it means all services will stop.
                 If an empty list is provided, this function call is a no-op.
-            timeout: Number of seconds or timedelta (will be converted to seconds).
-                Specify a shutdown timeout. Default is 10s.
-            stream_logs: If `False` this function returns None. If `True`, this
-                function returns an Iterable of `Tuple[str, bytes]` where the first element
-                is the type of log (`"stdin"` or `"stdout"`). The second element is the log itself,
-                as bytes, you'll need to call `.decode()` if you want the logs as `str`.
-                See [the streaming guide](https://github.com/MaraClaw/PyWhales/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output) if you are
-                not familiar with the streaming of logs in PyWhales.
+            timeout: Container shutdown grace period, in seconds or as a timedelta
+                truncated to whole seconds. `None` leaves the CLI default unchanged;
+                this is not a local subprocess deadline.
+            stream_logs: Return an owned stdout/stderr byte stream instead of
+                waiting for command completion.
+
+        Returns:
+            An owned stream of `(source, bytes)` records when `stream_logs=True`
+            and services are selected; otherwise `None`, including for `[]`.
         """
         if isinstance(timeout, timedelta):
             timeout = int(timeout.total_seconds())
@@ -1194,15 +1268,17 @@ class ComposeCLI(DockerCLICaller):
     ) -> ComposeTopResult | str:
         """List processes using this client's Compose project configuration.
 
-        Parameters:
+        Args:
             services: Service name(s), or None for all services. An explicit []
                 returns an empty result without resolving or invoking the CLI.
             raw: Return CLI text without parsing, including unsupported layouts.
 
         Returns:
-            ComposeTopResult retaining raw_output and ordered sections. Grouped
-            sections retain their container name; flat SERVICE/# tables retain
-            attribution in their original headings and cells, with container=None.
+            Unmodified CLI text when `raw=True`, or a result retaining raw output
+            and ordered sections otherwise. Grouped sections retain their
+            container name; flat SERVICE/# tables retain attribution in their
+            headings and cells, with `container=None`. For `services=[]`, return
+            an empty string in raw mode or an empty parsed result otherwise.
 
         Raises:
             TopParseError: A malformed or ambiguous table; use raw=True.
@@ -1217,42 +1293,37 @@ class ComposeCLI(DockerCLICaller):
     def events(
         self,
         services: Sequence[str] = (),
+        *,
+        timeout: float | None = None,
     ) -> MappedProcessStream[ComposeEvent]:
         """Return Docker Compose events for the specified services.
 
-        This function streams events related to the specified services in real-time.
-        If no services are specified, it streams events for all services in the current Compose project.
+        The local events CLI starts before this call returns. Iteration can block
+        waiting for the next event and continues until the CLI ends or is closed.
         Use the returned stream as a context manager or call `close()` when
-        stopping early. A bare loop break does not release the local CLI.
+        stopping early. A bare loop break does not release the local CLI; closing
+        it does not stop services.
 
-        Example usage:
-        ```python
-        from pywhales import docker
-
-        # Stream events for a specific service
-        with docker.compose.events(["my_service"]) as events:
-            for event in events:
-                print(event)
-
-        # Stream events for all services in the Compose project
-        for event in docker.compose.events():
-            print(event)
-        ```
-
-        Parameters:
-            services: A list of service names to filter events. If empty, events for all services are streamed.
+        Args:
+            services: Service names to filter events. Empty input selects all services.
+            timeout: Positive finite seconds from local events CLI launch, or
+                `None` for no deadline. Timing advances while consumption pauses.
+                Expiry raises `DockerTimeout` without stopping services or changing
+                post-exit pipe draining.
 
         Returns:
-            A closeable iterator yielding `ComposeEvent` objects from stdout.
+            An owned iterator parsing stdout JSON records as Compose events.
+            Stderr records are consumed but do not produce events.
 
-        Note:
-            This function streams events indefinitely unless interrupted. Use it carefully in long-running processes.
-
-        [reference page for docker events](https://docs.docker.com/reference/cli/docker/compose/events)
+        Raises:
+            ValueError: `timeout` is not positive and finite.
+            DockerTimeout: The local events CLI exceeds its deadline and is
+                killed and reaped.
+            DockerException: The local events CLI exits unsuccessfully.
         """
         full_cmd = [*self.docker_compose_cmd, "events", "--json", *services]
 
-        stream = stream_stdout_and_stderr(full_cmd)
+        stream = stream_stdout_and_stderr(full_cmd, timeout=timeout)
         return MappedProcessStream(
             stream,
             (
@@ -1263,9 +1334,9 @@ class ComposeCLI(DockerCLICaller):
         )
 
     def unpause(self, services: str | list[str] | None = None) -> None:
-        """Unpause one or more services
+        """Unpause one or more services.
 
-        Parameters:
+        Args:
             services: One or more service to unpause.
                 If `None` (the default), all services are unpaused.
                 If services is an empty list, the function call does nothing,
@@ -1402,9 +1473,11 @@ class ComposeCLI(DockerCLICaller):
     ) -> Iterable[tuple[str, bytes]] | None:
         """Start the containers.
 
-        Reading the logs of the containers is not yet implemented.
+        Streaming starts the local CLI before returning and exposes its output,
+        including attached container logs. Close the owned stream on early exit
+        or use its context manager; closing is not a service cleanup operation.
 
-        Parameters:
+        Args:
             services: The services to start. If `None` (default), all services are
                 started. If an empty list is provided, the function call does nothing, it's
                 a no-op.
@@ -1412,8 +1485,8 @@ class ComposeCLI(DockerCLICaller):
                 even if a docker image with this name already exists.
                 If `False` (the default), build only the docker images that do not already
                 exist.
-            detach: If `True`, run the containers in the background. If `False` this
-                function returns only when all containers have stopped.
+            detach: Run containers in the background. Blocking calls still wait
+                for the local CLI, not necessarily for container termination.
                 Incompatible with `abort_on_container_exit=True`.
             abort_on_container_exit: If `True` stops all containers if any container was
                 stopped. Incompatible with `detach=True`.
@@ -1436,14 +1509,13 @@ class ComposeCLI(DockerCLICaller):
                 Set `quiet=True` to avoid having any output.
             wait: Wait for services to be running|healthy. Implies detached mode.
             no_attach_services: The services not to attach to.
-            pull: Pull image before running (“always”|”missing”|”never”).
-            stream_logs: If `False` this function returns None. If `True`, this
-                function returns an Iterable of `Tuple[str, bytes]` where the first element
-                is the type of log (`"stdin"` or `"stdout"`). The second element is the log itself,
-                as bytes, you'll need to call `.decode()` if you want the logs as `str`.
-                See [the streaming guide](https://github.com/MaraClaw/PyWhales/blob/HEAD/docs/template/user_guide/docker_run.md#stream-the-output) if you are
-                not familiar with the streaming of logs in PyWhales.
-            wait_timeout: Maximum duration to wait for the project to be running|healthy
+            pull: Image acquisition policy, such as `"always"`, `"missing"`, or
+                `"never"`; `None` leaves the Compose default unchanged.
+            stream_logs: Return an owned stdout/stderr byte stream instead of
+                waiting for command completion.
+            wait_timeout: Maximum seconds for Compose to wait for services to be
+                running or healthy; `None` omits the flag. This is not a local
+                subprocess deadline.
             dependencies: Also start linked services.
             use_default_sensitive_values: If `True` assume "yes" as answer to all prompts and run non-interactively.
             watch: Watch source changes and rebuild or refresh services. Requires
@@ -1452,6 +1524,13 @@ class ComposeCLI(DockerCLICaller):
                 failure. Incompatible with detached mode.
             exit_code_from: Return the selected service's exit code through the CLI;
                 implies abort-on-container-exit. A nonzero exit raises `DockerException`.
+
+        Returns:
+            An owned stream of `(source, bytes)` records when `stream_logs=True`
+            and services are selected; otherwise `None`, including for `[]`.
+
+        Raises:
+            ValueError: `quiet=True` is combined with `stream_logs=True`.
         """
         if quiet and stream_logs:
             raise ValueError(
@@ -1509,7 +1588,10 @@ class ComposeCLI(DockerCLICaller):
     ) -> ProcessStream | None:
         """Watch source changes and rebuild or refresh Compose services.
 
-        Parameters:
+        A nonempty selection starts the local CLI before returning. Requires a
+        supporting Compose plugin; no version probe is performed.
+
+        Args:
             services: Select services, or `None` for all services. An empty list
                 is a no-op and returns `None` without invoking the CLI.
             no_up: Do not build and start services before watching.
@@ -1518,11 +1600,14 @@ class ComposeCLI(DockerCLICaller):
                 overriding the CLI's pruning default to avoid shared-image cleanup.
 
         Returns:
-            An owned, closeable stream of `(source, bytes)` output. Use it as a
+            `None` for `services=[]`; otherwise an owned stream of
+            `("stdout", bytes)` and `("stderr", bytes)` records. Use it as a
             context manager or call `close()` when stopping early; a bare loop
             break does not release the local CLI. Closing reaps the CLI without
-            removing running services. Natural command failures raise `DockerException`.
-            Requires a supporting Compose plugin; no version probe is performed.
+            removing running services.
+
+        Raises:
+            DockerException: The local watch CLI exits unsuccessfully.
         """
         if services == []:
             return None
@@ -1535,12 +1620,19 @@ class ComposeCLI(DockerCLICaller):
         return stream_stdout_and_stderr(full_cmd)
 
     def version(self) -> str:
-        """Returns the version of docker compose as a `str`."""
+        """Return the Docker Compose version text reported by the CLI."""
         return run([*self.docker_compose_cmd, "version"])
 
     def is_installed(self) -> bool:
-        """Returns `True` if docker compose (the one written in Go)
-        is installed and working."""
+        """Check whether successful Compose help output identifies the plugin.
+
+        Returns:
+            Whether the help output contains `compose`.
+
+        Raises:
+            DockerException: The CLI help command fails, including when the
+                plugin is unavailable. This failure does not return `False`.
+        """
         full_cmd = Command([*self.docker_cmd, "compose", "--help"])
         help_output = run(full_cmd)
         return "compose" in help_output

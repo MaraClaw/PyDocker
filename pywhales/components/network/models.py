@@ -1,3 +1,5 @@
+"""Typed network inspection snapshots, address pools, and attached containers."""
+
 from datetime import datetime
 
 from pydantic import JsonValue

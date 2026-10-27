@@ -302,7 +302,8 @@ def test_clone(ctr_client: DockerClient) -> None:
 def test_functions_no_such_volume(ctr_client: DockerClient, method: str) -> None:
     with pytest.raises(NoSuchVolume) as e:
         getattr(ctr_client.volume, method)("dodo")
-    assert "no such volume" in str(e.value).lower()
+    assert e.value.stderr is not None
+    assert "no such volume" in e.value.stderr.lower()
 
 
 def test_volume_does_not_exists(ctr_client: DockerClient) -> None:

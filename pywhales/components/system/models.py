@@ -1,3 +1,5 @@
+"""Typed Docker system information, disk summaries, and event records."""
+
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated

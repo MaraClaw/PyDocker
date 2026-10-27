@@ -1,3 +1,5 @@
+"""Supported daemon-plugin inspection fields, not a complete plugin schema."""
+
 from pywhales.utils import DockerCamelModel
 
 

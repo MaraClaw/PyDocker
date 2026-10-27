@@ -1,3 +1,9 @@
+"""Static Compose build, up, and watch return and positional-call contracts.
+
+The ty check analyzes assert_type calls in _check_* functions. These functions
+are not collected or executed by pytest and are not runtime Docker examples.
+"""
+
 from collections.abc import Iterable
 from typing import assert_type
 

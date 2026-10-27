@@ -1,3 +1,10 @@
+"""System model and event-stream regressions with destructive live prune cases.
+
+Live cases require a disposable daemon because system pruning affects shared
+daemon state. Event lifecycle cases use real Python children behind a patched
+Docker transport rather than a daemon.
+"""
+
 import json
 import sys
 import time
@@ -168,11 +175,7 @@ def test_prune_prunes_volumes(ctr_client: DockerClient) -> None:
 def test_prune_raises_exception_on_invalid_arguments(
     docker_client: DockerClient,
 ) -> None:
-    """
-    The "until" filter is not supported with "--volumes"
-
-    docker.system.prune should reflect that
-    """
+    """Propagate Docker's rejection of an until filter combined with volumes."""
     with pytest.raises(DockerException):
         docker_client.system.prune(volumes=True, filters={"until": "1000000h"})
 

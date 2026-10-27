@@ -18,12 +18,12 @@ Build progress overrides and Compose globals follow [the package guide](../../AG
   `kill`, `pause`, `pull`, `push`, `restart`, `rm`, `start`, `stop`, `unpause`, `up`, and `watch`.
 - `top([])` returns an empty `ComposeTopResult`, or `""` with `raw=True`, without CLI lookup.
 - Don't generalize empty-selection behavior: `ps([])`, `logs([])`, and `events([])` select all.
-  `events()` returns `MappedProcessStream[ComposeEvent]`, parsing stdout JSON only.
 
 ## Execution And Returns
 
 - `build`, `down`, `pull`, and `up` reject `quiet=True` with `stream_logs=True`.
 - `build(print=True)` still returns `None` when blocking, or an output stream with `stream_logs=True`.
+- Streamed `create()` prints its command only with `raw_diagnostics=True`; returned log records are unchanged.
 - `run()` returns `str` when attached, `Container` when detached, or an iterable of
   `(source, bytes)` with `stream=True`; detached resources retain the originating config.
 - `run()` defaults to `tty=True`. Reject TTY plus streaming, detach plus streaming,
@@ -32,6 +32,15 @@ Build progress overrides and Compose globals follow [the package guide](../../AG
   execution. This local CLI budget isn't a Compose shutdown timeout or `up(wait_timeout=...)`.
 - `ps()` returns container resources. Reject `ps()` and detached `run()` in dry-run mode
   before execution; attached `run(tty=False)` can return preview text instead.
+
+## Logs And Events
+
+- `logs()` and `events()` accept keyword-only `timeout` for a launch-based local CLI deadline.
+  Expiry raises `DockerTimeout`; it doesn't stop services or change post-exit pipe draining.
+- Logs retain collected text or an owned `(source, bytes)` stream. Events retain
+  `MappedProcessStream[ComposeEvent]`, parsing stdout JSON only and owning the underlying transport.
+- General `stream_buffer_bytes` is selected at the shared stream boundary, including for collected logs.
+  Don't stringify away the originating policy carrier or add wrapper-specific budget defaults.
 
 ## Top And Watch
 
@@ -50,6 +59,6 @@ Paths below are relative to `tests/pywhales/`; collection/runtime cautions are i
 - `test_compose_modernization.py`: argv, per-build progress, empty selection, dry-run resources, watch ownership.
 - `test_compose_build_enum_json.py`: nested JSON, enum/string outputs, independent defaults, raw config.
 - `components/test_compose.py`: top layouts/raw/no-op/error cases, logs/events ownership, legacy integration.
-- `components/test_command_deadlines.py` and `components/test_deadline_forwarding.py`: run budget validation/execution/forwarding.
+- `components/test_command_deadlines.py` and `components/test_deadline_forwarding.py`: run/log/event deadline execution and forwarding.
 - Static contracts: `test_compose_type_contracts.py`, `test_type_contracts.py`,
   `test_command_deadline_types.py`, and `test_enum_json_type_contracts.py`.

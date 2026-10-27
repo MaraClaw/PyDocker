@@ -1,3 +1,10 @@
+"""Buildx regressions with global-client integration and mocked transport cases.
+
+Live cases require Docker, a disposable daemon, and Buildx. Fixtures can switch
+the selected builder, prune shared build cache, and create or remove images.
+Global-client calls are not redirected by the docker_client fixture option.
+"""
+
 import json
 import os
 import sys
@@ -38,6 +45,14 @@ COPY --from=test_context /dada /dada
 
 @pytest.fixture
 def with_docker_driver() -> Generator[None]:
+    """Select the default builder and restore the previous builder at teardown.
+
+    Requires Docker and Buildx; the selected-builder state is shared with other
+    CLI operations using this configuration.
+
+    Yields:
+        Control while the default builder is selected.
+    """
     current_builder = docker.buildx.inspect()
     docker.buildx.use("default")
     yield
@@ -46,6 +61,14 @@ def with_docker_driver() -> Generator[None]:
 
 @pytest.fixture
 def with_container_driver() -> Generator[None]:
+    """Select a temporary builder and remove it before restoring the selection.
+
+    Requires Docker and Buildx. Restoration follows normal fixture resumption;
+    builder context exit owns removal.
+
+    Yields:
+        Control while the newly created builder is selected.
+    """
     current_builder = docker.buildx.inspect()
     with docker.buildx.create(use=True):
         yield
@@ -54,11 +77,17 @@ def with_container_driver() -> Generator[None]:
 
 @pytest.fixture
 def prune_all() -> None:
+    """Prune all build cache on the selected builder of the disposable daemon."""
     docker.buildx.prune(all=True)
 
 
 @pytest.fixture
 def with_oci_layout_compliant_dir(tmp_path: Path) -> None:
+    """Build and extract an OCI layout under the pytest temporary directory.
+
+    Requires Docker and Buildx. Use a temporary selected builder for the build,
+    remove it on context exit, and restore the prior selection before extraction.
+    """
     (tmp_path / "Dockerfile").write_text(dockerfile_content1)
 
     # Build the oci layout compliant directory
@@ -492,8 +521,8 @@ def test_buildx_error(tmp_path: Path) -> None:
     with pytest.raises(DockerException) as e:
         docker.buildx.build(tmp_path)
 
-    assert "docker buildx build" in str(e.value)
-    assert str(tmp_path) in str(e.value)
+    assert e.value.docker_command[1:3] == ["buildx", "build"]
+    assert str(tmp_path) in e.value.docker_command
 
 
 @pytest.mark.usefixtures("with_docker_driver")
@@ -539,6 +568,11 @@ bake_file = bake_test_dir / "docker-bake.hcl"
 
 @pytest.fixture
 def change_cwd() -> Generator[None]:
+    """Enter the bake fixture directory and restore cwd during normal teardown.
+
+    Yields:
+        Control with the process-wide current directory set to the bake fixtures.
+    """
     old_cwd = os.getcwd()
     os.chdir(bake_test_dir)
     yield

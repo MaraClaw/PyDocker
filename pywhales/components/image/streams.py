@@ -1,3 +1,5 @@
+"""Lazy, owned coordination of concurrent image transfer output."""
+
 from collections.abc import Callable, Generator, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from threading import Event, Lock
@@ -9,11 +11,18 @@ from pywhales.utils import MappedProcessStream
 
 
 class MultiImageStream(Iterator[tuple[str, bytes]]):
-    """Own a lazy four-worker image transfer group and its active child streams.
+    """Lazy image transfer group owning at most four active child streams.
 
-    Explicit close cancels local CLI processes, not daemon-managed images. A bare
-    loop break leaves ownership with the caller. Worker errors stop sibling work
-    immediately and are raised once on consumption, including after close.
+    Workers start on the first `next()` call, not construction or context entry.
+    Records contain an image reference and output bytes; interleaving across
+    images and stdout/stderr is not globally ordered. Exhaustion waits for worker
+    cleanup. Use a context manager or explicit `close()` when stopping early;
+    a bare loop break leaves ownership with the caller.
+
+    Closing cancels local CLI processes, not daemon-managed images. Worker errors
+    stop active and queued sibling work without waiting for consumption. The
+    first recorded error is raised once by iteration, including after explicit
+    close; context exit itself only closes the group.
     """
 
     def __init__(
@@ -23,6 +32,16 @@ class MultiImageStream(Iterator[tuple[str, bytes]]):
         *,
         buffer_bytes: int | None = None,
     ) -> None:
+        """Store transfer inputs without starting workers or child processes.
+
+        Args:
+            names: References to schedule in the supplied order; deduplication is
+                the caller's responsibility.
+            factory: Start and return an owned child stream for one reference.
+            buffer_bytes: Queued-payload budget in bytes, or `None` for unbounded
+                buffering. A record exceeding the budget raises `BufferError`
+                during consumption. Child budgets are supplied by the factory.
+        """
         self._names = tuple(names)
         self._factory = factory
         self._lock = Lock()
@@ -136,7 +155,12 @@ class MultiImageStream(Iterator[tuple[str, bytes]]):
         raise StopIteration
 
     def close(self) -> None:
-        """Stop admission, close children, then wait for all worker cleanup."""
+        """Stop admission, close children, and wait for worker cleanup.
+
+        Repeated calls are safe, including before the first iteration. Queued
+        records are discarded and pending worker errors remain available for one
+        delivery through iteration. This method does not cancel daemon-side work.
+        """
         with self._lock:
             self._stopped = True
             self._queue.close()

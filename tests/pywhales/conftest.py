@@ -1,3 +1,5 @@
+"""Mocked Docker resources for documentation provider lifecycle regressions."""
+
 from collections.abc import Callable, Sequence
 from unittest.mock import MagicMock
 
@@ -12,6 +14,18 @@ from pywhales.exceptions import DockerException, NoSuchImage
 
 @pytest.fixture
 def daemon(mocker: MockerFixture) -> MagicMock:
+    """Replace documentation Docker access with stateful resource mocks.
+
+    Context-managed resources record removal, inventory helpers use mock state,
+    and subprocess.run rejects accidental external commands. No real daemon is
+    started or contacted; pytest restores patches after each test.
+
+    Args:
+        mocker: Installs scoped replacements for providers and subprocess access.
+
+    Returns:
+        A mutable client mock exposing named example resources and acquisitions.
+    """
     client = MagicMock()
     mocker.patch.object(docs_utils, "docker", client)
     for kind in (

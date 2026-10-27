@@ -1,3 +1,10 @@
+"""Image model, command, and streaming regressions with mixed runtime boundaries.
+
+The image_commands fixture substitutes real controllable Python children for
+Docker streams. Other integration cases use a real Docker daemon, pull or remove
+images, and require disposable daemon state.
+"""
+
 import contextlib
 import json
 import sys
@@ -13,7 +20,7 @@ from unittest.mock import ANY, MagicMock, Mock, patch
 import pytest
 
 from pywhales import DockerClient, Image, docker
-from pywhales.client_config import Command
+from pywhales.client_config import Command, ParsingError
 from pywhales.components.image.models import ImageInspectResult
 from pywhales.components.image.streams import MultiImageStream
 from pywhales.exceptions import (
@@ -28,6 +35,7 @@ from pywhales.utils import MappedProcessStream, ProcessStream, stream_stdout_and
 
 
 def _assert_image_process_released(stream: ProcessStream) -> None:
+    """Check that the child exited, reader threads stopped, and pipes closed."""
     assert stream._process.poll() is not None
     assert all(not thread.is_alive() for thread in stream._threads)
     assert all(
@@ -38,7 +46,14 @@ def _assert_image_process_released(stream: ProcessStream) -> None:
 
 
 class _ImageCommands:
+    """Controllable Python-child transport for image-stream ownership tests.
+
+    The supplied ExitStack owns children and patches. Mutable maps and events
+    track launches and completed closes; children wait for an exit status on stdin.
+    """
+
     def __init__(self, stack: contextlib.ExitStack) -> None:
+        """Attach transport state to the caller-owned cleanup stack."""
         self.stack = stack
         self.client = DockerClient()
         self.client.client_config._client_call_with_path = ["docker-test"]
@@ -52,6 +67,15 @@ class _ImageCommands:
     def start(
         self, command: Command, *, buffer_bytes: int | None = None
     ) -> ProcessStream:
+        """Start a stack-owned Python child for a patched image command.
+
+        Args:
+            command: Wrapper argv whose final argument names the child.
+            buffer_bytes: Output-buffer budget forwarded to the real stream.
+
+        Returns:
+            A running stream with piped stdin, also owned by the cleanup stack.
+        """
         name = str(command[-1])
         code = "import os, sys; "
         if self.output:
@@ -82,6 +106,16 @@ class _ImageCommands:
     def stream(
         self, operation: Literal["pull", "push"], names: list[str]
     ) -> MultiImageStream:
+        """Return an owned multi-image stream through the patched transport.
+
+        Args:
+            operation: Image operation to dispatch.
+            names: At least two distinct image references, passed in input order.
+
+        Returns:
+            A stream the caller must close or use as a context manager; the
+            fixture's cleanup stack separately owns any launched child streams.
+        """
         method = (
             self.client.image.pull if operation == "pull" else self.client.image.push
         )
@@ -90,18 +124,27 @@ class _ImageCommands:
         return result
 
     def finish(self, name: str, status: int = 0) -> None:
+        """Send an exit status to the named child's input without waiting for exit."""
         stdin = self.children[name].stdin
         assert stdin is not None
         stdin.write(f"{status}\n".encode())
         stdin.flush()
 
     def release_children(self) -> None:
+        """Close every currently recorded child stream."""
         for child in tuple(self.children.values()):
             child.close()
 
 
 @pytest.fixture
 def image_commands() -> Generator[_ImageCommands]:
+    """Yield a patched image transport and close its real children on teardown.
+
+    Inspection is mocked and stream launches use local Python, not Docker.
+
+    Yields:
+        Mutable transport controls whose children and patches belong to the fixture.
+    """
     with contextlib.ExitStack() as stack:
         commands = _ImageCommands(stack)
         stack.enter_context(
@@ -114,6 +157,339 @@ def image_commands() -> Generator[_ImageCommands]:
             )
         )
         yield commands
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+@pytest.mark.parametrize("multiple", [False, True])
+@pytest.mark.parametrize("override", [None, 16])
+def test_image_stream_new_operations_use_live_fallback_without_normalizing_override(
+    operation: Literal["pull", "push"],
+    multiple: bool,
+    override: int | None,
+    image_commands: _ImageCommands,
+) -> None:
+    config = image_commands.client.client_config
+    config.stream_buffer_bytes = 32
+    config.image_stream_buffer_bytes = override
+    method = (
+        image_commands.client.pull
+        if operation == "pull"
+        else image_commands.client.push
+    )
+    old_names = ["old-one", "old-two"] if multiple else ["old-one"]
+    new_names = ["new-one", "new-two"] if multiple else ["new-one"]
+    with contextlib.ExitStack() as stack:
+        old = method(old_names, stream_logs=True)
+        assert isinstance(old, (MappedProcessStream, MultiImageStream))
+        stack.callback(old.close)
+        config.stream_buffer_bytes = 64
+
+        new = method(new_names, stream_logs=True)
+        assert isinstance(new, (MappedProcessStream, MultiImageStream))
+        stack.callback(new.close)
+        next(old)
+        next(new)
+        for _ in [*old_names, *new_names]:
+            image_commands.started.get(timeout=3)
+
+        assert config.image_stream_buffer_bytes == override
+        for names, expected in (
+            (old_names, override or 32),
+            (new_names, override or 64),
+        ):
+            assert all(
+                image_commands.children[name]._buffer_bytes == expected
+                for name in names
+            )
+        if isinstance(old, MultiImageStream) and isinstance(new, MultiImageStream):
+            assert old._queue._limit == (override or 32)
+            assert new._queue._limit == (override or 64)
+    for child in image_commands.children.values():
+        _assert_image_process_released(child)
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+@pytest.mark.parametrize(("budget", "override"), [(None, None), (16, None), (1, 32)])
+def test_image_stream_lazy_queued_children_keep_public_operation_snapshot(
+    operation: Literal["pull", "push"],
+    budget: int | None,
+    override: int | None,
+    image_commands: _ImageCommands,
+) -> None:
+    config = image_commands.client.client_config
+    config.stream_buffer_bytes = budget
+    config.image_stream_buffer_bytes = override
+    expected_budget = override if override is not None else budget
+    image_commands.stdout = b"ok\n"
+    image_commands.stderr = b""
+    names = [f"image:{number}" for number in range(6)]
+    stream = image_commands.stream(operation, names)
+    try:
+        assert image_commands.children == {}
+        config.stream_buffer_bytes = 1
+        config.image_stream_buffer_bytes = 1
+
+        next(stream)
+        for _ in range(4):
+            image_commands.started.get(timeout=3)
+        config.stream_buffer_bytes = 2
+        config.image_stream_buffer_bytes = 2
+        for name in names[:2]:
+            image_commands.finish(name)
+        for _ in range(2):
+            image_commands.started.get(timeout=3)
+        for name in names[2:]:
+            image_commands.finish(name)
+
+        assert len(list(stream)) == len(names) - 1
+        assert stream._queue._limit == expected_budget
+        assert all(
+            child._buffer_bytes == expected_budget
+            for child in image_commands.children.values()
+        )
+        for child in image_commands.children.values():
+            _assert_image_process_released(child)
+    finally:
+        stream.close()
+
+
+@pytest.mark.parametrize("multiple", [False, True])
+@pytest.mark.parametrize("budget", [None, 16])
+def test_push_stream_captures_budget_before_inspect_preflight(
+    multiple: bool, budget: int | None, image_commands: _ImageCommands
+) -> None:
+    config = image_commands.client.client_config
+    config.stream_buffer_bytes = budget
+
+    def inspect_and_change_policy(names: list[str]) -> list[Image]:
+        config.stream_buffer_bytes = 1
+        config.image_stream_buffer_bytes = 1
+        return []
+
+    names = ["one", "two"] if multiple else ["one"]
+    with patch.object(
+        image_commands.client.image, "inspect", side_effect=inspect_and_change_policy
+    ):
+        stream = image_commands.client.push(names, stream_logs=True)
+    assert isinstance(stream, (MappedProcessStream, MultiImageStream))
+    try:
+        next(stream)
+        for _ in names:
+            image_commands.started.get(timeout=3)
+        assert all(
+            child._buffer_bytes == budget for child in image_commands.children.values()
+        )
+        if isinstance(stream, MultiImageStream):
+            assert stream._queue._limit == budget
+    finally:
+        stream.close()
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+@pytest.mark.parametrize("cancel", [False, True], ids=["drain", "cancel"])
+def test_image_fallback_budget_backpressures_slow_consumer_and_closes_children(
+    operation: Literal["pull", "push"],
+    cancel: bool,
+    image_commands: _ImageCommands,
+) -> None:
+    image_commands.client.client_config.stream_buffer_bytes = 8
+    image_commands.stdout = b"abc\n" * 20
+    image_commands.stderr = b""
+    stream = image_commands.stream(operation, ["one", "two"])
+    saturated = Event()
+    wait = stream._queue.condition.wait
+
+    def wait_and_signal(timeout: float | None = None) -> bool:
+        saturated.set()
+        return wait(timeout)
+
+    try:
+        with patch.object(stream._queue.condition, "wait", side_effect=wait_and_signal):
+            stream._start()
+            assert saturated.wait(timeout=3)
+            for _ in range(2):
+                image_commands.started.get(timeout=3)
+            with stream._queue.condition:
+                assert stream._queue._bytes == 8
+        if cancel:
+            stream.close()
+            assert list(stream) == []
+        else:
+            for name in ("one", "two"):
+                image_commands.finish(name)
+            output = list(stream)
+            for name in ("one", "two"):
+                assert [line for tag, line in output if tag == name] == [b"abc\n"] * 20
+        for child in image_commands.children.values():
+            _assert_image_process_released(child)
+    finally:
+        stream.close()
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+@pytest.mark.parametrize("multiple", [False, True])
+@pytest.mark.parametrize("overflow", ["record", "stderr-history"])
+def test_image_fallback_budget_rejects_mapped_stream_overflow(
+    operation: Literal["pull", "push"],
+    multiple: bool,
+    overflow: Literal["record", "stderr-history"],
+    image_commands: _ImageCommands,
+) -> None:
+    image_commands.client.client_config.stream_buffer_bytes = 4
+    image_commands.stdout = b"oversized\n" if overflow == "record" else b""
+    image_commands.stderr = b"a\nb\nc\n" if overflow == "stderr-history" else b""
+    method = (
+        image_commands.client.pull
+        if operation == "pull"
+        else image_commands.client.push
+    )
+    stream = method(["one", "two"] if multiple else "one", stream_logs=True)
+    assert isinstance(stream, (MappedProcessStream, MultiImageStream))
+    with stream, pytest.raises(BufferError):
+        list(stream)
+    for child in image_commands.children.values():
+        _assert_image_process_released(child)
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+@pytest.mark.parametrize("budget", [None, 16])
+def test_image_snapshot_passes_exact_budget_to_real_shared_stream_boundary(
+    operation: Literal["pull", "push"], budget: int | None
+) -> None:
+    client = DockerClient()
+    config = client.client_config
+    config.stream_buffer_bytes = budget
+    config._client_call_with_path = [
+        sys.executable,
+        "-c",
+        "import os; os.write(1, b'progress\\n')",
+    ]
+    method = client.pull if operation == "pull" else client.push
+    names = [f"image:{number}" for number in range(6)]
+    with patch.object(client.image, "inspect", return_value=[]):
+        stream = method(names, stream_logs=True)
+    assert isinstance(stream, MultiImageStream)
+    config.stream_buffer_bytes = 1
+    config.image_stream_buffer_bytes = 1
+
+    with stream:
+        assert sorted(stream) == [(name, b"progress\n") for name in names]
+
+
+@pytest.mark.parametrize("budget", [4, 64])
+def test_path_image_load_uses_general_budget_instead_of_image_override(
+    budget: int,
+) -> None:
+    client = DockerClient()
+    client.client_config.stream_buffer_bytes = budget
+    client.client_config.image_stream_buffer_bytes = 1
+    client.client_config._client_call_with_path = [
+        sys.executable,
+        "-c",
+        "print('Loaded image: sample', flush=True)",
+    ]
+
+    if budget == 4:
+        with pytest.raises(BufferError):
+            client.image.load("unused-archive.tar", quiet=True)
+    else:
+        assert client.image.load("unused-archive.tar", quiet=True) == ["sample"]
+
+
+@pytest.mark.parametrize("operation", ["load", "save", "missing"])
+@pytest.mark.parametrize("raw_diagnostics", [False, True])
+def test_direct_archive_failures_snapshot_client_diagnostics_without_changing_payloads(
+    operation: Literal["load", "save", "missing"], raw_diagnostics: bool
+) -> None:
+    secret = "archive-secret-sentinel"
+    payload = b"archive-output-secret\n"
+    stderr = f"{'No such image' if operation == 'missing' else 'failure'}: {secret}\n".encode()
+    code = (
+        "import os, sys; "
+        "data = sys.stdin.buffer.read(); "
+        "sys.exit(7 if data == b'archive-input-secret' else 8)"
+        if operation == "load"
+        else f"import os; os.write(1, {payload!r}); os.write(2, {stderr!r}); os._exit(7)"
+    )
+    client = DockerClient()
+    client.client_config.raw_diagnostics = raw_diagnostics
+    prefix = [sys.executable, "-c", code, secret]
+    client.client_config._client_call_with_path = [*prefix]
+
+    def input_chunks() -> Generator[bytes]:
+        client.client_config.raw_diagnostics = not raw_diagnostics
+        yield b"archive-input-secret"
+
+    error_type = NoSuchImage if operation == "missing" else DockerException
+    with patch.object(client.image, "inspect", return_value=[]):
+        if operation == "load":
+            with pytest.raises(error_type) as raised:
+                client.image.load(input_chunks())
+            expected_command = [*prefix, "image", "load"]
+            assert raised.value.stderr is None
+        else:
+            archive = client.image.save(secret)
+            assert next(archive) == payload
+            client.client_config.raw_diagnostics = not raw_diagnostics
+            with pytest.raises(error_type) as raised:
+                list(archive)
+            expected_command = [*prefix, "image", "save", secret]
+            assert raised.value.stderr == stderr.decode()
+    assert type(raised.value) is error_type
+    assert raised.value.return_code == 7
+    assert raised.value.docker_command == expected_command
+    assert raised.value.stdout is None
+    assert (secret in str(raised.value)) is raw_diagnostics
+    assert (secret in repr(raised.value)) is raw_diagnostics
+
+
+def test_archive_diagnostics_are_isolated_between_concurrent_clients() -> None:
+    secret = "concurrent-archive-secret"
+    clients = [DockerClient(), DockerClient()]
+    for raw, client in zip((False, True), clients, strict=True):
+        client.client_config.raw_diagnostics = raw
+        client.client_config._client_call_with_path = [
+            sys.executable,
+            "-c",
+            f"import os; os.write(2, b'{secret}'); os._exit(7)",
+        ]
+
+    def save_failure(client: DockerClient) -> DockerException:
+        with pytest.raises(DockerException) as raised:
+            list(client.image.save(secret))
+        return raised.value
+
+    with (
+        patch.object(clients[0].image, "inspect", return_value=[]),
+        patch.object(clients[1].image, "inspect", return_value=[]),
+        ThreadPoolExecutor(max_workers=2) as executor,
+    ):
+        safe, raw = executor.map(save_failure, clients)
+
+    assert secret not in str(safe)
+    assert secret in str(raw)
+    assert safe.stderr == raw.stderr == secret
+    assert safe.return_code == raw.return_code == 7
+
+
+@pytest.mark.parametrize("raw_diagnostics", [False, True])
+def test_image_inspect_identity_error_keeps_reference_private_by_default(
+    raw_diagnostics: bool,
+) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    client.client_config.raw_diagnostics = raw_diagnostics
+    secret = "private-image-reference"
+    with (
+        patch(
+            "subprocess.run",
+            return_value=CompletedProcess([], 0, b'[{"Id": "sha256:other"}]', b""),
+        ),
+        pytest.raises(ParsingError) as raised,
+    ):
+        client.image.inspect([secret])
+
+    assert (secret in str(raised.value)) is raw_diagnostics
 
 
 @pytest.mark.parametrize("cancel", [False, True], ids=["drain", "saturated-close"])
@@ -1349,9 +1725,7 @@ def test_pull_not_quiet_multiple_images_break(ctr_client: DockerClient) -> None:
 
     with pytest.raises(DockerException) as err:
         ctr_client.pull(images_names)
-    assert f"{ctr_client.client_config.client_call[0]} image pull hellstuff" in str(
-        err.value
-    )
+    assert err.value.docker_command[-3:] == ["image", "pull", "hellstuff"]
 
 
 def test_pull_stream_logs_multiple_images_break(ctr_client: DockerClient) -> None:
@@ -1363,9 +1737,7 @@ def test_pull_stream_logs_multiple_images_break(ctr_client: DockerClient) -> Non
         logs = ctr_client.pull(images_names, stream_logs=True)
         for _ in logs:
             pass
-    assert f"{ctr_client.client_config.client_call[0]} image pull hellstuff" in str(
-        err.value
-    )
+    assert err.value.docker_command[-3:] == ["image", "pull", "hellstuff"]
 
 
 def test_push_validation_error(ctr_client: DockerClient) -> None:
@@ -1401,7 +1773,7 @@ def test_push_duplicate_images(ctr_client: DockerClient) -> None:
         inspect_images.assert_called_once_with(["busybox:1"])
         push_multiple_tags.assert_not_called()
         push_single_tag.assert_called_once_with(
-            tag_or_repo="busybox:1", quiet=True, stream_logs=False
+            tag_or_repo="busybox:1", quiet=True, stream_logs=False, buffer_bytes=None
         )
 
 
@@ -1467,7 +1839,8 @@ def test_no_such_image_inspect(ctr_client: DockerClient) -> None:
     with pytest.raises(NoSuchImage) as err:
         ctr_client.image.inspect(image_name_that_does_not_exists)
 
-    assert f"No such image: {image_name_that_does_not_exists}" in str(err.value)
+    assert err.value.stderr is not None
+    assert image_name_that_does_not_exists in err.value.stderr
 
 
 def test_no_such_image_remove(ctr_client: DockerClient) -> None:
@@ -1475,7 +1848,8 @@ def test_no_such_image_remove(ctr_client: DockerClient) -> None:
     with pytest.raises(NoSuchImage) as err:
         ctr_client.image.remove(image_name_that_does_not_exists)
 
-    assert f"No such image: {image_name_that_does_not_exists}" in str(err.value)
+    assert err.value.stderr is not None
+    assert image_name_that_does_not_exists in err.value.stderr
 
 
 def test_no_such_image_push(ctr_client: DockerClient) -> None:
@@ -1483,7 +1857,8 @@ def test_no_such_image_push(ctr_client: DockerClient) -> None:
     with pytest.raises(NoSuchImage) as err:
         ctr_client.push(image_name_that_does_not_exists)
 
-    assert f"No such image: {image_name_that_does_not_exists}" in str(err.value)
+    assert err.value.stderr is not None
+    assert image_name_that_does_not_exists in err.value.stderr
 
 
 def test_no_such_image_push_stream_logs(ctr_client: DockerClient) -> None:
@@ -1491,7 +1866,8 @@ def test_no_such_image_push_stream_logs(ctr_client: DockerClient) -> None:
     with pytest.raises(NoSuchImage) as err:
         ctr_client.push(image_name_that_does_not_exists, stream_logs=True)
 
-    assert f"No such image: {image_name_that_does_not_exists}" in str(err.value)
+    assert err.value.stderr is not None
+    assert image_name_that_does_not_exists in err.value.stderr
 
 
 def test_no_such_image_save(ctr_client: DockerClient) -> None:
@@ -1499,7 +1875,8 @@ def test_no_such_image_save(ctr_client: DockerClient) -> None:
     with pytest.raises(NoSuchImage) as err:
         ctr_client.image.save(image_name_that_does_not_exists, output="/tmp/dada")
 
-    assert f"No such image: {image_name_that_does_not_exists}" in str(err.value)
+    assert err.value.stderr is not None
+    assert image_name_that_does_not_exists in err.value.stderr
 
 
 def test_no_such_image_save_generator(ctr_client: DockerClient) -> None:
@@ -1508,7 +1885,8 @@ def test_no_such_image_save_generator(ctr_client: DockerClient) -> None:
         for _ in ctr_client.image.save(image_name_that_does_not_exists):
             pass
 
-    assert f"No such image: {image_name_that_does_not_exists}" in str(err.value)
+    assert err.value.stderr is not None
+    assert image_name_that_does_not_exists in err.value.stderr
 
 
 def test_no_such_image_tag(ctr_client: DockerClient) -> None:
@@ -1516,7 +1894,8 @@ def test_no_such_image_tag(ctr_client: DockerClient) -> None:
     with pytest.raises(NoSuchImage) as err:
         ctr_client.image.tag(image_name_that_does_not_exists, "something")
 
-    assert f"No such image: {image_name_that_does_not_exists}" in str(err.value)
+    assert err.value.stderr is not None
+    assert image_name_that_does_not_exists in err.value.stderr
 
 
 def test_exists(ctr_client: DockerClient) -> None:

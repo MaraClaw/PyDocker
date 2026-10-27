@@ -1,3 +1,5 @@
+"""Daemon-volume handles and filesystem transfers using temporary Docker resources."""
+
 from __future__ import annotations
 
 import builtins
@@ -50,6 +52,12 @@ type VolumeListFilter = (
 
 
 class Volume(ReloadableObjectFromJson[VolumeInspectResult]):
+    """Reloadable Docker volume identified by name.
+
+    Context-manager exit attempts removal, ignoring an already absent volume.
+    Other cleanup failures are grouped with any active body exception.
+    """
+
     def __init__(
         self, client_config: ClientConfig, reference: str, is_immutable_id: bool = False
     ) -> None:
@@ -118,7 +126,7 @@ class Volume(ReloadableObjectFromJson[VolumeInspectResult]):
         return f"pywhales.Volume(name='{self.name}', driver={self.driver})"
 
     def remove(self) -> None:
-        """Removes this volume"""
+        """Remove this volume through the configured Docker CLI."""
         VolumeCLI(self.client_config).remove(self)
 
     def clone(
@@ -128,7 +136,7 @@ class Volume(ReloadableObjectFromJson[VolumeInspectResult]):
         labels: Mapping[str, str] = MappingProxyType({}),
         options: Mapping[str, str] = MappingProxyType({}),
     ) -> Volume:
-        """Creates a new volume and copy all the data inside.
+        """Copy this volume's contents into a new or existing destination volume.
 
         See the [`docker.volume.clone`](../sub-commands/volume.md#clone) command for
         information about the arguments.
@@ -138,12 +146,7 @@ class Volume(ReloadableObjectFromJson[VolumeInspectResult]):
         )
 
     def exists(self) -> bool:
-        """Returns `True` if the docker volume exists and `False` if it doesn't exists.
-
-        If it doesn't exists, it most likely mean that it was removed.
-
-         See the `docker.volume.exists` command for information about the arguments.
-        """
+        """Return whether this volume can still be inspected."""
         return VolumeCLI(self.client_config).exists(self.name)
 
 
@@ -152,6 +155,8 @@ VolumePath = tuple[Volume | str, ValidPath]
 
 
 class VolumeCLI(DockerCLICaller):
+    """Volume commands whose copy helpers additionally require Buildx support."""
+
     def create(
         self,
         volume_name: str | None = None,
@@ -159,14 +164,16 @@ class VolumeCLI(DockerCLICaller):
         labels: Mapping[str, str] = MappingProxyType({}),
         options: Mapping[str, str] = MappingProxyType({}),
     ) -> Volume:
-        """Creates a volume
+        """Create and inspect a Docker volume.
 
-        Parameters:
-            volume_name: The volume name, if not provided, a long random
-                string will be used instead.
-            driver: Specify volume driver name (default "local")
-            labels: Set metadata for a volume
-            options: Set driver specific options
+        Args:
+            volume_name: Requested name, or None to let Docker generate one.
+            driver: Volume driver, or None to use Docker's default.
+            labels: Metadata labels; the default adds none.
+            options: Driver-specific options; the default adds none.
+
+        Returns:
+            An inspected handle to the volume Docker created or returned.
         """
         full_cmd = Command([*self.docker_cmd, "volume", "create"])
 
@@ -188,6 +195,20 @@ class VolumeCLI(DockerCLICaller):
     def inspect(self, x: Iterable[str]) -> builtins.list[Volume]: ...
 
     def inspect(self, x: str | Iterable[str]) -> Volume | builtins.list[Volume]:
+        """Inspect one or more Docker volumes by name.
+
+        Args:
+            x: One volume name or an iterable of names. An empty iterable returns
+                without invoking the CLI.
+
+        Returns:
+            One handle for a string, otherwise handles in request order with
+            duplicates retained as distinct handles.
+
+        Raises:
+            ParsingError: If a batch response has invalid shape, inconsistent
+                duplicate snapshots, or names that do not match the requests.
+        """
         if isinstance(x, str):
             return Volume(self.client_config, x)
         references = list(x)
@@ -201,6 +222,8 @@ class VolumeCLI(DockerCLICaller):
             if snapshot.name is None or snapshot.name != reference:
                 raise ParsingError(
                     f"Volume inspect identity does not match {reference!r}"
+                    if self.client_config.raw_diagnostics
+                    else "Volume inspect identity does not match the requested reference"
                 )
             volume = Volume(self.client_config, snapshot.name, is_immutable_id=True)
             volume._set_inspect_result(snapshot)
@@ -208,13 +231,14 @@ class VolumeCLI(DockerCLICaller):
         return volumes
 
     def exists(self, x: str) -> bool:
-        """Returns `True` if the volume exists. `False` otherwise.
+        """Return whether a volume can be inspected.
 
-         It's just calling `docker.volume.inspect(...)` and verifies that it doesn't throw
-         a `pywhales.exceptions.NoSuchVolume`.
+        Args:
+            x: Volume name to inspect.
 
-        # Returns
-            A `bool`
+        Returns:
+            False when Docker reports NoSuchVolume; True on successful inspection.
+            Other inspection failures propagate.
         """
         try:
             self.inspect(x)
@@ -226,15 +250,16 @@ class VolumeCLI(DockerCLICaller):
     def list(
         self, filters: Iterable[VolumeListFilter] | Mapping[str, Any] = ()
     ) -> builtins.list[Volume]:
-        """List volumes
+        """List Docker volumes.
 
-        Parameters:
+        Args:
             filters: See the [Docker documentation page about filtering
                 ](https://docs.docker.com/engine/reference/commandline/volume_ls/#filtering).
                 An example `filters=[("dangling", "true"), ("driver", "local")]`.
+                Mapping inputs are deprecated; the default adds no filters.
 
-        # Returns
-            `List[pywhales.Volume]`
+        Returns:
+            Volume handles in CLI output order.
         """
         filter_items = filters.items() if isinstance(filters, Mapping) else filters
         if isinstance(filters, Mapping):
@@ -259,12 +284,13 @@ class VolumeCLI(DockerCLICaller):
         filters: Iterable[VolumeListFilter] | Mapping[str, Any] = (),
         all: bool = False,
     ) -> None:
-        """Remove volumes
+        """Remove unused Docker volumes without a confirmation prompt.
 
-        Parameters:
+        Args:
             filters: See the [Docker documentation page about filtering
                 ](https://docs.docker.com/engine/reference/commandline/volume_ls/#filtering).
                 An example `filters=[("dangling", "true"), ("driver", "local")]`.
+                Mapping inputs are deprecated; the default adds no filters.
             all: Remove all unused volumes, not just anonymous ones.
         """
         filter_items = filters.items() if isinstance(filters, Mapping) else filters
@@ -283,9 +309,9 @@ class VolumeCLI(DockerCLICaller):
         run(full_cmd)
 
     def remove(self, x: ValidVolume | Sequence[ValidVolume]) -> None:
-        """Removes one or more volumes
+        """Remove one or more volumes.
 
-        Parameters:
+        Args:
             x: A volume or a list of volumes. An empty list as argument means
                 nothing is done.
         """
@@ -306,17 +332,21 @@ class VolumeCLI(DockerCLICaller):
         labels: Mapping[str, str] = MappingProxyType({}),
         options: Mapping[str, str] = MappingProxyType({}),
     ) -> Volume:
-        """Clone a volume.
+        """Copy a volume's data into a newly created or existing named volume.
 
-        Parameters:
-            source: The volume to clone
-            new_volume_name: The new volume name. If not given, a random name is chosen.
-            driver: Specify volume driver name (default "local")
-            labels: Set metadata for a volume
-            options: Set driver specific options
+        Data passes through a temporary directory on the Python host using two
+        copy operations. Buildx and the selected Docker daemon are required.
+        A copy failure does not remove the destination volume.
 
-        # Returns
-            A `pywhales.Volume`, the new volume.
+        Args:
+            source: Source volume name or handle.
+            new_volume_name: Destination name, or None to let Docker generate one.
+            driver: Destination volume driver, or None to use Docker's default.
+            labels: Destination metadata labels; the default adds none.
+            options: Destination driver options; the default adds none.
+
+        Returns:
+            The destination volume handle after both copies complete.
         """
         new_volume = self.create(new_volume_name, driver, labels, options)
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -331,14 +361,22 @@ class VolumeCLI(DockerCLICaller):
     ) -> None:
         """Copy files/folders between a volume and the local filesystem.
 
-        Parameters:
+        This builds a temporary image with Buildx and creates a container mounting
+        the volume. The helper container and image are removed after a successful
+        copy; failures can leave them behind. Use one volume endpoint and one
+        local endpoint, with the local path resolved on the Python host.
+
+        Args:
             source: If `source` is a directory/file inside a Docker volume,
                 a tuple `(my_volume, path_in_volume)` must be provided. The volume
                 can be a `pywhales.Volume` or a volume name as `str`. The path
                 can be a `pathlib.Path` or a `str`. If `source` is  a local directory,
                 a `pathlib.Path` or `str` should be provided. End the source path with
                 `/.` if you want to copy the directory content in another directory.
-            destination: Same as `source`.
+            destination: Destination path, using the same endpoint notation.
+
+        Raises:
+            ValueError: If neither endpoint is a volume/path tuple.
         """
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_dir = Path(temp_dir)

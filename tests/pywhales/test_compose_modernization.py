@@ -1,3 +1,9 @@
+"""Compose option and ownership contracts with mocked commands and local children.
+
+Subprocess execution is rejected by default. The child fixture temporarily
+permits real Python launches for stream lifecycle checks, without using Docker.
+"""
+
 import sys
 from collections.abc import Iterator
 from dataclasses import fields
@@ -16,6 +22,7 @@ from pywhales.utils import ProcessStream, stream_stdout_and_stderr
 
 @pytest.fixture(autouse=True)
 def deny_subprocesses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reject subprocess calls unless a narrower test fixture replaces the seam."""
     monkeypatch.setattr(
         "subprocess.run", Mock(side_effect=AssertionError("unexpected run"))
     )
@@ -51,6 +58,18 @@ def stream_command(monkeypatch: pytest.MonkeyPatch) -> Mock:
 def child(
     monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> Iterator[ProcessStream]:
+    """Start a real Python stream and close it when the fixture exits.
+
+    Temporarily restore Popen only for launch, then reinstate the default denial.
+    The default child prints readiness and waits for input.
+
+    Args:
+        monkeypatch: Scopes the temporary permission to launch a process.
+        request: Optionally supplies replacement Python source through param.
+
+    Yields:
+        A fixture-owned stream with piped stdin, valid until teardown.
+    """
     source = getattr(request, "param", "print('ready', flush=True); input()")
     with monkeypatch.context() as allowed:
         allowed.setattr("pywhales.utils.Popen", Popen)
@@ -191,12 +210,14 @@ def test_constructor_retains_existing_positional_slots() -> None:
         ".",
         "--compatibility",
     ]
-    assert [field.name for field in fields(ClientConfig)][-5:] == [
+    assert [field.name for field in fields(ClientConfig)][-7:] == [
         "_client_call_with_path",
         "compose_dry_run",
         "compose_parallel",
         "compose_progress",
         "image_stream_buffer_bytes",
+        "stream_buffer_bytes",
+        "raw_diagnostics",
     ]
 
 

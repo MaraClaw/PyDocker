@@ -1,3 +1,9 @@
+"""Static deadline-option contracts for launches, logs, and event subscriptions.
+
+The ty check validates inferred shapes for clients, aliases, and container handles.
+Pytest does not collect or execute the _check_* functions or their Docker calls.
+"""
+
 from collections.abc import Iterable
 from typing import assert_type
 
@@ -8,7 +14,9 @@ from pywhales.components.buildx.cli_wrapper import (
     BuildxReportCall,
 )
 from pywhales.components.compose.cli_wrapper import ComposeRunArgs
+from pywhales.components.compose.models import ComposeEvent
 from pywhales.components.container.cli_wrapper import ExecuteArgs, RunArgs
+from pywhales.components.system.models import DockerEvent
 from pywhales.utils import MappedProcessStream, ProcessStream
 
 
@@ -184,4 +192,84 @@ def _check_bake_deadlines(
             call=call, stream_logs=flag, return_config=flag, timeout=timeout
         ),
         BakeResult | str | MappedProcessStream[str] | None,
+    )
+
+
+def _check_log_deadlines(
+    client: DockerClient, container: Container, timeout: float | None, flag: bool
+) -> None:
+    assert_type(client.container.logs("workload", timeout=timeout), str)
+    assert_type(
+        client.container.logs("workload", stream=True, timeout=timeout), ProcessStream
+    )
+    assert_type(
+        client.container.logs("workload", stream=flag, timeout=timeout),
+        str | ProcessStream,
+    )
+    assert_type(client.logs("workload", timeout=timeout), str)
+    assert_type(client.logs("workload", stream=True, timeout=timeout), ProcessStream)
+    assert_type(
+        client.logs("workload", stream=flag, timeout=timeout), str | ProcessStream
+    )
+    assert_type(docker.logs("workload", timeout=timeout), str)
+    assert_type(docker.logs("workload", stream=True, timeout=timeout), ProcessStream)
+    assert_type(
+        docker.logs("workload", stream=flag, timeout=timeout), str | ProcessStream
+    )
+    assert_type(container.logs(timeout=timeout), str)
+    assert_type(client.compose.logs("web", timeout=timeout), str)
+    assert_type(
+        client.compose.logs("web", stream=True, timeout=timeout),
+        Iterable[tuple[str, bytes]],
+    )
+    assert_type(
+        client.compose.logs("web", stream=flag, timeout=timeout),
+        str | Iterable[tuple[str, bytes]],
+    )
+    assert_type(
+        client.compose.logs(
+            "web", None, False, False, False, None, None, flag, timeout=timeout
+        ),
+        str | Iterable[tuple[str, bytes]],
+    )
+    assert_type(client.service.logs("workload", timeout=timeout), str)
+    assert_type(
+        client.service.logs("workload", stream=True, timeout=timeout),
+        Iterable[tuple[str, bytes]],
+    )
+    assert_type(
+        client.service.logs("workload", stream=flag, timeout=timeout),
+        str | Iterable[tuple[str, bytes]],
+    )
+    assert_type(
+        client.service.logs(
+            "workload",
+            False,
+            None,
+            None,
+            False,
+            False,
+            False,
+            True,
+            True,
+            True,
+            flag,
+            timeout=timeout,
+        ),
+        str | Iterable[tuple[str, bytes]],
+    )
+
+
+def _check_event_deadlines(client: DockerClient, timeout: float | None) -> None:
+    assert_type(
+        client.compose.events(timeout=timeout), MappedProcessStream[ComposeEvent]
+    )
+    assert_type(
+        client.compose.events(["web"], timeout=timeout),
+        MappedProcessStream[ComposeEvent],
+    )
+    assert_type(client.system.events(timeout=timeout), MappedProcessStream[DockerEvent])
+    assert_type(
+        client.system.events(None, None, {}, timeout=timeout),
+        MappedProcessStream[DockerEvent],
     )

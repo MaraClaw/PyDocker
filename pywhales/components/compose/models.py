@@ -1,3 +1,5 @@
+"""Typed subsets of resolved Compose configuration, project summaries, and events."""
+
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
@@ -123,6 +125,8 @@ class ComposeConfigVolume(BaseModel):
 
 
 class ComposeConfig(BaseModel):
+    """Supported resolved project fields, without live service ownership."""
+
     services: dict[str, ComposeConfigService] | None = None
     networks: Annotated[
         dict[str, ComposeConfigNetwork] | None, Field(default_factory=dict)

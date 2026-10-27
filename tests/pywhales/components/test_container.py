@@ -113,7 +113,7 @@ def test_top_preserves_cells_when_docker_selects_columns(
     assert (result.headings, result.rows, result.raw_output) == (headings, rows, output)
     run_mock.assert_called_once_with(
         [
-            Path(sys.executable),
+            sys.executable,
             "engine",
             "--host",
             "ssh://host",
@@ -728,6 +728,18 @@ def test_container_cleanup_disappearance_races(
 
 
 def build_image(ctr_client: DockerClient, python_code: str) -> Image:
+    """Build and load a fixed-tag Python image from temporary source files.
+
+    Requires Docker and Buildx. The build context is deleted before return, but
+    the loaded image and its some_image tag remain on the selected daemon.
+
+    Args:
+        ctr_client: Client targeting the disposable test daemon.
+        python_code: Script copied into the image and run by its default command.
+
+    Returns:
+        The loaded image handle; this helper does not remove it.
+    """
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
         (tmpdir / "file.py").write_text(python_code)
@@ -822,7 +834,8 @@ sys.exit(1)
         with pytest.raises(DockerException) as err:
             for _ in ctr_client.run(image, stream=True, remove=True):
                 pass
-        assert "Something is wrong!" in str(err.value)
+        assert err.value.stderr is not None
+        assert "Something is wrong!" in err.value.stderr
 
 
 def test_container_repr(ctr_client: DockerClient) -> None:
@@ -894,7 +907,8 @@ sys.exit(1)
         with pytest.raises(DockerException) as err:
             for _ in container.start(attach=True, stream=True):
                 pass
-        assert "Something is wrong!" in str(err.value)
+        assert err.value.stderr is not None
+        assert "Something is wrong!" in err.value.stderr
 
 
 def test_remove_on_exit(ctr_client: DockerClient) -> None:
@@ -1308,7 +1322,7 @@ def test_list_filters(ctr_client: DockerClient) -> None:
 
 
 def test_list_filters_old_signature(docker_client: DockerClient) -> None:
-    """Test backwards compatibility of DockerClient.container.list()."""
+    """Verify legacy mapping filters warn while selecting the labeled containers."""
     random_label_value = random_name()
 
     containers_with_labels = []
@@ -2132,7 +2146,7 @@ def test_run_always_pull_existent(
 
 
 def test_non_unicode_output(ctr_client: DockerClient) -> None:
-    """Non-unicode characters in container output should not lead to an exception."""
+    """Decode invalid UTF-8 container output with a replacement character."""
     latin_char = "þ".encode("latin")
     with pytest.raises(UnicodeDecodeError):
         latin_char.decode(encoding="utf-8")

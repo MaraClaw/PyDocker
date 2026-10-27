@@ -1,3 +1,9 @@
+"""Plugin-installer shell regressions using local assets and a fake downloader.
+
+Tests run Bash in a temporary sandbox, not Docker or real network downloads.
+Installed plugin files are inert fixture bytes rather than executable plugins.
+"""
+
 import hashlib
 import os
 import shutil
@@ -18,6 +24,8 @@ FIXTURE_ASSETS: Final = {
 
 @dataclass(frozen=True, slots=True)
 class InstallerSandbox:
+    """Temporary installer checkout with isolated homes, assets, and plugin files."""
+
     root: Path
 
     @property
@@ -31,6 +39,18 @@ class InstallerSandbox:
     def run(
         self, overrides: Mapping[str, str] | None = None
     ) -> subprocess.CompletedProcess[str]:
+        """Run the copied installer with sandboxed paths and capture its result.
+
+        A fake wget copies local fixture assets. The real Bash child has a
+        ten-second timeout; nonzero exit status is returned rather than raised.
+
+        Args:
+            overrides: Environment values applied after sandbox defaults, or
+                None to keep those defaults.
+
+        Returns:
+            The shell result with captured text stdout and stderr.
+        """
         environment = {
             key: value
             for key, value in os.environ.items()
@@ -55,6 +75,14 @@ class InstallerSandbox:
 
 @pytest.fixture
 def sandbox(tmp_path: Path) -> InstallerSandbox:
+    """Prepare a copied installer, local assets, and inert existing plugin files.
+
+    Rewrite copied checksums for fixture bytes and install a fake wget on the
+    sandbox PATH. Pytest owns the temporary tree; preparation starts no process.
+
+    Returns:
+        A sandbox ready to launch the copied Bash installer without downloading.
+    """
     for directory in ("scripts", "bin", "assets", "home"):
         (tmp_path / directory).mkdir()
     for name in ("download-docker-plugins.sh", "docker-plugin-checksums.txt"):

@@ -207,7 +207,7 @@ def test_list_filters_old_signature(docker_client: DockerClient) -> None:
 
 
 def test_correct_ipam_config(docker_client: DockerClient) -> None:
-    """Test that we can create a network with a specific IPAM configuration."""
+    """Verify a fixed container IPv4 address survives network IPAM inspection."""
     with (
         docker_client.network.create(random_name(), subnet="192.0.2.0/24") as net,
         docker_client.container.run(

@@ -32,6 +32,18 @@ The 18 groups are `buildx`, `compose`, `config`, `container`, `context`, `image`
   Resolve reordered responses by exact ID, then exact name (hostname for nodes), then
   unique ID prefix. Validate identities, ambiguity, snapshot consistency, and requested
   multiplicity before associating any snapshot with a resource cache.
+- Context, Plugin, and Task list-valued `inspect()` each use one plural CLI call and
+  `pywhales/_inspect_validation.py::parse_namespace_inspect_results`. Validate JSON shape, count, models,
+  identities, and duplicate consistency for the whole response before hydrating any returned handle.
+- Context names must match exactly. Full plugin IDs (64 lowercase hex characters) and task IDs
+  (25 lowercase alphanumeric characters) must match exactly; other aliases retain positional association.
+  Preserve request order and duplicates
+  as distinct handles; `[]` returns without executable lookup. Scalar inspect and current-context
+  `context.inspect()` behavior stay unchanged; don't apply these positional rules to Swarm reordering.
+- `service.logs()` and `system.events()` accept keyword-only `timeout` for the selected local CLI.
+  Service inspect preflight is outside the deadline; logs retain collected text or owned byte streams.
+  System events retain `MappedProcessStream[DockerEvent]` with stdout-only JSON mapping and transport ownership.
+  There's no `Service.logs()` handle API. General stream budgets and post-exit draining follow the package guide.
 - `top.py` shares table parsing, but Docker top takes `ps_args` and Compose top selects
   services with grouped-container or flat-service output. Keep those grammars separate.
   Parsed tables support scalar columns and at most one final free-text field.
@@ -46,3 +58,6 @@ The 18 groups are `buildx`, `compose`, `config`, `container`, `context`, `image`
 - Wire fixtures live in `tests/pywhales/components/jsons/`; static resource and top
   contracts live in `tests/pywhales/test_type_contracts.py`, with group-specific contracts
   alongside it for Buildx and Compose.
+- Subscription execution/forwarding lives in `components/test_command_deadlines.py` and
+  `components/test_deadline_forwarding.py` under `tests/pywhales/`; static shapes are in
+  `tests/pywhales/test_command_deadline_types.py`.

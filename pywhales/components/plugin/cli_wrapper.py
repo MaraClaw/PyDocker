@@ -1,3 +1,5 @@
+"""Daemon-plugin handles, privileged installation, and CLI configuration."""
+
 from __future__ import annotations
 
 import builtins
@@ -25,6 +27,12 @@ from pywhales.utils import ValidPath, custom_parse_object_as, run, to_list
 
 
 class Plugin(ReloadableObjectFromJson[PluginInspectResult]):
+    """Reloadable daemon plugin handle with forced context-exit removal.
+
+    Context-manager cleanup is attempted even if the body raises. If removal
+    also fails, both failures are preserved in an exception group.
+    """
+
     def __init__(
         self, client_config: ClientConfig, reference: str, is_immutable_id: bool = False
     ) -> None:
@@ -86,23 +94,26 @@ class Plugin(ReloadableObjectFromJson[PluginInspectResult]):
         return f"pywhales.Plugin(id='{self.id[:12]}', name='{self.name}')"
 
     def disable(self, force: bool = False) -> None:
-        """Disable this plugin"""
+        """Disable this plugin, optionally forcing an active plugin to stop."""
         self._docker_plugin.disable(self, force=force)
 
     def enable(self, timeout: int | None = None) -> None:
-        """Enable this plugin"""
+        """Enable this plugin with Docker's optional HTTP timeout in seconds.
+
+        None omits the CLI timeout option; this is not a local process deadline.
+        """
         self._docker_plugin.enable(self, timeout=timeout)
 
     def push(self, disable_content_trust: bool = True) -> None:
-        """Push this plugin"""
+        """Push this plugin, skipping content-trust signing by default."""
         self._docker_plugin.push(self, disable_content_trust=disable_content_trust)
 
     def remove(self, force: bool = False) -> None:
-        """Remove this plugin"""
+        """Remove this plugin, optionally forcing removal of an active plugin."""
         self._docker_plugin.remove(self, force=force)
 
     def set(self, configuration: dict[str, str]) -> None:
-        """Set the configuration for this plugin"""
+        """Set this plugin's configuration from key-value settings."""
         self._docker_plugin.set(self, configuration)
 
     def upgrade(
@@ -111,7 +122,10 @@ class Plugin(ReloadableObjectFromJson[PluginInspectResult]):
         disable_content_trust: bool = True,
         skip_remote_check: bool = False,
     ) -> None:
-        """Upgrade this plugin"""
+        """Upgrade this plugin while automatically granting all permissions.
+
+        See PluginCLI.upgrade for remote-selection and content-trust options.
+        """
         self._docker_plugin.upgrade(
             self, remote, disable_content_trust, skip_remote_check
         )
@@ -121,15 +135,20 @@ ValidPlugin = Plugin | str
 
 
 class PluginCLI(DockerCLICaller):
+    """Daemon-plugin commands, separate from local Buildx and Compose plugins."""
+
     def create(
         self, plugin_name: str, plugin_data_directory: ValidPath, compress: bool = False
     ) -> Plugin:
         """Create a plugin from a rootfs and configuration.
 
-        Parameters:
+        Args:
             plugin_name: The name you want to give to your plugin
             plugin_data_directory: Must contain config.json and rootfs directory.
             compress: Compress the context using gzip
+
+        Returns:
+            An inspected handle to the created plugin.
         """
         full_cmd = Command([*self.docker_cmd, "plugin", "create"])
         full_cmd.add_flag("--compress", compress)
@@ -138,9 +157,9 @@ class PluginCLI(DockerCLICaller):
         return Plugin(self.client_config, plugin_name)
 
     def disable(self, plugin: ValidPlugin, force: bool = False) -> None:
-        """Disable a plugin
+        """Disable a plugin.
 
-        Parameters:
+        Args:
             plugin: The plugin to disable
             force: Force the disable of an active plugin
         """
@@ -150,11 +169,12 @@ class PluginCLI(DockerCLICaller):
         run(full_cmd)
 
     def enable(self, plugin: ValidPlugin, timeout: int | None = None) -> None:
-        """Enable a plugin
+        """Enable a plugin.
 
-        Parameters:
+        Args:
             plugin: The plugin to enable
-            timeout: HTTP client timeout (in seconds) (default 30)
+            timeout: Docker's HTTP client timeout in seconds. None omits the option
+                and uses Docker's default, not a local subprocess deadline.
         """
         full_cmd = Command([*self.docker_cmd, "plugin", "enable"])
         full_cmd.add_simple_arg("--timeout", timeout)
@@ -168,14 +188,21 @@ class PluginCLI(DockerCLICaller):
     def inspect(self, x: builtins.list[str]) -> builtins.list[Plugin]: ...
 
     def inspect(self, x: str | builtins.list[str]) -> Plugin | builtins.list[Plugin]:
-        """Returns a `pywhales.Plugin` object from a string
-        (name or id of the plugin)
+        """Inspect one or more plugins by name or ID.
 
-        Parameters:
-            x: One id or hostname or a list of name or ids
+        Args:
+            x: One name or ID, or a list of references. An empty list does not
+                invoke the CLI.
 
-        # Returns
-            One or a list of `pywhales.Plugin`
+        Returns:
+            One handle for a string, otherwise handles in request order. Batch
+            inspection preserves duplicates as distinct handles and validates all
+            snapshots before hydration. Full IDs must match exactly; aliases use
+            positional association.
+
+        Raises:
+            ParsingError: If batch shape, plugin identities, or duplicate snapshot
+                consistency is invalid.
         """
         if isinstance(x, str):
             return Plugin(self.client_config, x)
@@ -201,20 +228,21 @@ class PluginCLI(DockerCLICaller):
         disable: bool = False,
         disable_content_trust: bool = True,
     ) -> Plugin:
-        """Installs a Docker plugin
+        """Install a Docker plugin and automatically grant all permissions.
 
         Warning: `--grant-all-permissions` is enabled, which means the program won't
         stop to ask you to grant the permissions.
 
-        Parameters:
+        Args:
             plugin_name: The name of the plugin you want to install
-            configuration: A `dict` adding configuration options to the plugin
-            alias: Local name for plugin
+            configuration: Plugin-specific configuration names and values.
+            alias: Local plugin name, or None to keep the requested name.
             disable: Do not enable the plugin on install
             disable_content_trust: Skip image verification (default `True`)
 
-        # Returns
-            A `pywhales.Plugin`.
+        Returns:
+            An inspected handle using the alias when supplied, otherwise the
+            requested plugin name.
         """
         full_cmd = Command(
             [*self.docker_cmd, "plugin", "install", "--grant-all-permissions"]
@@ -232,7 +260,7 @@ class PluginCLI(DockerCLICaller):
         return Plugin(self.client_config, plugin_name)
 
     def list(self) -> builtins.list[Plugin]:
-        """Returns a `List[pywhales.Plugin` that are installed on the daemon."""
+        """Return handles for plugins installed on the selected daemon."""
         full_cmd = Command(
             [
                 *self.docker_cmd,
@@ -248,8 +276,7 @@ class PluginCLI(DockerCLICaller):
     def push(self, plugin: ValidPlugin, disable_content_trust: bool = True) -> None:
         """Push a plugin to a registry.
 
-
-        Parameters:
+        Args:
             plugin: The plugin to push
             disable_content_trust: Skip image signing (default `True`)
         """
@@ -262,10 +289,10 @@ class PluginCLI(DockerCLICaller):
     def remove(
         self, x: ValidPlugin | Sequence[ValidPlugin], force: bool = False
     ) -> None:
-        """Removes one or more plugins
+        """Remove one or more plugins.
 
-        Parameters:
-            x: One or more plugins to remove.
+        Args:
+            x: Plugin names, IDs, or handles. An empty list is a no-op.
             force: Force the removal of this plugin.
         """
         full_cmd = Command([*self.docker_cmd, "plugin", "remove"])
@@ -276,9 +303,9 @@ class PluginCLI(DockerCLICaller):
         run(full_cmd)
 
     def set(self, plugin: ValidPlugin, configuration: dict[str, str]) -> None:
-        """Change the settings for a plugin
+        """Change the settings for a plugin.
 
-        Parameters:
+        Args:
             plugin: The plugin that needs its settings changed
             configuration: The new configuration options.
         """
@@ -295,14 +322,14 @@ class PluginCLI(DockerCLICaller):
         disable_content_trust: bool = True,
         skip_remote_check: bool = False,
     ) -> None:
-        """Upgrade a plugin
+        """Upgrade a plugin while automatically granting all permissions.
 
         Warning: `--grant-all-permissions` is enabled, which means the program won't
         stop to ask you to grant the permissions.
 
-        Parameters:
+        Args:
             plugin: The plugin to upgrade
-            remote: The remote to fetch the upgrade from
+            remote: Remote plugin reference, or None to omit it.
             disable_content_trust: Skip image verification (default `True`)
             skip_remote_check: Do not check if specified remote plugin matches
                 existing plugin image

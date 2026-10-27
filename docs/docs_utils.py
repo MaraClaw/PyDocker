@@ -1,3 +1,12 @@
+"""Documentation formatting and opt-in live Docker example providers.
+
+Formatting and default example insertion need no Docker runtime. Calling live
+providers requires the CLI and daemon; builders also require Buildx, and Swarm
+examples need manager access or permission to initialize an inactive daemon.
+Providers can create and remove resources or install a plugin. Use a disposable
+daemon; cleanup preserves borrowed state rather than restoring arbitrary changes.
+"""
+
 import tempfile
 from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
@@ -11,17 +20,29 @@ from pywhales.utils import run
 
 
 class DisplayValue(Protocol):
+    """String-renderable value for a notebook-style documentation example."""
+
     @override
     def __str__(self) -> str: ...
 
 
 def _example_names(command: Sequence[str]) -> list[str]:
+    """Run a Docker inventory command and return its output lines."""
     return run([*docker.docker_cmd, *command]).splitlines()
 
 
 def _example_inventory[Resource](
     command: Sequence[str], reference: Callable[[str], Resource]
 ) -> Mapping[str, Resource]:
+    """Map tab-separated inventory names to resource handles.
+
+    Args:
+        command: Docker subcommand producing one name and identifier per line.
+        reference: Construct a handle from each identifier without acquiring it.
+
+    Returns:
+        Handles keyed by the names reported by the CLI.
+    """
     return {
         name: reference(identifier)
         for name, identifier in (
@@ -36,6 +57,21 @@ def _created_example[Resource](
     inventory: Callable[[], Mapping[str, Resource]],
     release: Callable[[Resource], None],
 ) -> Generator[Resource]:
+    """Borrow or acquire a uniquely named resource on context entry.
+
+    Borrowed resources are left untouched. On exit, release the acquired handle;
+    if creation raised before returning it, recheck the generated name and release
+    a matching partial acquisition. Inventory and cleanup failures propagate.
+
+    Args:
+        create: Acquire a resource using the generated name.
+        inventory: Return current names and handles before acquisition and,
+            when needed, after a failed acquisition.
+        release: Remove a resource owned by this context.
+
+    Yields:
+        The borrowed or newly acquired resource, valid within the context.
+    """
     name = f"pywhales-docs-{uuid4().hex}"
     borrowed = inventory().get(name)
     if borrowed is not None:
@@ -57,6 +93,18 @@ def _created_example[Resource](
 
 @contextmanager
 def _example_image(name: str) -> Generator[Image]:
+    """Borrow an image or pull it on context entry and clean up its tag.
+
+    Existing images are not removed. After an attempted pull, remove the image
+    forcibly without pruning if inventory contains its ``name:latest`` tag,
+    including when metadata loading failed after the pull.
+
+    Args:
+        name: Untagged image repository used by the example.
+
+    Yields:
+        The inspected or pulled image handle for use inside the context.
+    """
     try:
         image = docker.image.inspect(name)
     except NoSuchImage:
@@ -73,6 +121,15 @@ def _example_image(name: str) -> Generator[Image]:
 
 @contextmanager
 def _example_swarm() -> Generator[None]:
+    """Initialize an inactive Swarm on entry and leave only that Swarm on exit.
+
+    Existing membership and non-inactive states are preserved. A failed init
+    registers no leave operation; successful initialization registers force-leave
+    cleanup even if the example fails. Requires a disposable Docker daemon.
+
+    Yields:
+        Control while Swarm-dependent example operations run.
+    """
     with ExitStack() as cleanup:
         swarm = docker.system.info().swarm
         if swarm is not None and swarm.local_node_state == "inactive":
@@ -82,6 +139,16 @@ def _example_swarm() -> Generator[None]:
 
 
 def write_code(index: int, attribute_access: str, value: DisplayValue) -> str:
+    """Format a notebook-style expression with its runtime type and value.
+
+    Args:
+        index: Displayed input-cell number.
+        attribute_access: Expression text displayed without evaluating it here.
+        value: Already evaluated value rendered through its string conversion.
+
+    Returns:
+        A cell header and type/value output ending in a newline.
+    """
     string = f"""In [{index}]: super_print({attribute_access})
 type = {type(value)}, value = {value}
 """
@@ -89,6 +156,14 @@ type = {type(value)}, value = {value}
 
 
 def generate_code_demo_networks() -> str:
+    """Render live network properties using a temporary attached container.
+
+    Requires Docker. Release the acquired container before its network and any
+    image pulled for the example; an existing Ubuntu image is preserved.
+
+    Returns:
+        Notebook-style property output captured before cleanup.
+    """
     result = []
 
     with (
@@ -148,6 +223,15 @@ def generate_code_demo_networks() -> str:
 
 @_example_swarm()
 def generate_code_demo_nodes() -> str:
+    """Render properties of the first live Swarm node.
+
+    Requires manager access. Initialize and later force-leave Swarm only when
+    the daemon starts inactive; preserve existing membership. Print the node ID
+    as progress output without removing the node.
+
+    Returns:
+        Notebook-style node property output.
+    """
     result = []
 
     node = docker.node.list()[0]
@@ -191,6 +275,15 @@ def generate_code_demo_nodes() -> str:
 
 @_example_swarm()
 def generate_code_demo_services() -> str:
+    """Render a temporary live Swarm service and release acquired resources.
+
+    Requires Docker and manager access or an inactive disposable daemon. Remove
+    the service before a newly pulled BusyBox image, then leave any Swarm created
+    by the example. Existing images and Swarm membership are preserved.
+
+    Returns:
+        Notebook-style service property output; the service ID is also printed.
+    """
     result = []
 
     with (
@@ -233,6 +326,15 @@ def generate_code_demo_services() -> str:
 
 @_example_swarm()
 def generate_code_demo_configs() -> str:
+    """Render a uniquely named live Swarm config from temporary file content.
+
+    Requires Docker and manager access or an inactive disposable daemon. Register
+    config removal after creation returns, and leave any Swarm initialized by
+    this call when rendering exits. The config ID is also printed.
+
+    Returns:
+        Notebook-style config property output captured before cleanup.
+    """
     result = []
 
     with tempfile.TemporaryDirectory() as tmp_dir, ExitStack() as cleanup:
@@ -262,6 +364,14 @@ def generate_code_demo_configs() -> str:
 
 
 def generate_code_demo_volumes() -> str:
+    """Render live volume properties and release the example's acquisition.
+
+    Requires Docker. Preserve a borrowed generated-name match, and recover a
+    partial acquisition by its name if creation fails before returning a handle.
+
+    Returns:
+        Notebook-style volume property output captured before cleanup.
+    """
     result = []
 
     with _created_example(
@@ -293,6 +403,14 @@ def generate_code_demo_volumes() -> str:
 
 
 def generate_code_demo_builders() -> str:
+    """Render live builder properties and release the example's acquisition.
+
+    Requires Docker and Buildx. Preserve a borrowed generated-name match, and
+    recover partial acquisition by name if creation fails to return a handle.
+
+    Returns:
+        Notebook-style builder property output captured before cleanup.
+    """
     result = []
 
     with _created_example(
@@ -328,6 +446,14 @@ def generate_code_demo_builders() -> str:
 
 
 def generate_code_demo_images() -> str:
+    """Render live Ubuntu image properties without removing a borrowed image.
+
+    Requires Docker. Pull a missing image and remove its acquired latest tag
+    after rendering, including failure cleanup. Image tags are also printed.
+
+    Returns:
+        Notebook-style image property output captured before cleanup.
+    """
     result = []
 
     with _example_image("ubuntu") as image:
@@ -365,6 +491,15 @@ def generate_code_demo_images() -> str:
 
 
 def generate_code_demo_plugins() -> str:
+    """Render a live volume plugin, installing it only when not already present.
+
+    Requires Docker plugin support and installation permissions. Preserve an
+    existing named plugin; otherwise force-remove an acquired plugin, including
+    one discovered by inventory after installation failed to return a handle.
+
+    Returns:
+        Notebook-style plugin property output captured before cleanup.
+    """
     result = []
 
     name = "mochoa/s3fs-volume-plugin"
@@ -412,6 +547,14 @@ def generate_code_demo_plugins() -> str:
 
 
 def generate_code_demo_containers() -> str:
+    """Render a live sleeping Ubuntu container and release acquired resources.
+
+    Requires Docker. Remove the acquired container forcibly before removing any
+    image pulled by this call; preserve borrowed containers and images.
+
+    Returns:
+        Notebook-style container property output captured before cleanup.
+    """
     result = []
 
     with (
@@ -595,6 +738,14 @@ def generate_code_demo_containers() -> str:
 
 
 def add_links(text: str) -> str:
+    """Link the recognized Container reference in Markdown text.
+
+    Args:
+        text: Markdown containing zero or more literal Container references.
+
+    Returns:
+        Text with those references linked to the container documentation.
+    """
     text = text.replace(
         "`pywhales.Container`",
         "[`pywhales.Container`](/objects/containers/)",
@@ -604,6 +755,13 @@ def add_links(text: str) -> str:
 
 
 def add_code_example(destination: Path, markdown_file: str, code: str) -> None:
+    """Replace example markers in one existing object page and print progress.
+
+    Args:
+        destination: Generated documentation root containing an objects folder.
+        markdown_file: Object-page filename relative to that folder.
+        code: Replacement text for every example marker in the page.
+    """
     path_file = destination / "objects" / markdown_file
     path_file.write_text(
         path_file.read_text(encoding="utf-8").replace("@INSERT_GENERATED_CODE@", code),
@@ -613,6 +771,17 @@ def add_code_example(destination: Path, markdown_file: str, code: str) -> None:
 
 
 def add_all_code_examples(destination: Path, live_examples: bool = False) -> None:
+    """Fill object-page examples with offline placeholders or live output.
+
+    Pages are rewritten in provider order without rollback. Live mode invokes
+    Docker-backed providers and can create resources, install a plugin, or
+    initialize Swarm; use a disposable daemon with the required plugins.
+
+    Args:
+        destination: Existing generated documentation root.
+        live_examples: Invoke providers when true; the default inserts explanatory
+            placeholders without calling providers or Docker.
+    """
     examples = {
         "plugins.md": generate_code_demo_plugins,
         "configs.md": generate_code_demo_configs,

@@ -620,12 +620,17 @@ class ImageCLI(DockerCLICaller):
                 "Only one can be activated at a time."
             )
 
+        buffer_bytes = self.client_config.image_stream_buffer_bytes
+        if buffer_bytes is None:
+            buffer_bytes = self.client_config.stream_buffer_bytes
+
         if isinstance(x, str):
             result = self._pull_single_tag(
                 image_name=x,
                 quiet=quiet,
                 stream_logs=stream_logs,
                 platform=platform,
+                buffer_bytes=buffer_bytes,
             )
             if stream_logs:
                 assert result is not None
@@ -642,6 +647,7 @@ class ImageCLI(DockerCLICaller):
                 quiet=quiet,
                 stream_logs=stream_logs,
                 platform=platform,
+                buffer_bytes=buffer_bytes,
             )
             if stream_logs:
                 assert result is not None
@@ -653,6 +659,7 @@ class ImageCLI(DockerCLICaller):
                 quiet=quiet,
                 stream_logs=stream_logs,
                 platform=platform,
+                buffer_bytes=buffer_bytes,
             )
 
     def _pull_multiple_tags(
@@ -661,6 +668,8 @@ class ImageCLI(DockerCLICaller):
         quiet: bool,
         stream_logs: bool = False,
         platform: str | None = None,
+        *,
+        buffer_bytes: int | None,
     ) -> builtins.list[Image] | ImageStream:
         if stream_logs:
             return self._pull_multiple_tags_stream(
@@ -668,6 +677,7 @@ class ImageCLI(DockerCLICaller):
                 quiet=quiet,
                 stream_logs=stream_logs,
                 platform=platform,
+                buffer_bytes=buffer_bytes,
             )
         else:
             pool = ThreadPool(4)
@@ -688,16 +698,20 @@ class ImageCLI(DockerCLICaller):
         quiet: bool,
         stream_logs: bool = False,
         platform: str | None = None,
+        *,
+        buffer_bytes: int | None,
     ) -> MultiImageStream:
         def start(image_name: str) -> MappedProcessStream[tuple[str, bytes]]:
-            child = self._pull_single_tag(image_name, quiet, True, platform)
+            child = self._pull_single_tag(
+                image_name, quiet, True, platform, buffer_bytes=buffer_bytes
+            )
             assert child is not None
             return child
 
         return MultiImageStream(
             image_names,
             start,
-            buffer_bytes=self.client_config.image_stream_buffer_bytes,
+            buffer_bytes=buffer_bytes,
         )
 
     def _pull_single_tag(
@@ -706,6 +720,8 @@ class ImageCLI(DockerCLICaller):
         quiet: bool,
         stream_logs: bool = False,
         platform: str | None = None,
+        *,
+        buffer_bytes: int | None = None,
     ) -> MappedProcessStream[tuple[str, bytes]] | None:
         full_cmd = Command([*self.docker_cmd, "image", "pull"])
 
@@ -718,9 +734,7 @@ class ImageCLI(DockerCLICaller):
         full_cmd.append(image_name)
 
         if stream_logs:
-            stream = stream_stdout_and_stderr(
-                full_cmd, buffer_bytes=self.client_config.image_stream_buffer_bytes
-            )
+            stream = stream_stdout_and_stderr(full_cmd, buffer_bytes=buffer_bytes)
             return MappedProcessStream(
                 stream, ((image_name, line) for _, line in stream)
             )
@@ -812,6 +826,10 @@ class ImageCLI(DockerCLICaller):
                 "Only one can be activated at a time."
             )
 
+        buffer_bytes = self.client_config.image_stream_buffer_bytes
+        if buffer_bytes is None:
+            buffer_bytes = self.client_config.stream_buffer_bytes
+
         images = list(OrderedDict.fromkeys(to_list(x)))
 
         # this is just to raise a correct exception if the images don't exist
@@ -825,12 +843,14 @@ class ImageCLI(DockerCLICaller):
                 tag_or_repo=image,
                 quiet=quiet,
                 stream_logs=stream_logs,
+                buffer_bytes=buffer_bytes,
             )
         else:
             return self._push_multiple_tags(
                 tags_or_repos=images,
                 quiet=quiet,
                 stream_logs=stream_logs,
+                buffer_bytes=buffer_bytes,
             )
 
     def _push_multiple_tags(
@@ -838,12 +858,15 @@ class ImageCLI(DockerCLICaller):
         tags_or_repos: builtins.list[str],
         quiet: bool,
         stream_logs: bool,
+        *,
+        buffer_bytes: int | None,
     ) -> ImageStream | None:
         if stream_logs:
             return self._push_multiple_tags_stream(
                 tags_or_repos=tags_or_repos,
                 quiet=quiet,
                 stream_logs=stream_logs,
+                buffer_bytes=buffer_bytes,
             )
         else:
             pool = ThreadPool(4)
@@ -862,16 +885,20 @@ class ImageCLI(DockerCLICaller):
         tags_or_repos: builtins.list[str],
         quiet: bool,
         stream_logs: bool,
+        *,
+        buffer_bytes: int | None,
     ) -> MultiImageStream:
         def start(tag_or_repo: str) -> MappedProcessStream[tuple[str, bytes]]:
-            child = self._push_single_tag(tag_or_repo, quiet, True)
+            child = self._push_single_tag(
+                tag_or_repo, quiet, True, buffer_bytes=buffer_bytes
+            )
             assert child is not None
             return child
 
         return MultiImageStream(
             tags_or_repos,
             start,
-            buffer_bytes=self.client_config.image_stream_buffer_bytes,
+            buffer_bytes=buffer_bytes,
         )
 
     def _push_single_tag(
@@ -879,14 +906,14 @@ class ImageCLI(DockerCLICaller):
         tag_or_repo: str,
         quiet: bool,
         stream_logs: bool,
+        *,
+        buffer_bytes: int | None = None,
     ) -> MappedProcessStream[tuple[str, bytes]] | None:
         full_cmd = Command([*self.docker_cmd, "image", "push"])
         full_cmd.add_flag("--quiet", quiet)
         full_cmd.append(tag_or_repo)
         if stream_logs:
-            stream = stream_stdout_and_stderr(
-                full_cmd, buffer_bytes=self.client_config.image_stream_buffer_bytes
-            )
+            stream = stream_stdout_and_stderr(full_cmd, buffer_bytes=buffer_bytes)
             return MappedProcessStream(
                 stream, ((tag_or_repo, line) for _, line in stream)
             )

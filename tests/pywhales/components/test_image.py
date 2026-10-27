@@ -116,6 +116,243 @@ def image_commands() -> Generator[_ImageCommands]:
         yield commands
 
 
+@pytest.mark.parametrize("operation", ["pull", "push"])
+@pytest.mark.parametrize("multiple", [False, True])
+@pytest.mark.parametrize("override", [None, 16])
+def test_image_stream_new_operations_use_live_fallback_without_normalizing_override(
+    operation: Literal["pull", "push"],
+    multiple: bool,
+    override: int | None,
+    image_commands: _ImageCommands,
+) -> None:
+    config = image_commands.client.client_config
+    config.stream_buffer_bytes = 32
+    config.image_stream_buffer_bytes = override
+    method = (
+        image_commands.client.pull
+        if operation == "pull"
+        else image_commands.client.push
+    )
+    old_names = ["old-one", "old-two"] if multiple else ["old-one"]
+    new_names = ["new-one", "new-two"] if multiple else ["new-one"]
+    with contextlib.ExitStack() as stack:
+        old = method(old_names, stream_logs=True)
+        assert isinstance(old, (MappedProcessStream, MultiImageStream))
+        stack.callback(old.close)
+        config.stream_buffer_bytes = 64
+
+        new = method(new_names, stream_logs=True)
+        assert isinstance(new, (MappedProcessStream, MultiImageStream))
+        stack.callback(new.close)
+        next(old)
+        next(new)
+        for _ in [*old_names, *new_names]:
+            image_commands.started.get(timeout=3)
+
+        assert config.image_stream_buffer_bytes == override
+        for names, expected in (
+            (old_names, override or 32),
+            (new_names, override or 64),
+        ):
+            assert all(
+                image_commands.children[name]._buffer_bytes == expected
+                for name in names
+            )
+        if isinstance(old, MultiImageStream) and isinstance(new, MultiImageStream):
+            assert old._queue._limit == (override or 32)
+            assert new._queue._limit == (override or 64)
+    for child in image_commands.children.values():
+        _assert_image_process_released(child)
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+@pytest.mark.parametrize(("budget", "override"), [(None, None), (16, None), (1, 32)])
+def test_image_stream_lazy_queued_children_keep_public_operation_snapshot(
+    operation: Literal["pull", "push"],
+    budget: int | None,
+    override: int | None,
+    image_commands: _ImageCommands,
+) -> None:
+    config = image_commands.client.client_config
+    config.stream_buffer_bytes = budget
+    config.image_stream_buffer_bytes = override
+    expected_budget = override if override is not None else budget
+    image_commands.stdout = b"ok\n"
+    image_commands.stderr = b""
+    names = [f"image:{number}" for number in range(6)]
+    stream = image_commands.stream(operation, names)
+    try:
+        assert image_commands.children == {}
+        config.stream_buffer_bytes = 1
+        config.image_stream_buffer_bytes = 1
+
+        next(stream)
+        for _ in range(4):
+            image_commands.started.get(timeout=3)
+        config.stream_buffer_bytes = 2
+        config.image_stream_buffer_bytes = 2
+        for name in names[:2]:
+            image_commands.finish(name)
+        for _ in range(2):
+            image_commands.started.get(timeout=3)
+        for name in names[2:]:
+            image_commands.finish(name)
+
+        assert len(list(stream)) == len(names) - 1
+        assert stream._queue._limit == expected_budget
+        assert all(
+            child._buffer_bytes == expected_budget
+            for child in image_commands.children.values()
+        )
+        for child in image_commands.children.values():
+            _assert_image_process_released(child)
+    finally:
+        stream.close()
+
+
+@pytest.mark.parametrize("multiple", [False, True])
+@pytest.mark.parametrize("budget", [None, 16])
+def test_push_stream_captures_budget_before_inspect_preflight(
+    multiple: bool, budget: int | None, image_commands: _ImageCommands
+) -> None:
+    config = image_commands.client.client_config
+    config.stream_buffer_bytes = budget
+
+    def inspect_and_change_policy(names: list[str]) -> list[Image]:
+        config.stream_buffer_bytes = 1
+        config.image_stream_buffer_bytes = 1
+        return []
+
+    names = ["one", "two"] if multiple else ["one"]
+    with patch.object(
+        image_commands.client.image, "inspect", side_effect=inspect_and_change_policy
+    ):
+        stream = image_commands.client.push(names, stream_logs=True)
+    assert isinstance(stream, (MappedProcessStream, MultiImageStream))
+    try:
+        next(stream)
+        for _ in names:
+            image_commands.started.get(timeout=3)
+        assert all(
+            child._buffer_bytes == budget for child in image_commands.children.values()
+        )
+        if isinstance(stream, MultiImageStream):
+            assert stream._queue._limit == budget
+    finally:
+        stream.close()
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+@pytest.mark.parametrize("cancel", [False, True], ids=["drain", "cancel"])
+def test_image_fallback_budget_backpressures_slow_consumer_and_closes_children(
+    operation: Literal["pull", "push"],
+    cancel: bool,
+    image_commands: _ImageCommands,
+) -> None:
+    image_commands.client.client_config.stream_buffer_bytes = 8
+    image_commands.stdout = b"abc\n" * 20
+    image_commands.stderr = b""
+    stream = image_commands.stream(operation, ["one", "two"])
+    saturated = Event()
+    wait = stream._queue.condition.wait
+
+    def wait_and_signal(timeout: float | None = None) -> bool:
+        saturated.set()
+        return wait(timeout)
+
+    try:
+        with patch.object(stream._queue.condition, "wait", side_effect=wait_and_signal):
+            stream._start()
+            assert saturated.wait(timeout=3)
+            for _ in range(2):
+                image_commands.started.get(timeout=3)
+            with stream._queue.condition:
+                assert stream._queue._bytes == 8
+        if cancel:
+            stream.close()
+            assert list(stream) == []
+        else:
+            for name in ("one", "two"):
+                image_commands.finish(name)
+            output = list(stream)
+            for name in ("one", "two"):
+                assert [line for tag, line in output if tag == name] == [b"abc\n"] * 20
+        for child in image_commands.children.values():
+            _assert_image_process_released(child)
+    finally:
+        stream.close()
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+@pytest.mark.parametrize("multiple", [False, True])
+@pytest.mark.parametrize("overflow", ["record", "stderr-history"])
+def test_image_fallback_budget_rejects_mapped_stream_overflow(
+    operation: Literal["pull", "push"],
+    multiple: bool,
+    overflow: Literal["record", "stderr-history"],
+    image_commands: _ImageCommands,
+) -> None:
+    image_commands.client.client_config.stream_buffer_bytes = 4
+    image_commands.stdout = b"oversized\n" if overflow == "record" else b""
+    image_commands.stderr = b"a\nb\nc\n" if overflow == "stderr-history" else b""
+    method = (
+        image_commands.client.pull
+        if operation == "pull"
+        else image_commands.client.push
+    )
+    stream = method(["one", "two"] if multiple else "one", stream_logs=True)
+    assert isinstance(stream, (MappedProcessStream, MultiImageStream))
+    with stream, pytest.raises(BufferError):
+        list(stream)
+    for child in image_commands.children.values():
+        _assert_image_process_released(child)
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+@pytest.mark.parametrize("budget", [None, 16])
+def test_image_snapshot_passes_exact_budget_to_real_shared_stream_boundary(
+    operation: Literal["pull", "push"], budget: int | None
+) -> None:
+    client = DockerClient()
+    config = client.client_config
+    config.stream_buffer_bytes = budget
+    config._client_call_with_path = [
+        sys.executable,
+        "-c",
+        "import os; os.write(1, b'progress\\n')",
+    ]
+    method = client.pull if operation == "pull" else client.push
+    names = [f"image:{number}" for number in range(6)]
+    with patch.object(client.image, "inspect", return_value=[]):
+        stream = method(names, stream_logs=True)
+    assert isinstance(stream, MultiImageStream)
+    config.stream_buffer_bytes = 1
+    config.image_stream_buffer_bytes = 1
+
+    with stream:
+        assert sorted(stream) == [(name, b"progress\n") for name in names]
+
+
+@pytest.mark.parametrize("budget", [4, 64])
+def test_path_image_load_uses_general_budget_instead_of_image_override(
+    budget: int,
+) -> None:
+    client = DockerClient()
+    client.client_config.stream_buffer_bytes = budget
+    client.client_config.image_stream_buffer_bytes = 1
+    client.client_config._client_call_with_path = [
+        sys.executable,
+        "-c",
+        "print('Loaded image: sample', flush=True)",
+    ]
+
+    if budget == 4:
+        with pytest.raises(BufferError):
+            client.image.load("unused-archive.tar", quiet=True)
+    else:
+        assert client.image.load("unused-archive.tar", quiet=True) == ["sample"]
+
+
 @pytest.mark.parametrize("cancel", [False, True], ids=["drain", "saturated-close"])
 def test_multiple_image_budget_accounts_payload_while_producers_are_blocked(
     cancel: bool, image_commands: _ImageCommands
@@ -1401,7 +1638,7 @@ def test_push_duplicate_images(ctr_client: DockerClient) -> None:
         inspect_images.assert_called_once_with(["busybox:1"])
         push_multiple_tags.assert_not_called()
         push_single_tag.assert_called_once_with(
-            tag_or_repo="busybox:1", quiet=True, stream_logs=False
+            tag_or_repo="busybox:1", quiet=True, stream_logs=False, buffer_bytes=None
         )
 
 

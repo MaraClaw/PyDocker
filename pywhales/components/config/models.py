@@ -1,3 +1,5 @@
+"""Typed Swarm config inspection snapshots, including encoded config data."""
+
 from datetime import datetime
 from typing import Annotated
 

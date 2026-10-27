@@ -1,3 +1,5 @@
+"""Swarm config handles and CLI operations requiring a manager daemon."""
+
 from __future__ import annotations
 
 import builtins
@@ -27,6 +29,12 @@ from pywhales.utils import custom_parse_object_as, format_mapping_for_cli, run, 
 
 
 class Config(ReloadableObjectFromJson[ConfigInspectResult]):
+    """Reloadable Swarm config handle using its originating client settings.
+
+    A context manager attempts removal on exit, including when its body fails.
+    If both body and cleanup fail, both exceptions are preserved in a group.
+    """
+
     def __init__(
         self, client_config: ClientConfig, reference: str, is_immutable_id: bool = False
     ) -> None:
@@ -58,8 +66,7 @@ class Config(ReloadableObjectFromJson[ConfigInspectResult]):
     def remove(self) -> None:
         """Remove this config.
 
-        Note that you can also use a `pywhales.Config` as a context manager
-        to ensure it's removed even if an exception occurs.
+        A context manager attempts this removal even if its body raises.
         """
         ConfigCLI(self.client_config).remove(self)
 
@@ -88,6 +95,8 @@ ValidConfig = Config | str
 
 
 class ConfigCLI(DockerCLICaller):
+    """Swarm config commands using the originating client's connection settings."""
+
     def create(
         self,
         name: str,
@@ -95,19 +104,19 @@ class ConfigCLI(DockerCLICaller):
         labels: Mapping[str, str] = MappingProxyType({}),
         template_driver: str | None = None,
     ) -> Config:
-        """Create a config from a file
+        """Create a Swarm config from a file.
 
         See [the docker docs](https://docs.docker.com/engine/swarm/configs/)
         for more information about swarm configs.
 
-        Parameters:
+        Args:
             name: The config name.
-            file: Tbe file to be used as config.
-            labels: The labels to add to the config
-            template_driver: The template driver
+            file: Local file whose contents become the config.
+            labels: Metadata labels; the default adds none.
+            template_driver: Template driver, or None to omit the option.
 
-        # Returns
-            A `pywhales.Config` object.
+        Returns:
+            A handle to the newly created config.
         """
         full_cmd = Command([*self.docker_cmd, "config", "create"])
         full_cmd.add_args_iterable_or_single("--label", format_mapping_for_cli(labels))
@@ -122,14 +131,20 @@ class ConfigCLI(DockerCLICaller):
     def inspect(self, x: builtins.list[str]) -> builtins.list[Config]: ...
 
     def inspect(self, x: str | builtins.list[str]) -> Config | builtins.list[Config]:
-        """Returns a `pywhales.Config` object based on its name or id.
+        """Inspect one or more Swarm configs by name or ID.
 
-        # Argument
-            x: An id or name or a list of ids/names.
+        Args:
+            x: A name or ID, or a list of references. An empty list does not invoke
+                the CLI.
 
-        # Returns
-            A `pywhales.Config` if a string was passed as argument. A
-            `List[pywhales.Config]` if a list of strings was passed as argument.
+        Returns:
+            One handle for a string, otherwise handles in request order with
+            duplicates retained as distinct handles. All snapshots are validated
+            before any returned handle is hydrated.
+
+        Raises:
+            ParsingError: If the response cannot be associated unambiguously with
+                the requested references or contains inconsistent snapshots.
         """
         references = to_list(x)
         if not references:
@@ -153,14 +168,13 @@ class ConfigCLI(DockerCLICaller):
     def list(
         self, filters: Mapping[str, str] = MappingProxyType({})
     ) -> builtins.list[Config]:
-        """List all config available in the swarm.
+        """List configs available in the Swarm.
 
-        Parameters:
-            filters: If you want to filter the results based on a given condition.
-                For example, `docker.config.list(filters=dict(label="my_label=hello"))`.
+        Args:
+            filters: Docker filter names and values; the default selects all configs.
 
-        # Returns
-            A `List[pywhales.Config]`.
+        Returns:
+            Config handles in CLI output order.
         """
         full_cmd = Command([*self.docker_cmd, "config", "list", "--quiet"])
         full_cmd.add_args_iterable_or_single(
@@ -173,9 +187,8 @@ class ConfigCLI(DockerCLICaller):
     def remove(self, x: ValidConfig | Sequence[ValidConfig]) -> None:
         """Remove one or more configs.
 
-        Parameters:
-            x: One or a list of configs. Valid values are the id of the config or
-                a `pywhales.Config` object.
+        Args:
+            x: Config names, IDs, or handles.
                 An empty list means the function call does nothing.
         """
         full_cmd = Command([*self.docker_cmd, "config", "rm"])

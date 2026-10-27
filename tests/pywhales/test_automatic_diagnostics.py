@@ -1,3 +1,9 @@
+"""Automatic diagnostic privacy contracts with mocked images and local children.
+
+Compose streaming launches a real Python child rather than Docker. Every test
+runs with debug both unset and enabled, independently of inherited debug flags.
+"""
+
 import logging
 import sys
 from unittest.mock import patch
@@ -13,6 +19,14 @@ from pywhales.utils import ProcessStream
 def debug_environment(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Isolate both debug variables and select the parametrized diagnostic mode.
+
+    Pytest restores the original environment after each test.
+
+    Args:
+        request: Supplies whether PYDOCKER_DEBUG is enabled for this case.
+        monkeypatch: Removes inherited flags and scopes any enabled flag.
+    """
     monkeypatch.delenv("PYTHON_ON_WHALES_DEBUG", raising=False)
     monkeypatch.delenv("PYDOCKER_DEBUG", raising=False)
     if request.param:

@@ -1,3 +1,10 @@
+"""Conversion and process-stream lifecycle regressions using real local children.
+
+These tests launch Python and shell commands to exercise pipes, threads, buffering,
+and deadlines. Docker wrapper paths are patched where used; daemon availability
+does not replace the local process requirements.
+"""
+
 import os
 import select
 import signal
@@ -91,7 +98,7 @@ def test_stream_stdout_and_stderr_interactive_multiple_lines() -> None:
 
 
 def test_stream_stdout_and_stderr_non_interactive() -> None:
-    """Non-interactive mode returns ProcessStream with stdin=None."""
+    """Leave stdin unavailable when streaming without an interactive input pipe."""
     result = stream_stdout_and_stderr(["echo", "hi"])
     assert isinstance(result, ProcessStream)
     assert result.stdin is None
@@ -110,6 +117,7 @@ def test_process_stream_close_after_eof() -> None:
 
 
 def _assert_process_released(stream: ProcessStream) -> None:
+    """Check child reaping, reader and watchdog shutdown, and pipe closure."""
     assert stream._process.poll() is not None
     assert all(not thread.is_alive() for thread in stream._threads)
     assert not stream._watchdog.is_alive()

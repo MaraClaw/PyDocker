@@ -1,3 +1,9 @@
+"""Process-backed output iteration, deadlines, and local CLI cleanup.
+
+Reader threads and a watchdog keep running independently of stream consumption.
+Cleanup controls only the local process, not daemon-managed resources.
+"""
+
 from __future__ import annotations
 
 import os
@@ -18,10 +24,19 @@ from pywhales.exceptions import (
 
 
 class ProcessStream(Iterator[tuple[str, bytes]]):
-    """Own a CLI, bounded output, and one independent cleanup/watchdog thread.
+    """Owned CLI process with output readers and an independent watchdog.
 
-    A bare loop break does not close the stream. Closing only cancels the local
-    CLI, never daemon-managed resources. Terminal errors are delivered once.
+    Iteration blocks for stdout/stderr records and drains output after natural
+    child exit. A launch-based deadline keeps advancing even when iteration
+    pauses or never starts. Use a context manager or call close() when stopping
+    early; a bare loop break does not close the stream. Closing kills a running
+    local CLI and waits for cleanup, never removing daemon-managed resources.
+    Recorded terminal errors are delivered once through iteration or clean
+    context exit, without replacing an exception from the context body.
+
+    Attributes:
+        stdin: Writable child input pipe when launch requested one; otherwise
+            ``None``. Cleanup closes this pipe along with the owned process.
     """
 
     def __init__(
@@ -33,6 +48,20 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         buffer_bytes: int | None = None,
         raw_diagnostics: bool = False,
     ) -> None:
+        """Take ownership of a launched process and start readers and a watchdog.
+
+        Args:
+            process: Running child with stdout and stderr pipes already open.
+            full_cmd: Launched arguments retained for exception attributes.
+            deadline: Absolute monotonic deadline in seconds, or ``None`` for no
+                deadline. The caller computes it from launch time.
+            buffer_bytes: Positive byte budget, or ``None`` for unbounded output.
+                Queued payload, each unfinished record, and stderr history are
+                bounded separately; this is not a total-memory cap.
+            raw_diagnostics: Whether exception text may expose command and
+                captured-output values. Raw exception attributes remain available
+                regardless and must be treated as confidential.
+        """
         self._process = process
         self._full_cmd = full_cmd
         self.stdin = process.stdin
@@ -68,7 +97,14 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
     def _on_failure(
         self, callback: Callable[[OSError | BufferError | DockerException], None]
     ) -> None:
-        """Notify an owner without joining readers, replaying a prior failure."""
+        """Register an owner callback, replaying any already recorded failure.
+
+        Notification does not join reader threads and may happen on a worker
+        thread. A newly observed nonzero child exit can also trigger it.
+
+        Args:
+            callback: Failure notification that must not wait for reader cleanup.
+        """
         with self._queue.condition:
             error = self._error
             if error is None:
@@ -79,6 +115,11 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
             self._notify_exit_failure()
 
     def _fail(self, error: OSError | BufferError | DockerException) -> None:
+        """Record the first failure, wake blocked workers, and notify the owner.
+
+        Args:
+            error: Terminal error retained for later delivery to the consumer.
+        """
         with self._queue.condition:
             if self._stop.is_set():
                 return
@@ -91,6 +132,7 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
             callback(error)
 
     def _notify_exit_failure(self) -> None:
+        """Notify a registered owner if the child has exited unsuccessfully."""
         with self._queue.condition:
             exit_code = self._process.poll()
             if exit_code is None or exit_code == 0 or self._failure_callback is None:
@@ -106,6 +148,15 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         )
 
     def _read_pipe(self, pipe: IO[bytes], name: str) -> None:
+        """Read newline-delimited records and publish completion for one pipe.
+
+        Retain a final unterminated record at EOF. Record read or size failures
+        outside the payload queue so queue saturation cannot hide them.
+
+        Args:
+            pipe: Owned stdout or stderr pipe, closed when this reader finishes.
+            name: ``stdout`` or ``stderr`` source label used for accounting.
+        """
         pending = self._pending[name]
         chunk = b""
         offset = 0
@@ -165,6 +216,15 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
             self._queue.finish()
 
     def _publish(self, name: str, record: bytes) -> bool:
+        """Publish a record while tracking bytes waiting for queue capacity.
+
+        Args:
+            name: Output source label.
+            record: Complete record that already satisfies the record-size bound.
+
+        Returns:
+            Whether the record was queued; false if cleanup closed the queue.
+        """
         with self._queue.condition:
             self._inflight[name] = record
             try:
@@ -173,10 +233,24 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
                 self._inflight[name] = b""
 
     def _check_size(self, size: int, category: str) -> None:
+        """Enforce an individual record or stderr-history byte limit.
+
+        Args:
+            size: Proposed retained byte count, including any newline.
+            category: Accounting category included in the failure message.
+
+        Raises:
+            BufferError: If the proposed count exceeds a configured budget.
+        """
         if self._buffer_bytes is not None and size > self._buffer_bytes:
             raise BufferError(f"{category} exceeds buffer_bytes={self._buffer_bytes}")
 
     def _expire(self) -> None:
+        """Record expiry of a still-running child while the queue lock is held.
+
+        Capture queued and unfinished stdout before closing the queue. Natural
+        child exit is not converted into a timeout during post-exit draining.
+        """
         if (
             not self._stop.is_set()
             and self._deadline is not None
@@ -193,6 +267,11 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
             self._queue.close()
 
     def _monitor(self) -> None:
+        """Enforce the deadline and reap the child independently of iteration.
+
+        Kill a running child when stopped, join readers, and close piped stdin
+        before signalling that owned resources have been released.
+        """
         try:
             with self._queue.condition:
                 while not self._stop.is_set() and self._process.poll() is None:
@@ -219,6 +298,14 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
             self._released.set()
 
     def _raise_error(self) -> None:
+        """Wait for cleanup and deliver a recorded terminal error at most once.
+
+        Raises:
+            DockerTimeout: If the launch deadline expired while the child ran.
+            DockerException: If a subprocess failure was recorded.
+            BufferError: If retained output exceeded an individual byte limit.
+            OSError: If a pipe reader recorded an operating-system failure.
+        """
         self._watchdog.join()
         with self._queue.condition:
             error = self._error
@@ -237,10 +324,25 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
 
     @override
     def __iter__(self) -> Self:
+        """Return this owned output iterator."""
         return self
 
     @override
     def __next__(self) -> tuple[str, bytes]:
+        """Wait for the next output record or deliver terminal status.
+
+        Returns:
+            A ``(source, payload)`` pair labelled ``stdout`` or ``stderr``.
+            Records include their newline, except an unterminated final record.
+
+        Raises:
+            StopIteration: After successful exhaustion or explicit closure with
+                no remaining recorded failure.
+            DockerException: If the child exits unsuccessfully.
+            DockerTimeout: If the running child exceeded its launch deadline.
+            BufferError: If a record or retained stderr exceeded its byte limit.
+            OSError: If a pipe read failed.
+        """
         while True:
             if self._stop.is_set():
                 self._raise_error()
@@ -273,7 +375,12 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         raise StopIteration
 
     def close(self) -> None:
-        """Cancel and release the CLI; leave any recorded error for consumption."""
+        """Cancel the local CLI and wait for process and reader cleanup.
+
+        Repeated calls are safe. Discard queued payloads but leave recorded
+        errors for one later iteration or clean context-exit delivery. This does
+        not cancel containers, services, or other daemon-side work.
+        """
         with self._queue.condition:
             self._expire()
             self._closed = True
@@ -282,6 +389,7 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         self._watchdog.join()
 
     def __enter__(self) -> Self:
+        """Return the already-running stream without launching another process."""
         return self
 
     def __exit__(
@@ -290,6 +398,13 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
+        """Close the stream and surface recorded errors only on clean exit.
+
+        Args:
+            exc_type: Active context-body exception type, or ``None``.
+            exc_value: Active context-body exception, preserved by this method.
+            traceback: Context-body traceback supplied by the context protocol.
+        """
         self.close()
         if exc_type is None:
             self._raise_error()

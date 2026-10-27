@@ -114,3 +114,86 @@ this functionality was removed under <https://github.com/gabrieldemarmiesse/pyth
 Trying to use pywhales when it cannot find a Docker client binary
 will trigger a `pywhales.ClientNotFoundError`. You can use a try-except around
 a first `docker.ps()` call to handle the case when pywhales won't work.
+
+## Bounded inspection and inventory
+
+Choose an `InspectionPolicy` for your workload. All three limits are required
+positive integers; booleans aren't accepted and there are no deployment defaults.
+The values below are illustrative, not recommendations for your deployment.
+
+```python
+from threading import Event
+from time import monotonic
+
+from pywhales import (
+    DockerClient,
+    InspectionPolicy,
+    InventoryRequest,
+    capture_inventory,
+    observation,
+)
+from pywhales.client_config import bulk_reload
+
+client = DockerClient()
+handle = client.container.inspect("name")
+policy = InspectionPolicy(
+    max_references=100,
+    max_argv_bytes=32768,
+    max_response_bytes=1048576,
+)
+event = Event()
+remaining = 30.0  # seconds chosen by the operator
+
+with observation(policy, deadline=monotonic() + remaining, cancel=event):
+    snapshot = capture_inventory(
+        [
+            InventoryRequest(
+                kind="container",
+                references=("name", "name"),
+                client_config=client.client_config,
+            ),
+            handle,
+        ],
+        policy=policy,
+    )
+    bulk_reload([handle], policy=policy)
+```
+
+`capture_inventory` returns an `InventorySnapshot` whose `records` are a tuple;
+`started_at` and `finished_at` are UTC timestamps delimiting the capture. Each
+`InventoryRecord` has frozen `kind` and `id` fields and a typed, deeply copied
+`payload`. Callers may mutate a payload, and each duplicate has its own detached
+copy. Reading a record doesn't inspect or change a live handle.
+
+Supported kinds are `container`, `image`, `network`, `volume`, `node`,
+`service`, `config`, `secret`, `task`, `plugin`, and `context`. Aliases follow
+the existing rules for their resource namespace. Request order and duplicates
+are retained. Handles use their exact originating client configuration; equal
+but distinct configuration objects aren't merged. Empty input launches no CLI.
+Capture stages and validates all results before returning and never changes the
+original handle caches. `bulk_reload` also stages all groups before publishing;
+its publication isn't atomic to concurrent readers.
+
+`observation` applies to synchronous list and inspect calls that execute through
+`run`. Its deadline is an absolute monotonic time, and nested scopes can only
+tighten the active limits. The scope applies to the current context; it doesn't
+automatically propagate to worker threads. Interactive, uncaptured, and stdin
+modes aren't supported inside it. An explicit capture policy still inherits an
+outer deadline and cancellation. `bulk_reload(handles, policy=policy)` is
+bounded; when the policy is omitted, an active observation scope applies. Outside
+such a scope, the existing default behavior is unchanged.
+
+The reference limit applies to each inspect invocation, not to the overall list
+or number of records. The argv limit accounts for the complete encoded command
+and native platform limits. The response limit counts combined captured stdout
+and stderr as raw bytes per invocation. `ObservationLimitError`, observation
+cancellation, and observation timeout are distinct failures; the existing
+selected-launch `DockerTimeout` remains unchanged. A timeout or cancellation
+kills and reaps the local CLI child only.
+It doesn't roll back daemon operations, and the operating system's process
+creation step can't be interrupted.
+
+These limits don't bound the complete result, staged models, decoded JSON, deep
+copies, Python object overhead, or aggregate process memory. A capture isn't a
+transactional daemon snapshot: concurrent changes can produce observations from
+different moments. There are no automatic retries or capacity guarantees.

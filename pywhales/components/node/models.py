@@ -1,3 +1,5 @@
+"""Typed Swarm node inspection snapshots and reported manager capabilities."""
+
 from datetime import datetime
 from typing import Annotated
 

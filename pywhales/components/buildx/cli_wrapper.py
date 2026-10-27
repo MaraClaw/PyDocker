@@ -1,3 +1,9 @@
+"""Docker Buildx commands, builder handles, and owned build-output streams.
+
+Builds and Bake operations invoke the configured Docker CLI and Buildx plugin.
+Registry manifest operations are exposed through the imagetools command group.
+"""
+
 from __future__ import annotations
 
 import builtins
@@ -48,6 +54,12 @@ _BAKE_RESULT_ADAPTER: Final = TypeAdapter(BakeResult)
 
 
 class Builder(ReloadableObject[BuilderInspectResult]):
+    """Reloadable builder handle retaining its originating client configuration.
+
+    Inspection-backed properties can invoke Buildx to refresh their snapshots.
+    Context-manager exit removes the builder, including when the body raises.
+    """
+
     def __init__(
         self,
         client_config: ClientConfig,
@@ -110,23 +122,10 @@ class Builder(ReloadableObject[BuilderInspectResult]):
         return f"pywhales.Builder(name='{self.name}', driver='{self.driver}')"
 
     def remove(self) -> None:
-        """Removes this builder. After this operation the builder cannot be used anymore.
+        """Remove this builder using its originating client configuration.
 
-        If you use the builder as a context manager, it will call this function when
-        you exit the context manager.
-
-        ```python
-        from pywhales import docker
-
-        buildx_builder = docker.buildx.create(use=True)
-        with buildx_builder:
-            docker.build(".")
-
-        # now the variable buildx_builder is not usable since we're out of the context manager.
-        # the .remove() method was called behind the scenes
-        # since it was the current builder, 'default' is now the current builder.
-        ```
-
+        Context-manager exit also calls this method. The handle does not recreate
+        a removed builder; subsequent commands can fail if it no longer exists.
         """
         BuildxCLI(self.client_config).remove(self)
 
@@ -135,6 +134,8 @@ ValidBuilder = str | Builder
 
 
 class BuildxCLI(DockerCLICaller):
+    """Buildx command group sharing the client's connection and execution policy."""
+
     def __init__(self, client_config: ClientConfig) -> None:
         super().__init__(client_config)
         self.imagetools = ImagetoolsCLI(self.client_config)
@@ -329,30 +330,36 @@ class BuildxCLI(DockerCLICaller):
         return_config: bool = True,
         timeout: float | None = None,
     ) -> BakeResult | str | MappedProcessStream[str] | None:
-        """Bake is similar to make, it allows you to build things declared in a file.
+        """Build Bake targets or query their configuration or frontend reports.
 
-        For example it allows you to build multiple docker image in parallel.
+        Work starts during the call. A normal blocking build runs Bake and then,
+        by default, a separate invocation with the same options, targets, and
+        variables plus `--print`. That follow-up queries configuration; it is not
+        a snapshot captured from the build. Reports and streams skip this query.
 
-        The CLI docs is [here](https://github.com/docker/buildx#buildx-bake-options-target)
-        and it contains a lot more information.
+        Streaming starts the local CLI before returning. Exhaust the returned
+        stream, use its context manager, or call `close()` when stopping early.
+        Closing cancels and reaps the local CLI, not daemon-side build work.
 
-        Parameters:
+        Args:
             targets: Targets or groups of targets to build.
             builder: The builder to use.
-            files: Build definition file(s)
-            load: Shorthand for `set=["*.output=type=docker"]`
+            files: Build definition files, in CLI argument order.
+            load: Request the Docker image exporter for the targets.
             cache: Whether to use the cache or not.
-            print: Do nothing, just returns the config.
-            progress: Set type of progress output (`"auto"`, `"none"`, `"plain"`,
-                `"quiet"`, `"rawjson"`, `"tty"`, or `False`).
-                Use plain to keep the container output on screen
-            pull: Always try to pull the newer version of the image
-            push: Shorthand for `set=["*.output=type=registry"]`
-            set: A list of overrides in the form `"targetpattern.key=value"`.
-            variables: A dict containing the values of the variables defined in the
-                hcl file. See <https://github.com/docker/buildx#hcl-variables-and-functions>
-            metadata_file: Write build results metadata to the given file
-            remote_definition: Remote context in which to find bake files
+            print: Query configuration without building. Requires `return_config`
+                and cannot be combined with streaming or a report call.
+            progress: Progress rendering mode. `False` captures stderr instead
+                of displaying it. Streaming requires a mode that emits logs.
+            pull: Always try to pull a newer base image.
+            push: Ask Bake to push target outputs to a registry.
+            set: Overrides mapping target patterns and keys to values, such as
+                `{"*.args.VERSION": "1"}`.
+            variables: Environment overrides for Bake variables on each invocation.
+            metadata_file: Local path for build-result metadata; `None` omits it.
+            stream_logs: Return decoded output chunks instead of waiting for
+                completion and returning configuration or report text.
+            remote_definition: Remote context in which to find Bake files.
             call: Frontend method to invoke. `None` and `"build"` build normally;
                 `"check"`, `"outline"` and `"targets"` return captured report text.
                 Requires a Buildx version supporting `--call`.
@@ -361,43 +368,26 @@ class BuildxCLI(DockerCLICaller):
             return_config: When `False`, skip the extra configuration query after
                 a blocking build and return `None`. Reports and streams do not
                 query configuration. Cannot be combined with `print=True`.
+            timeout: Positive finite seconds per local CLI invocation, or `None`
+                for no deadline. The build and follow-up configuration query each
+                receive a fresh budget, not one shared operation-wide deadline.
+                A stream's deadline advances even before or between iterations.
 
-        # Returns
-            By default, the configuration used for the bake (files merged + override with
-            the arguments used in the function). It's the loaded json you would
-            obtain by running `docker buildx bake --print --load my_target` if
-            your command was `docker buildx bake --load my_target`. Some example here.
-            Blocking report calls return captured text. Blocking builds with
-            `return_config=False` return `None`. Streaming returns an owned log stream.
+        Returns:
+            Configuration from `--print` when `print=True`, or from the follow-up
+            query after a normal blocking build with `return_config=True`.
+            Blocking `check`, `outline`, and `targets` calls return report text,
+            regardless of `return_config`. With `stream_logs=True`, return an
+            owned stream of decoded output chunks with source labels discarded.
+            A normal blocking build with `return_config=False` returns `None`.
 
-
-        ```python
-        from pywhales import docker
-
-        # returns the config used and runs the builds
-        config = docker.buildx.bake(["my_target1", "my_target2"], load=True)
-        assert config == {
-            "target": {
-                "my_target1": {
-                    "context": "./",
-                    "dockerfile": "Dockerfile",
-                    "tags": ["pretty_image1:1.0.0"],
-                    "target": "out1",
-                    "output": ["type=docker"]
-                },
-                "my_target2": {
-                    "context": "./",
-                    "dockerfile": "Dockerfile",
-                    "tags": ["pretty_image2:1.0.0"],
-                    "target": "out2",
-                    "output": ["type=docker"]
-                }
-            }
-        }
-
-        # returns the config only, doesn't run the builds
-        config = docker.buildx.bake(["my_target1", "my_target2"], load=True, print=True)
-        ```
+        Raises:
+            ValueError: `print=True` conflicts with streaming, a report call, or
+                `return_config=False`, or timeout is Boolean, nonpositive, or
+                nonfinite.
+            DockerTimeout: A local CLI exceeds its deadline; the CLI is killed
+                and reaped without guaranteeing cancellation of the build.
+            DockerException: A local CLI exits unsuccessfully.
         """
         validate_timeout(timeout)
         report = call in ("check", "outline", "targets")
@@ -680,28 +670,31 @@ class BuildxCLI(DockerCLICaller):
         | MappedProcessStream[str]
         | None
     ):
-        """Build a Docker image with builkit as backend.
+        """Build an image with BuildKit or invoke a frontend report method.
 
         Alias: `docker.build(...)`
 
-        A `pywhales.Image` is returned, even when using multiple tags.
-        That is because it will produce a single image with multiple tags.
-        If no image is loaded into the Docker daemon (if `push=True` for ex),
-        then `None` is returned.
+        Blocking builds recover one image only when the result is loaded and
+        identifiable. The Docker driver uses a temporary image-ID file; other
+        drivers use the first tag. An untagged Docker-container-driver load
+        returns `None` even with `load=True`. Reports skip image recovery.
 
-        Parameters:
-            context_path: The path of the build context.
-            add_hosts: Hosts to add. `add_hosts={"my_host1": "192.168.32.35"}`
-            allow: List of extra privileges.
-                Eg `allow=["network.host", "security.insecure"]`
-            attest: Attestation parameters. Eg `attest={"type": "sbom", "generator": "my_image"}`
-            build_args: The build arguments.
-                ex `build_args={"PY_VERSION": "3.7.8", "UBUNTU_VERSION": "20.04"}`.
-            build_contexts: Additional build contexts.
-                `build_contexts={[name]: [value], ...}`
-                Supports local directories, git repositories, HTTP URL to a tarball, a docker
-                image defined with a `docker-image://` prefix, and the `oci-layout://` protocol.
-                ex `build_contexts={"project2": "../path/to/project2/src", "qumu-src": "https://github.com/qemu/qemu.git"}`.
+        Streaming starts the local CLI before returning and skips image recovery.
+        Exhaust the stream, use its context manager, or call `close()` on early
+        exit. Closing reaps the local CLI but does not guarantee that daemon-side
+        builds stop. A bare loop break does not close the stream.
+
+        Args:
+            context_path: Local or remote build context accepted by Buildx.
+            add_hosts: Build-host names mapped to addresses, such as
+                `{"build.example": "192.0.2.1"}`.
+            allow: Extra build entitlements, such as `"network.host"` or
+                `"security.insecure"`; only grant them to trusted builds.
+            attest: Attestation parameters, such as `{"type": "sbom"}`.
+            build_args: Build-time variable names and values.
+            build_contexts: Named additional contexts, including local directories,
+                Git repositories, HTTP archives, `docker-image://` references,
+                and `oci-layout://` paths supported by the installed Buildx.
             builder: Specify which builder to use.
             cache: Whether or not to use the cache
             cache_from: Loads the cache
@@ -718,40 +711,37 @@ class BuildxCLI(DockerCLICaller):
                 Supported external cache backends with the Docker driver depend
                 on the containerd image store being enabled. For GitHub Actions
                 cache, `docker-container` is the conservative recommendation.
-            file: The path of the Dockerfile
-            labels: Dict of labels to add to the image.
+            file: Local Dockerfile path; `None` leaves selection to Buildx.
+            labels: Image label names and values.
                 `labels={"very-secure": "1", "needs-gpu": "0"}` for example.
-            load: Shortcut for `output=dict(type="docker")` If `True`,
-                `docker.buildx.build` will return a `pywhales.Image`.
-            network: which network to use when building the Docker image
+            load: Request loading with the Docker exporter. This alone does not
+                guarantee that an image handle can be recovered.
+            metadata_file: Path where Buildx should write build metadata; `None`
+                omits `--metadata-file`.
+            network: Network mode for build execution; `None` omits the option.
             output: Output destination
                 (format: `output={"type": "local", "dest": "path"}`
                 Possible output types are
                 `["local", "tar", "oci", "docker", "image", "registry"]`.
                 See [this link](https://github.com/docker/buildx#-o---outputpath-typetypekeyvalue)
                 for more details about each exporter.
-            platforms: List of target platforms when building the image. Ex:
+            platforms: Target platforms when building the image, such as
                 `platforms=["linux/amd64", "linux/arm64"]`
-            progress: Set type of progress output (`"auto"`, `"none"`, `"plain"`,
-                `"quiet"`, `"rawjson"`, `"tty"`, or `False`).
-                Use plain to keep the container output on screen
-            provenance: Shortand for `attest={"type": "provenance"}`.
-                Eg `provenance=True` or `provenance=dict(mode="max")`. `provenance=False` might be needed
-                if you are having the
-                issue [Default image output from buildx v0.10 cannot run on Google Cloud Run or AWS Lambda](https://github.com/docker/buildx/issues/1533)
-            pull: Always attempt to pull a newer version of the image
-            push: Shorthand for `output=dict(type="registry")`.
+            progress: Progress rendering mode. `False` captures stderr instead
+                of displaying it and cannot be combined with streaming.
+            provenance: Enable, disable, or configure provenance attestations.
+                `None` leaves the Buildx default unchanged.
+            pull: Always attempt to pull a newer base image.
+            push: Request the registry exporter.
             sbom: Shorthand for `attest={"type": "sbom"}`. Eg `sbom=True`.
-            secrets: One or more secrets passed as string(s). For example
-                `secrets="id=aws,src=/home/my_user/.aws/credentials"`
-            ssh: SSH agent socket or keys to expose to the build
-                (format is `default|<id>[=<socket>|<key>[,<key>]]` as a string)
+            secrets: Secret specifications, such as "id=build,src=./build.secret".
+                Only expose trusted local files to trusted builds.
+            ssh: SSH agent socket or keys to expose to a trusted build, using
+                Buildx's `default` or `<id>[=<socket>|<key>[,<key>]]` syntax.
             tags: Tag or tags to put on the resulting image.
             target: Set the target build stage to build.
-            stream_logs: If `True` this function will return an iterator of strings.
-                You can then read the logs as they arrive.
-            metadata_file: Path where build metadata should be written. Equivalent
-                to the CLI flag `--metadata-file` and only used when provided.
+            stream_logs: Return an owned stream of decoded output chunks instead
+                of a recovered image or captured report.
             call: Frontend method to invoke. `None` and `"build"` build normally;
                 `"check"`, `"outline"` and `"targets"` return captured report text
                 without image recovery. Requires Buildx support for `--call`.
@@ -759,12 +749,25 @@ class BuildxCLI(DockerCLICaller):
                 repeated `--no-cache-filter` flags.
             annotations: Image annotation(s), passed as repeated `--annotation`
                 flags. Requires a Buildx version supporting these flags.
+            timeout: Positive finite seconds for the local build CLI, or `None`
+                for no deadline. Builder inspection before launch and image
+                inspection after completion are outside this budget. Streaming
+                deadlines advance before and between iterations.
 
-        # Returns
-            A `pywhales.Image` if a Docker image is loaded
-            in the daemon after the build (the default behavior when
-            calling `docker.build(...)`). Otherwise, `None`. Blocking report calls
-            return captured text instead. Streaming returns an owned log stream.
+        Returns:
+            One image handle, retaining the originating client configuration,
+            for an identifiable loaded result, including builds with many tags.
+            Return `None` for a build whose result is not loaded or recoverable.
+            Blocking `check`, `outline`, and `targets` calls return report text.
+            With `stream_logs=True`, return an owned stream whose text chunks
+            combine stdout and stderr without source labels.
+
+        Raises:
+            ValueError: Streaming is combined with `progress=False`, `"tty"`,
+                `"none"`, or `"quiet"`, or `timeout` is not positive and finite.
+            DockerTimeout: The local build CLI exceeds its deadline; it is killed
+                and reaped without guaranteeing cancellation of the build.
+            DockerException: A Buildx or image-inspection command fails.
         """
         validate_timeout(timeout)
         tags = to_list(tags)
@@ -908,14 +911,15 @@ class BuildxCLI(DockerCLICaller):
         use: bool = False,
         append: bool = False,
     ) -> Builder:
-        """Create a new builder instance
+        """Create a builder instance or append a node to an existing builder.
 
-        Parameters:
-            context_or_endpoint:
-            bootstrap: Boot builder after creation
-            buildkitd_flags: Flags for buildkitd daemon
-            config: BuildKit config file
-            platforms: Comma-separated list of platforms of the form OS/architecture/variant. Ex:
+        Args:
+            context_or_endpoint: Docker context or endpoint for the node; `None`
+                leaves endpoint selection to Buildx.
+            bootstrap: Boot the builder after creation.
+            buildkitd_flags: Flags for the BuildKit daemon.
+            config: Local BuildKit configuration file; `None` omits the option.
+            platforms: Platforms of the form OS/architecture/variant, such as
                 `platforms=["linux/amd64", "linux/arm64"]`
             driver: Driver to use (available: [kubernetes docker docker-container])
             driver_options: Options for the driver.
@@ -925,8 +929,9 @@ class BuildxCLI(DockerCLICaller):
             append: Append a node to the current builder instance, in this case
                 `name` must be provided.
 
-        # Returns
-            A `pywhales.Builder` object.
+        Returns:
+            A builder handle using the originating client configuration. Using
+            it as a context manager removes the builder on exit.
         """
         full_cmd = Command([*self.docker_cmd, "buildx", "create"])
 
@@ -949,7 +954,11 @@ class BuildxCLI(DockerCLICaller):
         return Builder(self.client_config, run(full_cmd))
 
     def disk_usage(self) -> Never:
-        """Not yet implemented"""
+        """Raise NotImplementedError because disk usage is not implemented.
+
+        Raises:
+            NotImplementedError: This operation has no implementation.
+        """
         raise NotImplementedError
 
     def inspect(
@@ -957,15 +966,19 @@ class BuildxCLI(DockerCLICaller):
         x: ValidBuilder | None = None,
         bootstrap: bool = False,
     ) -> Builder:
-        """Returns a builder instance from the name.
+        """Return the selected builder with a snapshot from the builder listing.
 
-        Parameters:
+        Args:
             x: If `None` (the default), returns the current builder. If a string is provided,
                 the builder that has this name is returned.
             bootstrap: If set to True, ensure builder has booted before inspecting.
 
-        # Returns
-            A `pywhales.Builder` object.
+        Returns:
+            The builder matching the name reported by `buildx inspect`.
+
+        Raises:
+            ValueError: The inspected builder is absent from the subsequent list,
+                for example because it was concurrently removed.
         """
         # Sadly, docker buildx inspect has no json support,
         # so, it's ugly, but we grab the name from the first line and
@@ -986,7 +999,7 @@ class BuildxCLI(DockerCLICaller):
         )
 
     def list(self) -> builtins.list[Builder]:
-        """Returns the list of `pywhales.Builder` available."""
+        """Return available builders with seeded snapshots and unspecified order."""
         full_cmd = Command(
             [*self.docker_cmd, "buildx", "ls", "--format", "{{json . }}"]
         )
@@ -1038,13 +1051,18 @@ class BuildxCLI(DockerCLICaller):
     ) -> MappedProcessStream[str] | None:
         """Remove build cache on the current builder.
 
-        Parameters:
+        The CLI starts during the call. Close streamed output when stopping early
+        or use its context manager; closing does not undo cache removal.
+
+        Args:
             all: Remove all cache, not just dangling layers
             filters: Filters to use, for example `filters=dict(until="24h")`
-            stream_logs: If `True` this function will return an iterator of strings.
-                You can then read the logs as they arrive. If `False` (the default value), then
-                the function returns `None`, but when it returns, then the prune operation has already been
-                done.
+            stream_logs: Return owned decoded output instead of waiting for the
+                local CLI to finish.
+
+        Returns:
+            An owned stream of text chunks when `stream_logs=True`; otherwise
+            `None` after the CLI completes.
         """
         full_cmd = Command([*self.docker_cmd, "buildx", "prune", "--force"])
         full_cmd.add_flag("--all", all)
@@ -1056,9 +1074,9 @@ class BuildxCLI(DockerCLICaller):
         run(full_cmd)
 
     def remove(self, builder: Builder | str) -> None:
-        """Remove a builder
+        """Remove a builder.
 
-        Parameters:
+        Args:
             builder: The builder to remove
         """
         full_cmd = Command([*self.docker_cmd, "buildx", "rm"])
@@ -1067,10 +1085,10 @@ class BuildxCLI(DockerCLICaller):
         run(full_cmd)
 
     def stop(self, builder: ValidBuilder | None) -> None:
-        """Stop the builder instance
+        """Stop the builder instance.
 
-        Parameters:
-            builder: The builder to stop. If `None` (the default value),
+        Args:
+            builder: The builder to stop. If `None`,
                 the current builder is stopped.
         """
         full_cmd = Command([*self.docker_cmd, "buildx", "stop"])
@@ -1081,9 +1099,9 @@ class BuildxCLI(DockerCLICaller):
     def use(
         self, builder: Builder | str, default: bool = False, global_: bool = False
     ) -> None:
-        """Set the current builder instance
+        """Set the current builder instance.
 
-        Parameters:
+        Args:
             builder: The builder to use
             default: Set builder as default for the current context
             global_: Builder will be used even when changing contexts
@@ -1096,25 +1114,19 @@ class BuildxCLI(DockerCLICaller):
         run(full_cmd)
 
     def version(self) -> str:
-        """Returns the docker buildx version as a string.
-
-        ```python
-        from pywhales import docker
-
-        version = docker.buildx.version()
-        print(version)
-        # "github.com/docker/buildx v0.4.2 fb7b670b764764dc4716df3eba07ffdae4cc47b2"
-        ```
-        """
+        """Return the Docker Buildx version text reported by the CLI."""
         full_cmd = Command([*self.docker_cmd, "buildx", "version"])
         return run(full_cmd)
 
     def is_installed(self) -> bool:
-        """Returns `True` if docker buildx is installed and working.
+        """Check whether successful Buildx help output identifies the plugin.
 
-        If it's not installed, head
-        to [the installation page](https://github.com/docker/buildx#installing)
-        and follow the instructions.
+        Returns:
+            Whether the help output contains `buildx`.
+
+        Raises:
+            DockerException: The CLI help command fails, including when the
+                plugin is unavailable. This failure does not return `False`.
         """
         full_cmd = Command([*self.docker_cmd, "buildx", "--help"])
         help_output = run(full_cmd)
@@ -1131,7 +1143,23 @@ def stream_buildx_logs(
     *,
     timeout: float | None = None,
 ) -> MappedProcessStream[str]:
-    """Decode Buildx output while retaining close and context ownership."""
+    """Start a Buildx CLI stream and decode output with replacement.
+
+    Args:
+        full_cmd: Complete CLI arguments, preserving the originating policy.
+        env: Environment overrides; `None` adds no overrides.
+        timeout: Positive finite seconds from local CLI launch, or `None` for
+            no deadline. The deadline advances even when output is not consumed.
+
+    Returns:
+        An owned stream of decoded stdout and stderr chunks with source labels
+        discarded. Exhaust it or use `close()` or a context manager on early exit;
+        cleanup reaps the local CLI without guaranteeing daemon-side cancellation.
+
+    Raises:
+        DockerTimeout: The local CLI exceeds its deadline.
+        DockerException: The local CLI exits unsuccessfully.
+    """
     stream = stream_stdout_and_stderr(full_cmd, env=env, timeout=timeout)
     return MappedProcessStream(
         stream, (value.decode(errors="replace") for _, value in stream)

@@ -1,3 +1,9 @@
+"""Buildx option and result contracts with simulated commands and local children.
+
+The commands fixture replaces subprocess responses and rejects process launches.
+Streaming ownership cases instead start real Python children, not Docker builds.
+"""
+
 import json
 import sys
 from collections.abc import Mapping, Sequence
@@ -24,6 +30,18 @@ def client() -> DockerClient:
 
 @pytest.fixture
 def commands(mocker: MockerFixture) -> Mock:
+    """Record simulated Buildx requests and reject real process launches.
+
+    Known inspection, build, and bake commands return fixture bytes. Simulated
+    builds write requested image-ID files; pytest restores all patches afterward.
+
+    Args:
+        mocker: Installs the subprocess.run replacement and Popen rejection.
+
+    Returns:
+        The mutable subprocess.run mock, with requests in call_args_list.
+    """
+
     def execute(
         args: list[str],
         *,

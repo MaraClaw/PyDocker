@@ -1,3 +1,10 @@
+"""Static Buildx overload contracts for builds, reports, and streamed output.
+
+The ty check analyzes these _check_* bodies without executing their Docker calls.
+Pytest does not collect the functions; positional and dynamic-mode call shapes
+are type-checker contracts rather than executable examples.
+"""
+
 from typing import Literal, assert_type
 
 from pywhales import DockerClient, Image, docker

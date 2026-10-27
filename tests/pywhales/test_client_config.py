@@ -352,7 +352,7 @@ def test_pretty_exception_message_and_report(mocker: MockerFixture) -> None:
 
 
 def test_compose_env_file() -> None:
-    """Test that the deprecated `compose_env_file` gives a warning, and adds the `--env-file` argument to the compose command"""
+    """Verify the legacy env-file warning and its single command-line option."""
     with pytest.warns(UserWarning):
         example_env_file_name = "example.env"
         client_config = ClientConfig(compose_env_file=example_env_file_name)
@@ -371,7 +371,7 @@ def test_compose_env_file() -> None:
     ids=["multiple_files", "single_file"],
 )
 def test_compose_env_files(compose_env_files: Sequence[str]) -> None:
-    """Test that using only `compose_env_files` adds all the files to the command line arguments"""
+    """Preserve every configured env-file argument in input order."""
     client_config = ClientConfig(compose_env_files=compose_env_files)
     # Since we are operating of a list of commands, we first find the indices of the `--env-file` argument, then we check that the next argument is the file name.
     indices = [
@@ -385,7 +385,7 @@ def test_compose_env_files(compose_env_files: Sequence[str]) -> None:
 
 
 def test_compose_env_files_and_env_file() -> None:
-    """Test that using both `compose_env_files` and `compose_env_file` gives a warning, and only uses `compose_env_files`"""
+    """Prefer env-files over the deprecated single-file option and warn."""
     env_files_input = "example1.env"
     env_file_input = "example2.env"
 
@@ -403,7 +403,15 @@ def test_compose_env_files_and_env_file() -> None:
 
 @contextmanager
 def _create_temp_env_files() -> Generator[tuple[Path, Path]]:
-    """Creates two temporary env files and yields their paths. The files are deleted after the context manager is exited."""
+    """Write fixed-name env files on context entry and yield them in order.
+
+    Files live in the checkout's component fixture directory, not a private temp
+    directory. Existing contents are overwritten; unlinking occurs only when
+    execution resumes normally after the yield, not on an exception in the body.
+
+    Yields:
+        The file defining A=1 and B=1, followed by the file overriding B=2.
+    """
     path = PROJECT_ROOT / "tests/pywhales/components"
     env_file_1 = path / "example1.env"
     with env_file_1.open("w") as f:
@@ -418,18 +426,11 @@ def _create_temp_env_files() -> Generator[tuple[Path, Path]]:
 
 
 def test_run_compose_command_with_env_file() -> None:
-    """Test that checks the configuration for the compose stack and checks that the env files are loaded correctly
+    """Verify Compose interpolation defaults and ordered env-file overrides.
 
-    The docker compose service, `service_using_env_variables`, is defined in `dummy_compose.yml` and uses the env variables `A` and `B`.
-    If no env files are provided, the values of `A` and `B` are set to a default value of `0` in the service.
-    We check if the values of `A` and `B` are set to the values in the env files.
-
-    The cases tested are:
-    * Single env file using the old `compose_env_file` argument
-    * Single env file using the new `compose_env_files` argument
-    * Multiple env files using the new `compose_env_files` argument
-        * Later env files should override the values of earlier env files
-        * The order of the env files should matter
+    Requires the Docker CLI and Compose plugin to render configuration. Exercise
+    both single-file APIs and both file orders; later files override earlier B
+    values while absent A and B values use the service's zero defaults.
     """
     with _create_temp_env_files() as (env_file_1, env_file_2):
         COMPOSE_FILE = PROJECT_ROOT / "tests/pywhales/components/dummy_compose.yml"

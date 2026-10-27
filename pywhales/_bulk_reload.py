@@ -1,3 +1,9 @@
+"""Grouped resource inspection with deferred cache publication.
+
+Validate and stage every group before updating original handles. Publication is
+sequential, not a transaction across the daemon or concurrent cache readers.
+"""
+
 from collections.abc import Callable, Sequence
 from functools import partial
 from typing import assert_never
@@ -31,6 +37,17 @@ type SupportedResource = (
 
 
 def _identity(resource: SupportedResource) -> str:
+    """Return the stored identity without refreshing the resource.
+
+    Args:
+        resource: Handle whose immutable identity has already been resolved.
+
+    Returns:
+        The nonempty stored identity.
+
+    Raises:
+        ParsingError: If the stored identity is missing or empty.
+    """
     identity = resource._get_immutable_id()
     if identity is None or identity == "":
         raise ParsingError("Missing immutable inspect identity")
@@ -40,6 +57,14 @@ def _identity(resource: SupportedResource) -> str:
 def _inspect_group(
     resources: Sequence[SupportedResource],
 ) -> Sequence[SupportedResource]:
+    """Inspect a nonempty group sharing a resource kind and config instance.
+
+    Args:
+        resources: Handles grouped by exact kind and originating config identity.
+
+    Returns:
+        Newly inspected handles in requested order, leaving originals unchanged.
+    """
     first = resources[0]
     references = [_identity(resource) for resource in resources]
     config = first.client_config
@@ -74,6 +99,19 @@ def _publication[InspectResultT, ReferenceT: str | None](
     original: ReloadableObjectFromJson[InspectResultT, ReferenceT],
     staged: ReloadableObjectFromJson[InspectResultT, ReferenceT],
 ) -> Callable[[], None]:
+    """Prepare a cache update after verifying a staged snapshot's identity.
+
+    Args:
+        original: Handle that will receive the snapshot when the callback runs.
+        staged: Inspected handle containing the proposed snapshot.
+
+    Returns:
+        A callback that installs the snapshot and updates its refresh timestamp.
+
+    Raises:
+        ParsingError: If the snapshot is absent or its identity differs from the
+            original handle's stored identity.
+    """
     snapshot = staged._inspect_result
     if snapshot is None:
         raise ParsingError("Missing staged inspect snapshot")
@@ -87,6 +125,19 @@ def _publication[InspectResultT, ReferenceT: str | None](
 def _prepare_publication(
     original: SupportedResource, staged: SupportedResource
 ) -> Callable[[], None]:
+    """Match resource kinds and prepare a deferred snapshot update.
+
+    Args:
+        original: Existing resource handle to refresh.
+        staged: Corresponding newly inspected handle.
+
+    Returns:
+        A validated publication callback that has not yet changed the original.
+
+    Raises:
+        TypeError: If the handles have different or unsupported resource kinds.
+        ParsingError: If the staged snapshot or its identity is invalid.
+    """
     match original, staged:
         case Container() as target, Container() as inspected:
             return _publication(target, inspected)
@@ -115,6 +166,27 @@ def _prepare_publication(
 
 
 def bulk_reload(docker_objects: Sequence[object]) -> None:
+    """Inspect supported resources and publish their caches after all groups pass.
+
+    Validate every input before resolving any CLI executable. Group by exact
+    config object identity and resource kind, inspecting each distinct handle
+    once. Separate handles for the same resource each receive a snapshot.
+    Inspection or validation failure leaves original caches and timestamps
+    unchanged. Successful publication updates handles sequentially and does not
+    provide a daemon transaction or atomic visibility to concurrent readers.
+
+    Args:
+        docker_objects: Container, image, network, volume, node, service, config,
+            secret, task, plugin, or context handles. Empty input is a no-op.
+
+    Raises:
+        TypeError: If any input kind is unsupported or inspection returns a
+            mismatched resource kind.
+        ParsingError: If an identity or snapshot is missing or inconsistent.
+        ValueError: If inspection returns a different number of handles.
+        ClientNotFoundError: If a group's configured executable cannot be found.
+        DockerException: If a group's inspect command fails.
+    """
     groups: dict[tuple[int, type[SupportedResource]], list[SupportedResource]] = {}
     seen: set[int] = set()
     for resource in docker_objects:

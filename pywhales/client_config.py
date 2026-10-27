@@ -1,3 +1,11 @@
+"""Shared CLI configuration, argument builders, and inspection-backed handles.
+
+Executable lookup is lazy. Resource handles retain their originating config,
+resolve mutable references to stable identities, and refresh cached snapshots
+on demand. Inspect parsing follows that config's diagnostic confidentiality
+policy.
+"""
+
 import json
 import os
 import shutil
@@ -29,38 +37,127 @@ class ClientNotFoundError(Exception):
 
 
 class Command(list[object]):
+    """Mutable CLI argument list preserving values until subprocess launch.
+
+    Helpers append options without shell quoting. Addition returns another
+    Command so option helpers remain available after command composition.
+    """
+
     def add_simple_arg(self, name: str, value: object) -> None:
+        """Append an option and value unless the value is None.
+
+        Args:
+            name: Option spelling to append.
+            value: Value to retain unchanged; zero, false, and empty strings are
+                not omitted.
+        """
         if value is not None:
             self.extend([name, value])
 
     def add_flag(self, name: str, value: bool) -> None:
+        """Append a valueless option when enabled.
+
+        Args:
+            name: Flag spelling to append.
+            value: Whether to include the flag.
+        """
         if value:
             self.append(name)
 
     def add_args_iterable(self, arg_name: str, values: Iterable[object]) -> None:
+        """Append a repeated option for each value in iteration order.
+
+        Args:
+            arg_name: Option spelling repeated before every value.
+            values: Values to consume; an empty iterable appends nothing.
+        """
         for value in values:
             self.extend([arg_name, value])
 
     def add_args_iterable_or_single(
         self, arg_name: str, iterable_or_single: object
     ) -> None:
+        """Append repeated options after normalizing a scalar or iterable.
+
+        Args:
+            arg_name: Option spelling repeated before every value.
+            iterable_or_single: Scalar or iterable accepted by to_list; strings
+                and bytes remain single values rather than being split.
+        """
         for value in to_list(iterable_or_single):
             self.extend([arg_name, value])
 
     def add_args_mapping(
         self, arg_name: str, mapping: Mapping[str, object], *, separator: str = "="
     ) -> None:
+        """Append repeated options containing formatted mapping entries.
+
+        Args:
+            arg_name: Option spelling repeated before each entry.
+            mapping: Entries emitted in mapping iteration order.
+            separator: Text joining each key and value; defaults to ``=``.
+        """
         self.add_args_iterable(
             arg_name, utils.format_mapping_for_cli(mapping, separator)
         )
 
     @override
     def __add__[ElementT](self, other: list[ElementT]) -> Command:
+        """Return a Command containing this list followed by the other list.
+
+        Args:
+            other: Arguments to append without mutating either input list.
+
+        Returns:
+            A new command retaining the original argument objects.
+        """
         return Command(super().__add__(other))
 
 
 @dataclass
 class ClientConfig:
+    """Mutable settings shared by command groups and originating resources.
+
+    Construction validates stream budgets without looking up the CLI or
+    contacting a daemon. Executable-prefix lookup is cached on first use;
+    command globals are rebuilt from current settings for each command.
+
+    Attributes:
+        config: Client configuration directory; ``None`` leaves CLI selection.
+        context: Context override, omitted when ``None``.
+        debug: Whether to emit the Docker debug flag; only true emits it.
+        host: Daemon endpoint override, omitted when ``None``.
+        log_level: Docker CLI logging level, omitted when ``None``.
+        tls: Whether to emit the TLS flag; only true emits it.
+        tlscacert: Trusted CA certificate path, omitted when ``None``.
+        tlscert: Client certificate path, omitted when ``None``.
+        tlskey: Client private-key path, omitted when ``None``.
+        tlsverify: Whether to emit TLS verification; only true emits it.
+        compose_files: Ordered Compose configuration files.
+        compose_profiles: Compose profiles enabled through repeated options.
+        compose_env_file: Deprecated single environment file, ignored when
+            compose_env_files is nonempty.
+        compose_env_files: Ordered environment files; later files override
+            earlier values according to Compose semantics.
+        compose_project_name: Compose project-name override.
+        compose_project_directory: Compose project-directory override.
+        compose_compatibility: Whether to emit the Compose compatibility flag.
+        client_call: Executable followed by any fixed prefix arguments.
+        client_type: Declared Docker-compatible client behavior, not an
+            executable autodetection result.
+        compose_dry_run: Whether Compose commands request a dry run.
+        compose_parallel: Compose concurrency limit; ``None`` omits the option.
+        compose_progress: Default Compose progress mode; ``None`` omits it.
+        image_stream_buffer_bytes: Independent pull/push byte-budget override;
+            ``None`` falls back to the general budget at operation time.
+        stream_buffer_bytes: Positive stream byte budget, or ``None`` for
+            unbounded output. Queue payloads, unfinished records, and stderr
+            history have separate limits, not one total-memory cap.
+        raw_diagnostics: Per-client opt-in to confidential automatic diagnostic
+            values. Safe defaults do not redact returned data or raw exception
+            attributes, uncaptured terminal output, or caller-owned logging.
+    """
+
     config: ValidPath | None = None
     context: str | None = None
     debug: bool | None = None
@@ -90,6 +187,12 @@ class ClientConfig:
     raw_diagnostics: bool = False
 
     def __post_init__(self) -> None:
+        """Validate configured output budgets without probing the CLI.
+
+        Raises:
+            ValueError: If either budget is not a positive integer or ``None``;
+                booleans are not accepted as integers.
+        """
         for name, budget in (
             ("image_stream_buffer_bytes", self.image_stream_buffer_bytes),
             ("stream_buffer_bytes", self.stream_buffer_bytes),
@@ -98,6 +201,15 @@ class ClientConfig:
                 raise ValueError(f"{name} must be a positive integer or None")
 
     def get_client_call_with_path(self) -> list[Path | str]:
+        """Resolve and cache the executable prefix on first use.
+
+        Returns:
+            The cached list containing the resolved executable path and fixed
+            prefix arguments. Subsequent calls reuse this list.
+
+        Raises:
+            ClientNotFoundError: If the first lookup cannot find the executable.
+        """
         if self._client_call_with_path is None:
             self._client_call_with_path = [
                 Path(self._get_docker_path()),
@@ -107,6 +219,11 @@ class ClientConfig:
         return self._client_call_with_path
 
     def _get_docker_path(self) -> str:
+        """Return the executable path found for the first client_call argument.
+
+        Raises:
+            ClientNotFoundError: If executable lookup cannot resolve the command.
+        """
         which_result = shutil.which(self.client_call[0])
         if which_result is None:
             raise ClientNotFoundError(
@@ -118,6 +235,7 @@ class ClientConfig:
 
     @property
     def docker_cmd(self) -> Command:
+        """Return current Docker globals with the originating policy carrier."""
         result = Command(self.get_client_call_with_path())
         result[0] = PolicyExecutable(str(result[0]), self)
 
@@ -155,10 +273,27 @@ class ClientConfig:
 
     @property
     def docker_compose_cmd(self) -> Command:
+        """Return Docker and Compose globals before a Compose subcommand."""
         return self.get_compose_command()
 
     def get_compose_command(self, *, progress: str | None = None) -> Command:
-        """Build Compose globals, optionally overriding progress for one command."""
+        """Build Compose globals, optionally overriding progress for one command.
+
+        Nonempty compose_env_files takes precedence over compose_env_file and
+        preserves file order. Using the deprecated single-file setting warns,
+        including when that setting is ignored in favor of multiple files.
+
+        Args:
+            progress: Per-command progress override; ``None`` uses the configured
+                default without mutating it.
+
+        Returns:
+            The executable prefix and Docker globals, followed by ``compose``
+            and Compose globals ready for a subcommand.
+
+        Raises:
+            ClientNotFoundError: If initial executable lookup fails.
+        """
         base_cmd = Command([*self.docker_cmd, "compose"])
         base_cmd.add_args_iterable_or_single("--file", self.compose_files)
         base_cmd.add_args_iterable_or_single("--profile", self.compose_profiles)
@@ -188,19 +323,40 @@ class ClientConfig:
 
 
 class DockerCLICaller:
+    """Command-group base retaining the originating shared client config.
+
+    Attributes:
+        client_config: Config retained by reference for commands and diagnostics.
+    """
+
     def __init__(self, client_config: ClientConfig) -> None:
+        """Retain a config without looking up or launching its executable.
+
+        Args:
+            client_config: Settings shared with the originating client.
+        """
         self.client_config = client_config
 
     @property
     def docker_cmd(self) -> Command:
+        """Return a fresh Docker prefix using current shared settings."""
         return self.client_config.docker_cmd
 
     @property
     def docker_compose_cmd(self) -> Command:
+        """Return a fresh Compose prefix using current shared settings."""
         return self.client_config.docker_compose_cmd
 
 
 class ReloadableObject[InspectResultT, ReferenceT: str | None = str](DockerCLICaller):
+    """Resource identity with a short-lived, inspection-backed snapshot cache.
+
+    Resolve mutable references once, then inspect using the stored immutable
+    identity. Snapshot access can run the CLI when data is absent or at least
+    CACHE_VALIDITY_PERIOD seconds old. Equality includes config equality as
+    well as identity, rather than comparing display names alone.
+    """
+
     def __init__(
         self,
         client_config: ClientConfig,
@@ -208,6 +364,20 @@ class ReloadableObject[InspectResultT, ReferenceT: str | None = str](DockerCLICa
         reference_or_id: ReferenceT,
         is_immutable_id: bool = False,
     ) -> None:
+        """Bind a resource to its config and resolve its stable identity.
+
+        Args:
+            client_config: Originating config retained by reference.
+            id_in_inspect: Snapshot attribute holding the immutable identity.
+            reference_or_id: Reference to resolve, or a known immutable identity.
+            is_immutable_id: Skip initial inspection when true; later snapshot
+                access still fetches data on demand.
+
+        Raises:
+            ClientNotFoundError: If initial inspection cannot resolve the CLI.
+            DockerException: If required initial inspection fails.
+            ParsingError: If the concrete resource cannot parse its inspection.
+        """
         super().__init__(client_config)
         self._last_refreshed_time = datetime.min
         self._inspect_result: InspectResultT | None = None
@@ -221,6 +391,15 @@ class ReloadableObject[InspectResultT, ReferenceT: str | None = str](DockerCLICa
 
     @override
     def __eq__(self, other: object) -> bool:
+        """Compare stored identities and config equality without refreshing.
+
+        Args:
+            other: Object to compare against this resource handle.
+
+        Returns:
+            Whether both objects are reloadable handles with equal identities
+            and configs.
+        """
         if not isinstance(other, ReloadableObject):
             return False
         return (
@@ -230,41 +409,72 @@ class ReloadableObject[InspectResultT, ReferenceT: str | None = str](DockerCLICa
 
     @override
     def __str__(self) -> str:
+        """Return the stored identity without inspecting the resource.
+
+        Raises:
+            TypeError: If this resource has no string identity.
+        """
         reference = self._get_immutable_id()
         if reference is None:
             raise TypeError("__str__ returned non-string (type NoneType)")
         return reference
 
     def _needs_reload(self) -> bool:
+        """Return whether the cached snapshot's validity period has elapsed."""
         return (datetime.now() - self._last_refreshed_time) >= timedelta(
             seconds=CACHE_VALIDITY_PERIOD
         )
 
     def reload(self) -> None:
+        """Inspect the stored identity and replace the cached snapshot now.
+
+        Failed fetches or parsing leave the existing snapshot and timestamp
+        unchanged. The resource itself is not modified by inspection.
+        """
         self._reload()
 
     def _reload(self) -> InspectResultT:
+        """Fetch, cache, and return a snapshot for the stored identity."""
         inspect_result = self._fetch_and_parse_inspect_result(self._immutable_id)
         self._set_inspect_result(inspect_result)
         return inspect_result
 
     def _fetch_and_parse_inspect_result(self, reference: ReferenceT) -> InspectResultT:
+        """Define the subclass hook for fetching one parsed snapshot.
+
+        Args:
+            reference: CLI reference or stored identity to inspect.
+
+        Returns:
+            The snapshot supplied by a concrete implementation.
+
+        Raises:
+            NotImplementedError: When this base hook is called directly.
+        """
         raise NotImplementedError
 
     def _get_inspect_result(self) -> InspectResultT:
+        """Return cached data, fetching when it is absent or expired."""
         if self._inspect_result is None or self._needs_reload():
             return self._reload()
         return self._inspect_result
 
     def _set_inspect_result(self, inspect_result: InspectResultT) -> None:
+        """Install a snapshot and mark its refresh time as now.
+
+        Args:
+            inspect_result: Already parsed snapshot to publish without fetching.
+        """
         self._inspect_result = inspect_result
         self._last_refreshed_time = datetime.now()
 
     def _get_immutable_id(self) -> ReferenceT:
+        """Return the stored identity without triggering snapshot refresh."""
         return self._immutable_id
 
     @override
     def __hash__(self) -> int:
+        """Return a hash of the stored identity without inspecting the resource."""
         # maybe we can do better.
         return hash(self._get_immutable_id())
 
@@ -272,14 +482,56 @@ class ReloadableObject[InspectResultT, ReferenceT: str | None = str](DockerCLICa
 class ReloadableObjectFromJson[InspectResultT, ReferenceT: str | None = str](
     ReloadableObject[InspectResultT, ReferenceT]
 ):
+    """Inspection-backed handle with JSON parsing and diagnostic safeguards.
+
+    Safe failures suppress input-bearing validation chains and response dumps.
+    Raw diagnostic opt-in may retain those chains and write invalid snapshots
+    to temporary files, which must be treated as confidential.
+    """
+
     def _fetch_inspect_result_json(self, reference: ReferenceT) -> JsonObject:
+        """Define the subclass hook for fetching one JSON inspection object.
+
+        Args:
+            reference: CLI reference or stored identity to inspect.
+
+        Returns:
+            The JSON object supplied by a concrete implementation.
+
+        Raises:
+            NotImplementedError: When this base hook is called directly.
+        """
         raise NotImplementedError
 
     def _parse_json_object(self, json_object: JsonObject) -> InspectResultT:
+        """Define the subclass hook for parsing an inspection object.
+
+        Args:
+            json_object: Metadata to convert to the concrete resource model.
+
+        Returns:
+            The snapshot supplied by a concrete implementation.
+
+        Raises:
+            NotImplementedError: When this base hook is called directly.
+        """
         raise NotImplementedError
 
     @override
     def _fetch_and_parse_inspect_result(self, reference: ReferenceT) -> InspectResultT:
+        """Fetch and parse one snapshot using the client's diagnostic policy.
+
+        Args:
+            reference: CLI reference or stored identity to inspect.
+
+        Returns:
+            The parsed snapshot without publishing it to this handle's cache.
+
+        Raises:
+            ParsingError: If safe-mode fetching or model parsing rejects JSON.
+            pydantic.ValidationError: If raw-mode fetching rejects the response.
+            DockerException: If the concrete inspect command fails.
+        """
         try:
             json_object = self._fetch_inspect_result_json(reference)
         except pydantic.ValidationError:
@@ -291,6 +543,24 @@ class ReloadableObjectFromJson[InspectResultT, ReferenceT: str | None = str](
     def _parse_inspect_results(
         self, json_str: str, references: Sequence[str]
     ) -> list[InspectResultT]:
+        """Validate a whole batch's JSON, count, and resolved identities.
+
+        Repeated references must resolve consistently. This does not require
+        every distinct reference to equal its resolved identity; namespace-
+        specific callers apply those checks separately.
+
+        Args:
+            json_str: Captured JSON array returned by batch inspection.
+            references: Requested references in response order.
+
+        Returns:
+            Parsed snapshots in the original order, without publishing caches.
+
+        Raises:
+            ParsingError: If JSON or models are invalid, counts differ, an
+                identity is empty, or a repeated reference resolves differently.
+                Raw diagnostics may expose validation chains or response dumps.
+        """
         try:
             json_objects = pydantic.TypeAdapter(list[JsonObject]).validate_json(
                 json_str
@@ -321,6 +591,20 @@ class ReloadableObjectFromJson[InspectResultT, ReferenceT: str | None = str](
         return results
 
     def _parse_inspect_result(self, json_object: JsonObject) -> InspectResultT:
+        """Parse one model and report validation failures according to policy.
+
+        Args:
+            json_object: Inspection metadata passed to the concrete model parser.
+
+        Returns:
+            The parsed snapshot, without changing the resource cache.
+
+        Raises:
+            ParsingError: If model validation fails. Safe mode withholds input
+                details and suppresses validation chaining. Raw mode writes a
+                temporary JSON dump and chains the input-bearing validation
+                error; both can contain confidential data.
+        """
         try:
             return self._parse_json_object(json_object)
         except pydantic.ValidationError as err:
@@ -347,7 +631,25 @@ class ReloadableObjectFromJson[InspectResultT, ReferenceT: str | None = str](
 
 
 def bulk_reload(docker_objects: Sequence[object]) -> None:
-    """Stage namespace snapshots before refreshing any existing resource cache."""
+    """Stage every resource group's snapshots before publishing cache updates.
+
+    Supported resources are containers, images, networks, volumes, nodes,
+    services, configs, secrets, tasks, plugins, and contexts. Group by exact
+    config instance and kind. Repeated handles publish once; distinct handles
+    for one identity each refresh. Failure during staging leaves original caches
+    and timestamps unchanged. Publication is sequential, not atomic for readers
+    and not a daemon-side transaction.
+
+    Args:
+        docker_objects: Resource handles to inspect; empty input is a no-op.
+
+    Raises:
+        TypeError: If a kind is unsupported or staged resource kinds differ.
+        ParsingError: If inspection metadata or identities are invalid.
+        ValueError: If a group returns an unexpected number of handles.
+        ClientNotFoundError: If a required executable cannot be resolved.
+        DockerException: If a group's inspect command fails.
+    """
     from ._bulk_reload import bulk_reload as reload_snapshots
 
     reload_snapshots(docker_objects)

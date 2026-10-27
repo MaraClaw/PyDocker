@@ -34,11 +34,15 @@ IMAGE_ID: Final = "sha256:" + "a" * 64
 
 
 class Options(BaseModel):
+    """Immutable benchmark settings with one to 1000 repetitions per scenario."""
+
     model_config = ConfigDict(frozen=True, strict=True)
     repetitions: int = Field(default=20, ge=1, le=1000)
 
 
 class ExecutionOptions(TypedDict, total=False):
+    """Subprocess keyword arguments accepted but ignored by simulated execution."""
+
     input: bytes | None
     stdout: int | TextIO | None
     stderr: int | TextIO | None
@@ -48,13 +52,32 @@ class ExecutionOptions(TypedDict, total=False):
 
 @dataclass(slots=True)
 class SimulatedExecution:
-    """Accumulate real wrapper requests and supply only known fixture responses."""
+    """Mutable request recorder supplying only known benchmark CLI responses.
+
+    Attributes:
+        commands: Argument tuples accumulated in request order, including requests
+            rejected as unsupported.
+    """
 
     commands: list[tuple[str, ...]] = field(default_factory=list)
 
     def run(
         self, args: Sequence[str], **_options: Unpack[ExecutionOptions]
     ) -> subprocess.CompletedProcess[bytes]:
+        """Record a wrapper request and return simulated output without launching.
+
+        Build requests with an image-ID file write the fixture ID to that path.
+
+        Args:
+            args: Complete command arguments, including the executable slot.
+            **_options: Accepted subprocess settings, unused by the simulator.
+
+        Returns:
+            A successful byte-output result for a recognized command.
+
+        Raises:
+            RuntimeError: If the requested command has no fixture response.
+        """
         command = tuple(args)
         self.commands.append(command)
         if command[1:3] == ("buildx", "bake"):
@@ -78,6 +101,8 @@ class SimulatedExecution:
 
 @dataclass(frozen=True, slots=True)
 class Timing:
+    """Per-iteration simulated-wrapper timing summaries in nanoseconds."""
+
     min_ns: int
     median_ns: float
     max_ns: int
@@ -85,6 +110,8 @@ class Timing:
 
 @dataclass(frozen=True, slots=True)
 class Measurement:
+    """One scenario's aggregate request counts and per-iteration timing summary."""
+
     name: str
     iterations: int
     execution_requests: int
@@ -95,6 +122,8 @@ class Measurement:
 
 @dataclass(frozen=True, slots=True)
 class BenchmarkReport:
+    """Versioned report separating simulated wrapper overhead from Docker speed."""
+
     schema_version: int
     measurement: str
     docker_executed: bool
@@ -103,6 +132,19 @@ class BenchmarkReport:
 
 
 def measure(name: str, operation: Callable[[], None], repetitions: int) -> Measurement:
+    """Measure repeated wrapper calls with process execution replaced or denied.
+
+    Temporarily replace subprocess execution and disable debug output globally;
+    patches are restored on exit. This measures Python work, not Docker build time.
+
+    Args:
+        name: Scenario label stored in the resulting measurement.
+        operation: Synchronous wrapper scenario supported by the simulator.
+        repetitions: Positive number of calls included in the measurement.
+
+    Returns:
+        Aggregate request counts and minimum, median, and maximum call durations.
+    """
     execution = SimulatedExecution()
     samples = []
     with (
@@ -129,6 +171,14 @@ def measure(name: str, operation: Callable[[], None], repetitions: int) -> Measu
 
 
 def run_benchmark(options: Options) -> BenchmarkReport:
+    """Run the five wrapper scenarios without executing Docker or child processes.
+
+    Args:
+        options: Validated repetition count applied to every scenario.
+
+    Returns:
+        A versioned report containing scenarios in their declared order.
+    """
     client = DockerClient(client_call=[sys.executable])
 
     def bake_default() -> None:
@@ -166,6 +216,15 @@ def run_benchmark(options: Options) -> BenchmarkReport:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
+    """Parse benchmark options and print the simulated report as JSON.
+
+    Args:
+        argv: Arguments excluding the program name, or None to use sys.argv.
+
+    Raises:
+        SystemExit: If argparse handles help, invalid arguments, or an out-of-range
+            repetition count.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--repetitions",

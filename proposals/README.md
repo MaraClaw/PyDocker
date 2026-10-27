@@ -1,6 +1,6 @@
 # Fleet-readiness proposals
 
-Status: Proposal01 is implemented as an [offline contributor contract](../scripts/fleet_contract/README.md). Proposal02 is implemented as an opt-in SDK API with offline validation. Proposal03 is implemented as an opt-in application admission layer with offline validation. Proposals04 and 05 are implemented with offline validation only; their live scenarios are blocked and support is not qualified. Proposals06-13 remain Future. Neither implementation nor offline validation approves live operation or certifies a supported fleet size.
+Status: Proposal01 is implemented as an [offline contributor contract](../scripts/fleet_contract/README.md). Proposal02 is implemented as an opt-in SDK API with offline validation. Proposal03 is implemented as an opt-in application admission layer with offline validation. Proposals04, 05 and 06 are implemented locally with offline validation only; their live scenarios are blocked and support is not qualified. Proposals07-13 remain Future. Neither implementation nor offline validation approves live operation or certifies a supported fleet size.
 
 This series translates the fleet research in `.omo/pywhales-fleet-research/RESEARCH.md` into separate implementation units, checked against the updated source on 2026-10-27. The research remains a historical record; its earlier negative findings are not automatically true of this checkout. Source symbols and named regression tests are the baseline, not a claim that tests were executed while drafting these documents.
 
@@ -19,7 +19,7 @@ These foundations are dependencies to preserve, not features to implement again.
 
 ## Proposal index
 
-01 has status **Implemented (offline contract only)**, 02 has status **Implemented (opt-in SDK API; offline validation only)**, 03 has status **Implemented (opt-in application layer; offline validation only)**, and 04 and 05 have status **Implemented (offline validation only; live blocked)**; all other rows remain **Future**. Real version/support, authority, workload and budget decisions remain open. Dependencies refer to implementation contracts, not document-writing order. An optional layer stays opt-in even after its proposal is implemented.
+01 has status **Implemented (offline contract only)**, 02 has status **Implemented (opt-in SDK API; offline validation only)**, 03 has status **Implemented (opt-in application layer; offline validation only)**, and 04, 05 and 06 have status **Implemented (offline validation only; live blocked)**; 07 through 13 remain **Future**. Real version/support, authority, workload and budget decisions remain open. Dependencies refer to implementation contracts, not document-writing order. An optional layer stays opt-in even after its proposal is implemented.
 
 | ID | Proposal | Responsibility | Prerequisites |
 | --- | --- | --- | --- |
@@ -41,7 +41,7 @@ These foundations are dependencies to preserve, not features to implement again.
 
 1. Maintain and review 01's implemented offline version, workload, ownership and validation contracts. Resolve its owned operator/maintainer decisions before a real run rather than choosing arbitrary SLOs.
 2. Start 12 early to collect an authorized baseline. It does not require every other proposal; qualification scenarios are enabled as their feature contracts become available.
-3. Maintain 02, 03, 04 and 05 and implement 06, 09 and 10 as independent increments once their shared interfaces are agreed.
+3. Maintain 02, 03, 04, 05 and 06 and implement 09 and 10 as independent increments once their shared interfaces are agreed.
 4. Implement 07 after 02/05/06, and 11 after 03/09. Then implement optional 08 using those established contracts.
 5. Execute 13 only if the measured entry condition holds. A documented no-go completes the experiment; a persistent API backend or async rewrite is not an unconditional deliverable.
 

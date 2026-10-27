@@ -1,14 +1,16 @@
 # Stack legacy flag compatibility
 
-Status: Future (not approved or implemented)
+Status: Implemented locally, with offline validation only. The selected-version
+live check is blocked pending selected versions and separate authorization for a
+disposable Swarm; support is not qualified.
 Tier: P1. Owner: SDK maintainer and release maintainer.
 
 ## Objective
 
-Deprecate the legacy stack `orchestrator` argument without changing its
-forwarding during a documented compatibility window.
+Deprecate the legacy stack `orchestrator` argument while retaining its
+forwarding in this change.
 
-## Current evidence
+## Pre-change baseline
 
 - [`StackCLI.deploy`](../pywhales/components/stack/cli_wrapper.py) accepts
   `orchestrator: str | None`, passes it to `Command.add_simple_arg`, and
@@ -25,11 +27,11 @@ forwarding during a documented compatibility window.
   recorded a help/reference mismatch for one CLI version, not a tested deploy
   failure or proof about all supported versions.
 
-## Proposed contract
+## Implemented contract
 
 - When `orchestrator` is not `None`, emit one `DeprecationWarning` at the
   caller's location before invoking the CLI, and forward the value unchanged as
-  `--orchestrator` during the compatibility window.
+  `--orchestrator` in this change.
 - `None`, including explicit `None`, emits no warning and omits the flag.
   An empty string is non-`None`: warn and forward it exactly as today.
 - Preserve positional arguments, remaining options, environment interpolation,
@@ -39,9 +41,9 @@ forwarding during a documented compatibility window.
   switch to a different backend.
 - The warning must not include the supplied value or other command data.
   Existing safe diagnostic defaults and explicit raw opt-in remain unchanged.
-- Release notes and API documentation should name the compatibility window and
-  advise callers to omit the argument. Actual removal is a separate future
-  change in the release selected by the maintainer.
+- This change retains compatibility forwarding. Callers should omit the
+  argument. The release maintainer has not selected the final warning window or
+  removal release; any removal is a separate future change.
 - Deployment still owns daemon-side mutations; warning, failure, or local
   interruption does not undo those mutations or establish convergence.
 
@@ -68,11 +70,15 @@ add a Kubernetes backend, alter stack discovery, or create a convergence waiter.
    returned handle. Seam: integration test. Surface: disposable Swarm manager,
    followed by stack removal and teardown verification.
 
-## Future validation and decisions
+## Implementation and validation boundary
 
-Run mocked warning, argument, and local fake-child tests first. Separately
-authorize a disposable Swarm before any deploy; record versions and remove all
-test-owned stack resources and any test-created Swarm state.
+The local implementation is in [`StackCLI.deploy`](../pywhales/components/stack/cli_wrapper.py).
+The offline warning, argument, and fake-child scenarios belong to
+[`test_stack_legacy.py`](../tests/pywhales/components/test_stack_legacy.py).
+This document does not claim test results. The selected-version live check remains
+blocked until versions are selected and a disposable Swarm is separately
+authorized. Record versions and remove all test-owned stack resources and any
+test-created Swarm state when that check is run.
 
 The release maintainer must choose the warning window and removal release;
 this blocks publishing a removal date or removing the parameter. The operator

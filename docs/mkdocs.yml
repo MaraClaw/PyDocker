@@ -90,6 +90,7 @@ nav:
     - Tasks: objects/tasks.md
     - Volumes: objects/volumes.md
   - User guide:
+      - Bounded endpoint admission: user_guide/admission.md
       - docker.run() guide: user_guide/docker_run.md
       - Build performance and measurement: user_guide/build_performance.md
       - Swarm generic resources: user_guide/generic_resources.md

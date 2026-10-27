@@ -422,6 +422,7 @@ class ImageCLI(DockerCLICaller):
     def _load_from_generator(
         self, full_cmd: Sequence[object], input: Iterable[bytes]
     ) -> builtins.list[str]:
+        raw_diagnostics = self.client_config.raw_diagnostics
         command = [str(argument) for argument in full_cmd]
         with Popen(command, stdin=PIPE, stdout=PIPE) as process:
             assert process.stdin is not None
@@ -433,7 +434,7 @@ class ImageCLI(DockerCLICaller):
             stdout = process.stdout.read()
             exit_code = process.wait()
         if exit_code != 0:
-            raise DockerException(command, exit_code)
+            raise DockerException(command, exit_code, raw_diagnostics=raw_diagnostics)
         return stdout.decode().splitlines()
 
     def list(
@@ -1028,6 +1029,7 @@ class ImageCLI(DockerCLICaller):
             run(full_cmd)
 
     def _save_generator(self, full_cmd: Sequence[object]) -> Iterator[bytes]:
+        raw_diagnostics = self.client_config.raw_diagnostics
         command = [str(argument) for argument in full_cmd]
         with Popen(command, stdout=PIPE, stderr=PIPE) as process:
             assert process.stdout is not None
@@ -1037,8 +1039,15 @@ class ImageCLI(DockerCLICaller):
             if exit_code != 0:
                 stderr = process.stderr.read()
                 if "No such image" in stderr.decode():
-                    raise NoSuchImage(command, exit_code, stderr=stderr)
-                raise DockerException(command, exit_code, stderr=stderr)
+                    raise NoSuchImage(
+                        command,
+                        exit_code,
+                        stderr=stderr,
+                        raw_diagnostics=raw_diagnostics,
+                    )
+                raise DockerException(
+                    command, exit_code, stderr=stderr, raw_diagnostics=raw_diagnostics
+                )
 
     def tag(self, source_image: Image | str, new_tag: str) -> None:
         """Adds a tag to a Docker image.

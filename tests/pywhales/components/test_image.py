@@ -353,6 +353,82 @@ def test_path_image_load_uses_general_budget_instead_of_image_override(
         assert client.image.load("unused-archive.tar", quiet=True) == ["sample"]
 
 
+@pytest.mark.parametrize("operation", ["load", "save", "missing"])
+@pytest.mark.parametrize("raw_diagnostics", [False, True])
+def test_direct_archive_failures_snapshot_client_diagnostics_without_changing_payloads(
+    operation: Literal["load", "save", "missing"], raw_diagnostics: bool
+) -> None:
+    secret = "archive-secret-sentinel"
+    payload = b"archive-output-secret\n"
+    stderr = f"{'No such image' if operation == 'missing' else 'failure'}: {secret}\n".encode()
+    code = (
+        "import os, sys; "
+        "data = sys.stdin.buffer.read(); "
+        "sys.exit(7 if data == b'archive-input-secret' else 8)"
+        if operation == "load"
+        else f"import os; os.write(1, {payload!r}); os.write(2, {stderr!r}); os._exit(7)"
+    )
+    client = DockerClient()
+    client.client_config.raw_diagnostics = raw_diagnostics
+    prefix = [sys.executable, "-c", code, secret]
+    client.client_config._client_call_with_path = [*prefix]
+
+    def input_chunks() -> Generator[bytes]:
+        client.client_config.raw_diagnostics = not raw_diagnostics
+        yield b"archive-input-secret"
+
+    error_type = NoSuchImage if operation == "missing" else DockerException
+    with patch.object(client.image, "inspect", return_value=[]):
+        if operation == "load":
+            with pytest.raises(error_type) as raised:
+                client.image.load(input_chunks())
+            expected_command = [*prefix, "image", "load"]
+            assert raised.value.stderr is None
+        else:
+            archive = client.image.save(secret)
+            assert next(archive) == payload
+            client.client_config.raw_diagnostics = not raw_diagnostics
+            with pytest.raises(error_type) as raised:
+                list(archive)
+            expected_command = [*prefix, "image", "save", secret]
+            assert raised.value.stderr == stderr.decode()
+    assert type(raised.value) is error_type
+    assert raised.value.return_code == 7
+    assert raised.value.docker_command == expected_command
+    assert raised.value.stdout is None
+    assert (secret in str(raised.value)) is raw_diagnostics
+    assert (secret in repr(raised.value)) is raw_diagnostics
+
+
+def test_archive_diagnostics_are_isolated_between_concurrent_clients() -> None:
+    secret = "concurrent-archive-secret"
+    clients = [DockerClient(), DockerClient()]
+    for raw, client in zip((False, True), clients, strict=True):
+        client.client_config.raw_diagnostics = raw
+        client.client_config._client_call_with_path = [
+            sys.executable,
+            "-c",
+            f"import os; os.write(2, b'{secret}'); os._exit(7)",
+        ]
+
+    def save_failure(client: DockerClient) -> DockerException:
+        with pytest.raises(DockerException) as raised:
+            list(client.image.save(secret))
+        return raised.value
+
+    with (
+        patch.object(clients[0].image, "inspect", return_value=[]),
+        patch.object(clients[1].image, "inspect", return_value=[]),
+        ThreadPoolExecutor(max_workers=2) as executor,
+    ):
+        safe, raw = executor.map(save_failure, clients)
+
+    assert secret not in str(safe)
+    assert secret in str(raw)
+    assert safe.stderr == raw.stderr == secret
+    assert safe.return_code == raw.return_code == 7
+
+
 @pytest.mark.parametrize("cancel", [False, True], ids=["drain", "saturated-close"])
 def test_multiple_image_budget_accounts_payload_while_producers_are_blocked(
     cancel: bool, image_commands: _ImageCommands

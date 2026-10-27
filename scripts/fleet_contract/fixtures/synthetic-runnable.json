@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "state": "runnable",
+  "provenance": "synthetic",
+  "identity": {
+    "profile": "synthetic-offline-example",
+    "revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "workload_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "owners": {
+      "maintainer": "example-maintainer-not-an-approval",
+      "operator": "example-operator-not-an-authorization",
+      "workload": "example-operator",
+      "platform": "example-operator",
+      "topology": "example-operator",
+      "retention": "example-operator",
+      "measurements": "example-maintainer",
+      "budgets": "example-operator",
+      "authorization": "example-operator"
+    },
+    "artifacts": [{"destination": "synthetic-local-report", "access": "public_synthetic", "retention_seconds": 3600.0}]
+  },
+  "support_row": "synthetic-example",
+  "workload": {
+    "resident_containers": 2,
+    "service_replicas": 0,
+    "inflight_operations": 2,
+    "concurrent_submissions": 1,
+    "endpoint_aliases": ["example-local", "example-context"],
+    "arrivals": {"shape": "uniform", "unit": "operations_per_second", "minimum": 0.0, "maximum": 1.0, "samples": []},
+    "churn": {"shape": "constant", "unit": "operations_per_second", "minimum": 0.0, "maximum": 0.0, "samples": []},
+    "operation_mix": [{"action": "inspect", "fraction": 0.5, "concurrency": 1}, {"action": "fault", "fraction": 0.5, "concurrency": 1}],
+    "images": [{"digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "size_bytes": 1024, "cache": "cold"}],
+    "output_bytes": {"shape": "empirical", "unit": "bytes", "minimum": 0.0, "maximum": 32.0, "samples": [0.0, 16.0, 32.0]},
+    "logs_bytes_per_second": {"shape": "constant", "unit": "bytes_per_second", "minimum": 0.0, "maximum": 0.0, "samples": []},
+    "duration_seconds": 20.0,
+    "termination": "duration",
+    "termination_operations": null
+  },
+  "platform": {
+    "endpoints": [{"id": "example-daemon", "connection_ref": "private-example-connection", "access": "local", "cpu_cores": 2.0, "memory_bytes": 1073741824, "disk_bytes": 10737418240, "storage_driver": "synthetic-overlay", "filesystem": "synthetic-ext4", "registry_path": "synthetic.invalid/example"}],
+    "aliases": [{"name": "example-local", "effective_endpoint": "example-daemon"}, {"name": "example-context", "effective_endpoint": "example-daemon"}],
+    "node_count": 1,
+    "orchestrator": "standalone",
+    "mode": "containers", "required_features": ["offline-example-only"]
+  },
+  "topology": {
+    "network": "bridge", "ipv4": true, "ipv6": false,
+    "ipv4_pools": ["192.0.2.0/24"], "ipv6_pools": [], "mtu_bytes": 1500,
+    "dns_expectation": "Synthetic fixture only; no resolver contacted",
+    "ingress": "none", "trust": "trusted_operators", "allowed_mounts": [],
+    "security_controls": ["synthetic-isolated-host"], "security_owner": "example-operator"
+  },
+  "ownership": {
+    "assets": [{"id": "example-container", "kind": "container", "ownership": "created", "data": "ephemeral", "owner": "example-operator", "teardown": "remove_owned", "backup_obligation": "No real data exists", "restore_obligation": "No real restore is asserted"}, {"id": "example-rollback", "kind": "image", "ownership": "borrowed", "data": "persistent", "owner": "example-operator", "teardown": "retain", "backup_obligation": "Synthetic protected image", "restore_obligation": "Independent operator review required"}],
+    "protected_rollback_images": ["sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
+    "logs_retention_seconds": 60.0, "cache_retention_seconds": 60.0, "report_retention_seconds": 3600.0,
+    "teardown_owner": "example-operator", "teardown_timeout_seconds": 5.0,
+    "expected_residual_assets": ["example-rollback"], "backup_restore_owner": "example-operator", "maximum_created_assets": 2
+  },
+  "measurements": {
+    "latency": [
+      {"boundary": "queue_wait", "unit": "seconds", "population": "all_submissions", "start_event": "submission accepted by queue", "end_event": "launch selected or terminal rejection", "denominator": "all_population_outcomes", "percentiles": [0.5, 0.95, 1.0]},
+      {"boundary": "selected_cli", "unit": "seconds", "population": "launched_cli", "start_event": "local CLI selected launch", "end_event": "local child reaped", "denominator": "all_population_outcomes", "percentiles": [0.5, 0.95, 1.0]},
+      {"boundary": "readiness", "unit": "seconds", "population": "readiness_attempts", "start_event": "submission accepted", "end_event": "readiness stable or terminal failure", "denominator": "all_population_outcomes", "percentiles": [0.5, 0.95, 1.0]},
+      {"boundary": "recovery", "unit": "seconds", "population": "faults", "start_event": "fault injected", "end_event": "recovery stable or terminal failure", "denominator": "all_population_outcomes", "percentiles": [0.5, 0.95, 1.0]}
+    ],
+    "resource_high_water": ["cpu_cores", "rss_bytes", "file_descriptors", "children", "disk_bytes", "disk_inodes"]
+  },
+  "budgets": {
+    "latency": [{"boundary": "queue_wait", "percentile": 0.95, "maximum_seconds": 2.0}, {"boundary": "selected_cli", "percentile": 0.95, "maximum_seconds": 3.0}, {"boundary": "readiness", "percentile": 0.95, "maximum_seconds": 4.0}, {"boundary": "recovery", "percentile": 0.95, "maximum_seconds": 5.0}],
+    "resources": [{"resource": "cpu_cores", "maximum": 2.0, "early_stop": 2.0}, {"resource": "rss_bytes", "maximum": 1048576.0, "early_stop": 1048576.0}, {"resource": "file_descriptors", "maximum": 32.0, "early_stop": 32.0}, {"resource": "children", "maximum": 2.0, "early_stop": 2.0}, {"resource": "disk_bytes", "maximum": 10485760.0, "early_stop": 10485760.0}, {"resource": "disk_inodes", "maximum": 32.0, "early_stop": 32.0}],
+    "maximum_error_fraction": 0.0, "maximum_recovery_seconds": 5.0,
+    "polling_interval_seconds": 1.0, "stability_window_seconds": 2.0, "stable_observations": 2,
+    "readiness_definition": "Synthetic ready observation; not an application SLO",
+    "sustained_duration_seconds": 10.0, "early_stop_duration_seconds": 30.0,
+    "early_stop_error_fraction": 0.5, "early_stop_unknown_count": 1, "cleanup_timeout_seconds": 5.0
+  },
+  "authorization": {
+    "record_id": "synthetic-not-authority", "operator": "example-operator", "approved_by": "example-only-no-real-approval",
+    "purpose": "synthetic_example", "disposable": true,
+    "effective_endpoint_allowlist": ["example-daemon"], "allowed_actions": ["inspect", "fault", "cleanup"], "destructive_scenarios": ["synthetic-fault-not-authority"],
+    "run_namespace": "synthetic-offline-run", "ownership_marker": "synthetic-owner-marker",
+    "isolation_evidence_ref": "synthetic-isolation-not-proof", "cleanup_verification": "owned_inventory_readback", "cleanup_surface_ref": "synthetic-inventory",
+    "stop_authority": "example-operator", "maximum_run_seconds": 30.0, "maximum_created_assets": 2, "expires_after_seconds": 60.0
+  },
+  "decisions": []
+}

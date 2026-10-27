@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "state": "draft",
+  "provenance": "operator_declared",
+  "identity": {
+    "profile": "unapproved-fleet-draft",
+    "revision": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "workload_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "owners": {"maintainer": "maintainer-role-unassigned", "operator": "deployment-operator-role-unassigned", "workload": "deployment-operator-role-unassigned", "platform": "deployment-operator-role-unassigned", "topology": "deployment-operator-role-unassigned", "retention": "deployment-operator-role-unassigned", "measurements": "maintainer-and-operator-roles", "budgets": "deployment-operator-role-unassigned", "authorization": "deployment-operator-role-unassigned"},
+    "artifacts": [{"destination": "contributor-draft-only", "access": "maintainers", "retention_seconds": 0.0}]
+  },
+  "support_row": {"decision_id": "support"},
+  "workload": {"decision_id": "workload"},
+  "platform": {"decision_id": "platform"},
+  "topology": {"decision_id": "topology"},
+  "ownership": {"decision_id": "ownership"},
+  "measurements": {"decision_id": "measurements"},
+  "budgets": {"decision_id": "budgets"},
+  "authorization": {"decision_id": "authorization"},
+  "decisions": [
+    {"id": "support", "field": "support_row", "owner": "maintainer", "rationale": "No maintained combination has independent approval; select versions and controller policies before qualification.", "blocks": "qualification"},
+    {"id": "workload", "field": "workload", "owner": "deployment operator", "rationale": "Choose immutable workload and image digests, capacity, operation mix and distributions. Draft identity digests identify placeholders only, not a real workload.", "blocks": "live_run"},
+    {"id": "platform", "field": "platform", "owner": "deployment operator", "rationale": "No disposable host resources, endpoint mappings or orchestration policy supplied.", "blocks": "live_run"},
+    {"id": "topology", "field": "topology", "owner": "deployment operator", "rationale": "Address pools, ingress, trust, mounts and security enforcement owner require deployment choices.", "blocks": "live_run"},
+    {"id": "ownership", "field": "ownership", "owner": "deployment operator", "rationale": "Choose protected data, retention, backup, restore and teardown authority.", "blocks": "live_run"},
+    {"id": "measurements", "field": "measurements", "owner": "maintainer and operator", "rationale": "Choose representative populations, readiness definition and collection design.", "blocks": "live_run"},
+    {"id": "budgets", "field": "budgets", "owner": "deployment operator", "rationale": "No actual latency, error, resource, sustained duration or early-stop budgets supplied.", "blocks": "live_run"},
+    {"id": "authorization", "field": "authorization", "owner": "deployment operator", "rationale": "No disposable target authorization, run identity or cleanup surface supplied. All live actions are blocked.", "blocks": "live_run"}
+  ]
+}

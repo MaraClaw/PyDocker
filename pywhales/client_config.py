@@ -84,6 +84,14 @@ class ClientConfig:
     compose_dry_run: bool = False
     compose_parallel: int | None = None
     compose_progress: ComposeProgressInput | None = None
+    image_stream_buffer_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        budget = self.image_stream_buffer_bytes
+        if budget is not None and (type(budget) is not int or budget <= 0):
+            raise ValueError(
+                "image_stream_buffer_bytes must be a positive integer or None"
+            )
 
     def get_client_call_with_path(self) -> list[Path | str]:
         if self._client_call_with_path is None:

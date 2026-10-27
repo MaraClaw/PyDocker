@@ -189,6 +189,7 @@ class DockerClient(DockerCLICaller):
         compose_dry_run: bool = False,
         compose_parallel: int | None = None,
         compose_progress: ComposeProgressInput | None = None,
+        image_stream_buffer_bytes: int | None = None,
     ) -> None:
         if client_binary != "docker":
             warnings.warn(
@@ -222,6 +223,7 @@ class DockerClient(DockerCLICaller):
                 compose_dry_run=compose_dry_run,
                 compose_parallel=compose_parallel,
                 compose_progress=compose_progress,
+                image_stream_buffer_bytes=image_stream_buffer_bytes,
             )
         super().__init__(client_config)
 

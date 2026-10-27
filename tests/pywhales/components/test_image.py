@@ -6,8 +6,8 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from queue import Queue
 from subprocess import CompletedProcess
-from threading import Barrier, Event, Thread
-from typing import Literal
+from threading import Barrier, Event, Thread, current_thread
+from typing import Literal, assert_never
 from unittest.mock import ANY, MagicMock, Mock, patch
 
 import pytest
@@ -46,18 +46,22 @@ class _ImageCommands:
         self.closed: dict[str, Event] = {}
         self.started: Queue[str] = Queue()
         self.output = True
+        self.stdout = b"out0\nout1\ntail"
+        self.stderr = b"err0\nerr1\n"
 
-    def start(self, command: Command) -> ProcessStream:
+    def start(
+        self, command: Command, *, buffer_bytes: int | None = None
+    ) -> ProcessStream:
         name = str(command[-1])
         code = "import os, sys; "
         if self.output:
-            code += (
-                "os.write(1, b'out0\\nout1\\ntail'); os.write(2, b'err0\\nerr1\\n'); "
-            )
+            code += f"os.write(1, {self.stdout!r}); os.write(2, {self.stderr!r}); "
         code += "status = int(input()); sys.exit(status)"
         child = self.stack.enter_context(
             stream_stdout_and_stderr(
-                [sys.executable, "-c", code, name], pipe_stdin=True
+                [sys.executable, "-c", code, name],
+                pipe_stdin=True,
+                buffer_bytes=buffer_bytes,
             )
         )
         self.children[name] = child
@@ -112,10 +116,336 @@ def image_commands() -> Generator[_ImageCommands]:
         yield commands
 
 
+@pytest.mark.parametrize("cancel", [False, True], ids=["drain", "saturated-close"])
+def test_multiple_image_budget_accounts_payload_while_producers_are_blocked(
+    cancel: bool, image_commands: _ImageCommands
+) -> None:
+    image_commands.stdout = b"a\nbbb\nccc\n" * 10
+    image_commands.stderr = b""
+    names = ["long-image-tag:" + "a" * 100, "long-image-tag:" + "b" * 100]
+    advanced: dict[str, list[int]] = {name: [] for name in names}
+
+    def start(name: str) -> MappedProcessStream[tuple[str, bytes]]:
+        child = image_commands.start(Command([name]))
+
+        def mapped() -> Generator[tuple[str, bytes]]:
+            for _, line in child:
+                with stream._queue.condition:
+                    advanced[name].append(len(line))
+                yield name, line
+
+        return MappedProcessStream(child, mapped())
+
+    stream = MultiImageStream(names, start, buffer_bytes=10)
+    blocked: set[str] = set()
+    saturated = Event()
+    wait = stream._queue.condition.wait
+
+    def wait_and_signal(timeout: float | None = None) -> bool:
+        blocked.add(current_thread().name)
+        if len(blocked) == 2:
+            saturated.set()
+        return wait(timeout)
+
+    try:
+        with patch.object(stream._queue.condition, "wait", side_effect=wait_and_signal):
+            stream._start()
+            assert saturated.wait(timeout=3)
+            with stream._queue.condition:
+                queued = tuple(stream._queue._items)
+                retained_bytes = sum(
+                    len(item[1]) for item in queued if item is not None
+                )
+                assert stream._queue._bytes == retained_bytes
+                assert 0 < retained_bytes <= 10
+                assert all(item is not None and len(item[1]) <= 10 for item in queued)
+                assert sum(map(len, advanced.values())) == len(queued) + 2
+                in_flight = sum(sizes[-1] for sizes in advanced.values())
+                assert sum(map(sum, advanced.values())) == retained_bytes + in_flight
+                assert all(sizes[-1] <= 10 for sizes in advanced.values())
+        for _ in names:
+            image_commands.started.get(timeout=3)
+        if cancel:
+            closers = [Thread(target=stream.close, daemon=True) for _ in range(2)]
+            for closer in closers:
+                closer.start()
+            for closer in closers:
+                closer.join(timeout=3)
+                assert not closer.is_alive()
+            assert list(stream) == []
+            assert stream._queue._bytes == 0
+        else:
+            for name in names:
+                image_commands.finish(name)
+            output = list(stream)
+            for name in names:
+                assert [line for tag, line in output if tag == name] == [
+                    b"a\n",
+                    b"bbb\n",
+                    b"ccc\n",
+                ] * 10
+        executor = stream._executor
+        assert executor is not None
+        assert all(not worker.is_alive() for worker in executor._threads)
+        for child in image_commands.children.values():
+            _assert_image_process_released(child)
+    finally:
+        stream.close()
+        image_commands.release_children()
+
+
+@pytest.mark.parametrize("failure", ["mapper", "oversize", "child"])
+def test_multiple_image_failure_wakes_saturated_sibling_producer(
+    failure: Literal["mapper", "oversize", "child"], image_commands: _ImageCommands
+) -> None:
+    image_commands.stdout = b"abc\n" * 10
+    image_commands.stderr = b""
+    saturated = Event()
+    error = RuntimeError("mapper failed")
+
+    def start(name: str) -> MappedProcessStream[tuple[str, bytes]]:
+        if name == "sibling":
+            child = image_commands.start(Command([name]))
+            return MappedProcessStream(child, ((name, line) for _, line in child))
+        assert saturated.wait(timeout=3)
+        with patch.object(image_commands, "output", False):
+            child = image_commands.start(Command([name]))
+
+        def mapped() -> Generator[tuple[str, bytes]]:
+            match failure:
+                case "mapper":
+                    raise error
+                case "oversize":
+                    yield name, b"oversized"
+                case "child":
+                    image_commands.finish(name, status=7)
+                    yield from ((name, line) for _, line in child)
+                case unreachable:
+                    assert_never(unreachable)
+
+        return MappedProcessStream(child, mapped())
+
+    stream = MultiImageStream(["sibling", "failure"], start, buffer_bytes=4)
+    wait = stream._queue.condition.wait
+
+    def wait_and_signal(timeout: float | None = None) -> bool:
+        saturated.set()
+        return wait(timeout)
+
+    try:
+        with patch.object(stream._queue.condition, "wait", side_effect=wait_and_signal):
+            stream._start()
+            assert saturated.wait(timeout=3)
+            for _ in range(2):
+                image_commands.started.get(timeout=3)
+            for name in ("sibling", "failure"):
+                assert image_commands.closed[name].wait(timeout=3)
+        executor = stream._executor
+        assert executor is not None
+        for worker in executor._threads:
+            worker.join(timeout=3)
+            assert not worker.is_alive()
+        expected = {
+            "mapper": RuntimeError,
+            "oversize": BufferError,
+            "child": DockerException,
+        }[failure]
+        with pytest.raises(expected) as raised:
+            next(stream)
+        if failure == "mapper":
+            assert raised.value is error
+        assert list(stream) == []
+        assert stream._queue._bytes == 0
+        for child in image_commands.children.values():
+            _assert_image_process_released(child)
+    finally:
+        stream.close()
+        image_commands.release_children()
+
+
+@pytest.mark.parametrize("failure_before_registration", [False, True])
+@pytest.mark.parametrize("failure", ["buffer", "exit"])
+def test_background_child_failure_cancels_group_without_consumer_drain(
+    failure_before_registration: bool,
+    failure: Literal["buffer", "exit"],
+) -> None:
+    children: dict[str, ProcessStream] = {}
+    blocked: set[str] = set()
+    ready = Event()
+    sibling_saturated = Event()
+    saturated = Event()
+    terminal_code = (
+        "os._exit(7)" if failure == "exit" else "os.write(2, b'x' * 17); input()"
+    )
+
+    def start(name: str) -> MappedProcessStream[tuple[str, bytes]]:
+        child = stream_stdout_and_stderr(
+            [
+                sys.executable,
+                "-c",
+                f"import os; os.write(1, b'a\\n' * 32); input(); {terminal_code}",
+            ],
+            pipe_stdin=True,
+            buffer_bytes=16,
+        )
+        children[name] = child
+        if len(children) == 2:
+            ready.set()
+        if failure_before_registration and name == "bad":
+            assert sibling_saturated.wait(timeout=3)
+            assert child.stdin is not None
+            child.stdin.write(b"fail\n")
+            child.stdin.flush()
+            if failure == "exit":
+                assert child._process.wait(timeout=3) == 7
+            else:
+                assert child._released.wait(timeout=3)
+
+        def mapped() -> Generator[tuple[str, bytes]]:
+            if failure_before_registration and name == "bad":
+                yield name, b"a\n"
+            yield from ((name, line) for _, line in child)
+
+        return MappedProcessStream(child, mapped())
+
+    stream = MultiImageStream(["sibling", "bad"], start, buffer_bytes=16)
+    wait = stream._queue.condition.wait
+
+    def wait_and_signal(timeout: float | None = None) -> bool:
+        blocked.add(current_thread().name)
+        sibling_saturated.set()
+        if len(blocked) == 2:
+            saturated.set()
+        return wait(timeout)
+
+    try:
+        with patch.object(stream._queue.condition, "wait", side_effect=wait_and_signal):
+            stream._start()
+            assert ready.wait(timeout=3)
+            if not failure_before_registration:
+                assert saturated.wait(timeout=3)
+                with stream._queue.condition:
+                    assert stream._queue._bytes == 16
+                bad = children["bad"]
+                with bad._queue.condition:
+                    assert bad._queue.condition.wait_for(
+                        lambda: (
+                            bad._queue._bytes == 16 and bool(bad._inflight["stdout"])
+                        ),
+                        timeout=3,
+                    )
+                assert bad.stdin is not None
+                bad.stdin.write(b"fail\n")
+                bad.stdin.flush()
+            for child in tuple(children.values()):
+                assert child._released.wait(timeout=3)
+            executor = stream._executor
+            assert executor is not None
+            for worker in executor._threads:
+                worker.join(timeout=3)
+                assert not worker.is_alive()
+        assert set(children) == {"bad", "sibling"}
+        error = stream._error
+        expected = DockerException if failure == "exit" else BufferError
+        assert isinstance(error, expected)
+        with pytest.raises(expected) as raised:
+            next(stream)
+        assert raised.value is error
+        if failure == "exit":
+            assert isinstance(error, DockerException)
+            assert error.return_code == 7
+        assert list(stream) == []
+        assert stream._queue._bytes == 0
+        for child in children.values():
+            _assert_image_process_released(child)
+            assert not child._watchdog.is_alive()
+    finally:
+        stream.close()
+        for child in children.values():
+            child.close()
+
+
 @pytest.mark.parametrize("operation", ["pull", "push"])
-def test_multiple_image_stream_cancels_active_and_queued_commands(
+@pytest.mark.parametrize("multiple", [False, True])
+def test_image_stream_factories_use_selected_client_budget_and_root_alias(
+    operation: Literal["pull", "push"], multiple: bool, image_commands: _ImageCommands
+) -> None:
+    image_commands.client.client_config.image_stream_buffer_bytes = 16
+    method = (
+        image_commands.client.pull
+        if operation == "pull"
+        else image_commands.client.push
+    )
+    names = ["one", "two", "one"] if multiple else ["one", "one"]
+    start = image_commands.start
+    selected: list[int | None] = []
+
+    def record_budget(
+        command: Command, *, buffer_bytes: int | None = None
+    ) -> ProcessStream:
+        selected.append(buffer_bytes)
+        return start(command, buffer_bytes=buffer_bytes)
+
+    with patch(
+        "pywhales.components.image.cli_wrapper.stream_stdout_and_stderr",
+        side_effect=record_budget,
+    ):
+        stream = method(names, stream_logs=True)
+        assert isinstance(stream, (MappedProcessStream, MultiImageStream))
+        try:
+            next(stream)
+            for _ in range(2 if multiple else 1):
+                image_commands.started.get(timeout=3)
+            assert selected == ([16, 16] if multiple else [16])
+            if isinstance(stream, MultiImageStream):
+                assert stream._queue._limit == 16
+        finally:
+            stream.close()
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+def test_image_stream_budgets_do_not_leak_to_unbounded_client(
     operation: Literal["pull", "push"], image_commands: _ImageCommands
 ) -> None:
+    image_commands.stdout = b"abcdef\n"
+    image_commands.stderr = b""
+    image_commands.client.client_config.image_stream_buffer_bytes = 4
+    unbounded_client = DockerClient()
+    unbounded_client.client_config._client_call_with_path = ["docker-test"]
+    limited_method = (
+        image_commands.client.pull
+        if operation == "pull"
+        else image_commands.client.push
+    )
+    unbounded_method = (
+        unbounded_client.pull if operation == "pull" else unbounded_client.push
+    )
+
+    with patch.object(unbounded_client.image, "inspect", return_value=[]):
+        limited = limited_method("limited", stream_logs=True)
+        unbounded = unbounded_method("unbounded", stream_logs=True)
+        assert isinstance(limited, MappedProcessStream)
+        assert isinstance(unbounded, MappedProcessStream)
+        try:
+            image_commands.finish("unbounded")
+            with pytest.raises(BufferError):
+                list(limited)
+            assert list(unbounded) == [("unbounded", b"abcdef\n")]
+        finally:
+            limited.close()
+            unbounded.close()
+    for child in image_commands.children.values():
+        _assert_image_process_released(child)
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+@pytest.mark.parametrize("budget", [None, 16])
+def test_multiple_image_stream_cancels_active_and_queued_commands(
+    operation: Literal["pull", "push"],
+    image_commands: _ImageCommands,
+    budget: int | None,
+) -> None:
+    image_commands.client.client_config.image_stream_buffer_bytes = budget
     names = [f"image:{number}" for number in range(8)]
     stream = image_commands.stream(operation, names)
     closer = Thread(target=stream.close, daemon=True)
@@ -186,9 +516,13 @@ def test_multiple_image_stream_rejects_running_but_unadmitted_worker_after_close
 
 
 @pytest.mark.parametrize("operation", ["pull", "push"])
+@pytest.mark.parametrize("budget", [None, 16])
 def test_multiple_image_stream_close_wakes_blocked_consumer(
-    operation: Literal["pull", "push"], image_commands: _ImageCommands
+    operation: Literal["pull", "push"],
+    image_commands: _ImageCommands,
+    budget: int | None,
 ) -> None:
+    image_commands.client.client_config.image_stream_buffer_bytes = budget
     image_commands.output = False
     stream = image_commands.stream(operation, ["one", "two"])
     waiting = Event()
@@ -269,7 +603,7 @@ def test_multiple_image_failure_cancels_siblings_while_consumer_is_paused(
 
 
 @pytest.mark.parametrize("operation", ["pull", "push"])
-def test_multiple_image_stream_keeps_first_original_worker_error(
+def test_multiple_image_stream_keeps_first_original_error(
     operation: Literal["pull", "push"], image_commands: _ImageCommands
 ) -> None:
     stream = image_commands.stream(operation, ["one", "two"])
@@ -277,23 +611,25 @@ def test_multiple_image_stream_keeps_first_original_worker_error(
     first_recorded = Event()
     second_recorded = Event()
     errors: dict[str, DockerException] = {}
-    worker_done = stream._worker_done
+    record_error = stream._record_error
 
-    def ordered_failures(future: Future[None]) -> None:
-        error = future.exception()
+    def ordered_failures(error: BaseException) -> None:
         assert isinstance(error, DockerException)
         name = error.docker_command[-1]
+        if name in errors:
+            record_error(error)
+            return
         errors[name] = error
         failures.wait(timeout=3)
         if name == "two":
             assert first_recorded.wait(timeout=3)
-        worker_done(future)
+        record_error(error)
         if name == "one":
             first_recorded.set()
         else:
             second_recorded.set()
 
-    with patch.object(stream, "_worker_done", side_effect=ordered_failures):
+    with patch.object(stream, "_record_error", side_effect=ordered_failures):
         try:
             next(stream)
             for _ in range(2):
@@ -306,6 +642,7 @@ def test_multiple_image_stream_keeps_first_original_worker_error(
 
             with pytest.raises(DockerException) as raised:
                 next(stream)
+            assert set(errors) == {"one", "two"}
             assert raised.value is errors["one"]
             assert raised.value.return_code == 7
             assert list(stream) == []
@@ -354,9 +691,13 @@ def test_multiple_image_stream_exhaustion_preserves_tags_bytes_and_pipe_order(
 
 
 @pytest.mark.parametrize("operation", ["pull", "push"])
+@pytest.mark.parametrize("budget", [None, 16])
 def test_multiple_image_stream_concurrent_close_waits_for_cleanup(
-    operation: Literal["pull", "push"], image_commands: _ImageCommands
+    operation: Literal["pull", "push"],
+    image_commands: _ImageCommands,
+    budget: int | None,
 ) -> None:
+    image_commands.client.client_config.image_stream_buffer_bytes = budget
     stream = image_commands.stream(operation, ["one", "two"])
     entered = Event()
     release = Event()
@@ -422,10 +763,12 @@ def test_multiple_image_stream_child_startup_failure_closes_sibling(
     stream = image_commands.stream(operation, ["one", "two", "three"])
     start = image_commands.start
 
-    def start_or_fail(command: Command) -> ProcessStream:
+    def start_or_fail(
+        command: Command, *, buffer_bytes: int | None = None
+    ) -> ProcessStream:
         if command[-1] == "two":
             raise error
-        return start(command)
+        return start(command, buffer_bytes=buffer_bytes)
 
     with patch(
         "pywhales.components.image.cli_wrapper.stream_stdout_and_stderr",

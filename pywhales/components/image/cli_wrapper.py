@@ -694,7 +694,11 @@ class ImageCLI(DockerCLICaller):
             assert child is not None
             return child
 
-        return MultiImageStream(image_names, start)
+        return MultiImageStream(
+            image_names,
+            start,
+            buffer_bytes=self.client_config.image_stream_buffer_bytes,
+        )
 
     def _pull_single_tag(
         self,
@@ -714,7 +718,9 @@ class ImageCLI(DockerCLICaller):
         full_cmd.append(image_name)
 
         if stream_logs:
-            stream = stream_stdout_and_stderr(full_cmd)
+            stream = stream_stdout_and_stderr(
+                full_cmd, buffer_bytes=self.client_config.image_stream_buffer_bytes
+            )
             return MappedProcessStream(
                 stream, ((image_name, line) for _, line in stream)
             )
@@ -862,7 +868,11 @@ class ImageCLI(DockerCLICaller):
             assert child is not None
             return child
 
-        return MultiImageStream(tags_or_repos, start)
+        return MultiImageStream(
+            tags_or_repos,
+            start,
+            buffer_bytes=self.client_config.image_stream_buffer_bytes,
+        )
 
     def _push_single_tag(
         self,
@@ -874,7 +884,9 @@ class ImageCLI(DockerCLICaller):
         full_cmd.add_flag("--quiet", quiet)
         full_cmd.append(tag_or_repo)
         if stream_logs:
-            stream = stream_stdout_and_stderr(full_cmd)
+            stream = stream_stdout_and_stderr(
+                full_cmd, buffer_bytes=self.client_config.image_stream_buffer_bytes
+            )
             return MappedProcessStream(
                 stream, ((tag_or_repo, line) for _, line in stream)
             )

@@ -12,6 +12,14 @@ from pywhales.utils import PROJECT_ROOT
 
 @pytest.fixture
 def stack(docker_client: DockerClient, swarm_mode: None) -> Generator[Stack]:
+    """Deploy the fixed some_stack project inside the fixture-owned Swarm.
+
+    Requires a disposable daemon and its Swarm setup. Normal teardown removes
+    the stack and waits before the surrounding Swarm fixture force-leaves.
+
+    Yields:
+        The deployed stack handle between setup and removal delays.
+    """
     time.sleep(1)
     some_stack = docker_client.stack.deploy(
         "some_stack",

@@ -45,6 +45,15 @@ For Compose, use a dedicated project and preserve persistent volumes unless
 their deletion is requested. Bound log collection and release local streams
 even when a reader stops early.
 
-These examples target PyWhales 0.2.0. Recheck the installed version and supported
+These examples target PyWhales 0.6.5. Recheck the installed version and supported
 arguments when versions differ. Verify the user's application or script, not
 the PyWhales repository's contributor tests.
+
+Checking a `default_timeout`, `telemetry_observer`, or `environment` argument
+follows the same signature-first rule: confirm it in
+`signature(DockerClient)` before assuming it is supported. Opt-in admission
+(`pywhales.admission`), bounded observation (the root `observation`,
+`capture_inventory`, and `InspectionPolicy` exports), and convergence
+(`pywhales.convergence`) are separate imports that don't change default
+`DockerClient` behavior; verify their presence the same way before building
+on them.

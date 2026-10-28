@@ -186,10 +186,9 @@ def test_matrix_when_ci_is_only_configured() -> None:
     )
 
     assert {row.status for row in matrix.rows} == {"untested"}
-    assert {decision.blocks for decision in matrix.decisions} == {
-        "qualification",
-        "legacy_compatibility",
-    }
+    assert {decision.blocks for decision in matrix.decisions} == {"qualification"}
+    assert isinstance(matrix.legacy06.compatibility_window, str)
+    assert isinstance(matrix.legacy06.removal_decision, str)
     assert isinstance(matrix.rows[0].versions.docker_engine, Pending)
     assert matrix.rows[0].versions.compose == "5.6.1"
 

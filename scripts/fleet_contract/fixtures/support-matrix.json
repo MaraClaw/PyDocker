@@ -6,7 +6,7 @@
     {"id": "configured-windows-smoke", "status": "untested", "provenance": "configured_ci", "versions": {"python": "3.14.8", "os": {"decision_id": "windows-os"}, "kernel": {"decision_id": "windows-kernel"}, "docker_cli": {"decision_id": "windows-cli"}, "docker_engine": {"decision_id": "windows-engine"}, "compose": null, "buildx": null}, "orchestrator": "standalone", "required_features": ["volume-smoke-only"], "maintainer": "pywhales-maintainer", "approval_ref": null, "evidence_refs": [], "rationale": "windows-latest floats. CI config selects one volume smoke test, not a fleet or plugin support combination."},
     {"id": "synthetic-example", "status": "untested", "provenance": "synthetic", "versions": {"python": "3.14.8", "os": "synthetic-linux-0", "kernel": "0.0.0-synthetic", "docker_cli": "0.0.0-synthetic", "docker_engine": "0.0.0-synthetic", "compose": null, "buildx": null}, "orchestrator": "standalone", "required_features": ["offline-example-only"], "maintainer": "example-maintainer", "approval_ref": null, "evidence_refs": [], "rationale": "Fictional complete schema example. No real version combination, support approval, target authority or capacity evidence."}
   ],
-  "legacy06": {"compatibility_window": {"decision_id": "legacy-window"}, "removal_decision": {"decision_id": "legacy-removal"}},
+  "legacy06": {"compatibility_window": "Deprecated stack.deploy orchestrator compatibility ends before 0.6.0.", "removal_decision": "Remove the stack.deploy orchestrator argument in 0.6.0."},
   "decisions": [
     {"id": "linux-kernel", "field": "rows.0.versions.kernel", "owner": "maintainer", "rationale": "Record exact kernel from independently reviewed run; runner label is insufficient.", "blocks": "qualification"},
     {"id": "linux-cli", "field": "rows.0.versions.docker_cli", "owner": "maintainer", "rationale": "Docker CLI is not pinned in this matrix; observe and review exact version.", "blocks": "qualification"},
@@ -14,8 +14,6 @@
     {"id": "windows-os", "field": "rows.1.versions.os", "owner": "maintainer", "rationale": "windows-latest is not an exact OS release.", "blocks": "qualification"},
     {"id": "windows-kernel", "field": "rows.1.versions.kernel", "owner": "maintainer", "rationale": "Observe exact Windows kernel before approving this limited combination.", "blocks": "qualification"},
     {"id": "windows-cli", "field": "rows.1.versions.docker_cli", "owner": "maintainer", "rationale": "Observe exact Docker CLI from a reviewed run.", "blocks": "qualification"},
-    {"id": "windows-engine", "field": "rows.1.versions.docker_engine", "owner": "maintainer and operator", "rationale": "Observe exact Engine from a reviewed run.", "blocks": "qualification"},
-    {"id": "legacy-window", "field": "legacy06.compatibility_window", "owner": "maintainer", "rationale": "Choose legacy stack flag support window based on approved versions; never silently drop the option.", "blocks": "legacy_compatibility"},
-    {"id": "legacy-removal", "field": "legacy06.removal_decision", "owner": "maintainer", "rationale": "Choose retain/remove policy and release boundary after support review.", "blocks": "legacy_compatibility"}
+    {"id": "windows-engine", "field": "rows.1.versions.docker_engine", "owner": "maintainer and operator", "rationale": "Observe exact Engine from a reviewed run.", "blocks": "qualification"}
   ]
 }

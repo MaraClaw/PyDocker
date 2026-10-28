@@ -1,12 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 
-- `stack.deploy()` deprecates the `orchestrator` argument. Passing a non-`None`
-  value emits one `DeprecationWarning` at the caller's location before the CLI
-  runs and forwards the value unchanged, including an empty string. Omitting
-  the argument or passing `None` emits no warning and omits the flag. Omit the
-  argument in new and updated calls. CLI errors propagate without fallback.
-  This change retains compatibility forwarding; the warning window and removal
-  release remain undecided by the maintainer. Any removal is a separate future
-  change.
+### Breaking Changes
+
+- `stack.deploy()` no longer accepts `orchestrator`; omit the argument.
+- Use `client_call` instead of `client_binary`.
+- Use `compose_env_files` instead of `compose_env_file`.
+- Container, image, network, volume, service, and secret filters now accept an
+  iterable of `(key, value)` tuples instead of a mapping.
+- Set `PYWHALES_DEBUG=1` to enable execution diagnostics.

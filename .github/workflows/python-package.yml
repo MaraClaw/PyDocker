@@ -6,6 +6,9 @@ on:
       - main
   pull_request: {}
 
+permissions:
+  contents: read
+
 jobs:
   render-docs:
     name: Render docs
@@ -23,10 +26,16 @@ jobs:
         run: uv run --locked python -m docs.autogen
       - name: Render
         run: uv run --locked mkdocs build --config-file docs/mkdocs.yml
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - id: site
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: Docs
+          name: delivery-site-${{ github.run_id }}-${{ github.run_attempt }}
           path: site
+          include-hidden-files: true
+          if-no-files-found: error
+    outputs:
+      artifact_id: ${{ steps.site.outputs.artifact-id }}
+      artifact_digest: ${{ steps.site.outputs.artifact-digest }}
 
   build-linux-lint:
     runs-on: ubuntu-24.04
@@ -168,3 +177,64 @@ jobs:
       - name: Run single test
         run: |
           uv run --locked pytest -vv --no-runtime-skip tests/pywhales/components/test_volume.py::test_simple_volume
+
+  build-distributions:
+    name: Build tested distributions
+    runs-on: ubuntu-24.04
+    outputs:
+      artifact_id: ${{ steps.dist.outputs.artifact-id }}
+      artifact_digest: ${{ steps.dist.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.13.6"
+          python-version: "3.14.8"
+      - run: uv build --no-sources --sdist --wheel
+      - name: Isolate-install both exact distributions
+        run: uv run --locked python -m scripts.delivery smoke
+      - id: dist
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: delivery-dist-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/*
+          if-no-files-found: error
+
+  delivery-eligible:
+    name: Seal tested delivery
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - render-docs
+      - build-linux-lint
+      - build-linux-test-component
+      - build-linux-test-other
+      - build-linux-test-coverage
+      - build-linux-test-modern
+      - build-windows
+      - build-distributions
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.13.6"
+          python-version: "3.14.8"
+      - name: Seal exact uploader identities after every required check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY_ID: ${{ github.repository_id }}
+          DIST_ARTIFACT_ID: ${{ needs.build-distributions.outputs.artifact_id }}
+          DIST_ARTIFACT_DIGEST: ${{ needs.build-distributions.outputs.artifact_digest }}
+          SITE_ARTIFACT_ID: ${{ needs.render-docs.outputs.artifact_id }}
+          SITE_ARTIFACT_DIGEST: ${{ needs.render-docs.outputs.artifact_digest }}
+        run: uv run --locked python -m scripts.delivery seal --run-id "$GITHUB_RUN_ID" --output delivery-seal
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: delivery-seal-${{ github.run_id }}-${{ github.run_attempt }}
+          path: delivery-seal/seal.json
+          if-no-files-found: error

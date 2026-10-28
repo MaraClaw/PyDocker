@@ -6,79 +6,54 @@ on:
     types: [completed]
     branches: [main]
 
+permissions: {}
+
+concurrency:
+  group: pypi-tested-delivery
+  cancel-in-progress: false
+
 jobs:
-  eligibility:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
+  publish:
+    name: Publish tested distributions
     if: >-
       ${{ github.event.workflow_run.conclusion == 'success' &&
           github.event.workflow_run.event == 'push' &&
           github.event.workflow_run.head_branch == 'main' &&
           github.event.workflow_run.head_repository.full_name == github.repository }}
-    outputs:
-      eligible: ${{ steps.check.outputs.eligible }}
-    steps:
-      - id: check
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        with:
-          script: |
-            const { owner, repo } = context.repo;
-            const headSha = context.payload.workflow_run.head_sha;
-            const pullRequests = await github.paginate(
-              github.rest.repos.listPullRequestsAssociatedWithCommit,
-              { owner, repo, commit_sha: headSha, per_page: 100 }
-            );
-            for (const pullRequest of pullRequests) {
-              const { data: pull } = await github.rest.pulls.get({
-                owner, repo, pull_number: pullRequest.number
-              });
-              if (pull.merged === true &&
-                  pull.base.ref === 'main' &&
-                  pull.base.repo.full_name === `${owner}/${repo}` &&
-                  pull.merge_commit_sha === headSha) {
-                core.setOutput('eligible', 'true');
-                return;
-              }
-            }
-            core.setOutput('eligible', 'false');
-
-  deploy:
-    needs: eligibility
-    if: ${{ needs.eligibility.outputs.eligible == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
-      id-token: write
-
+      actions: read
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_REPOSITORY_ID: ${{ github.repository_id }}
+      PRODUCER_RUN_ID: ${{ github.event.workflow_run.id }}
+      PRODUCER_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
-      - name: Setup uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.13.6"
           python-version: "3.14.8"
-      - name: Install locked dependencies
-        run: uv sync --locked
-      - name: Build distributions
-        run: uv build --no-sources --sdist --wheel
-      - name: Smoke check the exact wheel
-        id: distribution
-        run: |
-          project_version=$(uv run --locked python -c "import pathlib, tomllib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
-          wheel="$PWD/dist/pywhales-${project_version}-py3-none-any.whl"
-          printf 'version=%s\n' "$project_version" >> "$GITHUB_OUTPUT"
-          uv run --isolated --no-project --no-config --python 3.14.8 --with "$wheel" -- python -I -c "import importlib.metadata, importlib.util, sys; from importlib.resources import files; from pywhales import DockerClient; assert callable(DockerClient); assert importlib.metadata.version('pywhales') == sys.argv[1]; assert files('pywhales').joinpath('py.typed').is_file(); assert importlib.util.find_spec('python_on_whales') is None" "$project_version"
-      - name: Publish package distributions to PyPI
+      - name: Verify producer and select exact missing PyPI files
+        id: prepare
+        run: uv run --locked python -m scripts.delivery prepare --run-id "$PRODUCER_RUN_ID" --output delivery-upload
+      - name: Publish exact downloaded bytes without rebuilding
+        if: steps.prepare.outputs.pending == 'true'
+        continue-on-error: true
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           password: ${{ secrets.PYPI_PUBLISH_PACKAGE_TOKEN }}
-      - name: Smoke check the published version
-        env:
-          PROJECT_VERSION: ${{ steps.distribution.outputs.version }}
-        run: |
-          uv run --isolated --no-project --no-config --no-cache --python 3.14.8 --default-index https://pypi.org/simple --with "pywhales==$PROJECT_VERSION" -- python -I -c "import importlib.metadata, importlib.util, sys; from importlib.resources import files; from pywhales import DockerClient; assert callable(DockerClient); assert importlib.metadata.version('pywhales') == sys.argv[1]; assert files('pywhales').joinpath('py.typed').is_file(); assert importlib.util.find_spec('python_on_whales') is None" "$PROJECT_VERSION"
+          packages-dir: delivery-upload/
+          attestations: false
+      - name: Confirm both destination hashes before issuing receipt
+        run: uv run --locked python -m scripts.delivery confirm --run-id "$PRODUCER_RUN_ID" --output delivery-receipt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: delivery-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: delivery-receipt/receipt.json
+          if-no-files-found: error

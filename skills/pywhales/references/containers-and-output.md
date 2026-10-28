@@ -52,6 +52,32 @@ decode its byte payload. Don't combine `detach=True` with streaming. For
 off for captured automation; use `interactive=True, tty=True` for an actual
 interactive terminal session.
 
+`run`, `execute`, and `logs` each accept a keyword-only `timeout` in positive
+finite seconds, replacing the client's `default_timeout` for that one launch;
+omitting it (`None`) inherits the client default, which is itself `None`
+(unbounded) unless set on `DockerClient(...)`. Expiry kills and reaps the
+local CLI and raises `DockerTimeout`, not a daemon-side container timeout; it
+does not stop a detached container or guarantee cancellation of the command
+inside it. See [Client, setup, and errors](client-and-errors.md) for the
+default-deadline contract. Image pull/inspect preflights and detached-result
+inspection are outside the selected run/execute/logs launch budget; a configured
+client default still applies separately to those launches.
+
+## Bound Stream Buffering
+
+Set `DockerClient(stream_buffer_bytes=1_048_576)` to bound buffered output at
+shared process-stream boundaries, including logs collected into text. The
+default `None` is unbounded; a bound must be a positive integer, not a boolean.
+This is a client option, not a `run(..., buffer_bytes=...)` argument.
+
+The stdout/stderr payload queue shares one budget. Each unfinished pipe record
+and retained stderr history has a separate bound, so this isn't a total-memory
+cap. Queue pressure blocks producers rather than dropping output; a record
+(including its newline) or stderr history exceeding its bound raises
+`BufferError`. For pull/push progress, the independent
+`image_stream_buffer_bytes` override falls back to this general budget when
+`None`; see [Registry transfers and archives](registry-and-archives.md).
+
 ## Own Detached Containers and Streams Separately
 
 ```python

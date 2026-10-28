@@ -57,6 +57,15 @@ actual CLI processes. A composite operation holds one permit for its entire
 scope, including preflight such as an image pull. Its child work isn't admitted
 again. This bound doesn't guarantee a cap on Docker's internal work.
 
+Each reservation also carries an application-defined `demand`, defaulting to
+`1`. `ClassLimit(..., demand_capacity=50)` optionally caps a class's total
+active demand separately from its active-slot count; the default `None` leaves
+aggregate demand unbounded. `owner.request(control, demand=3)` reserves 3
+demand units up front instead of the default 1. Demand validation rejects a
+`bool`, a non-`int`, a non-positive value, or a value exceeding a configured
+`demand_capacity`. Reservations only account for participating application
+work; they aren't a cap on daemon memory or CPU.
+
 ## Waiting, rejection, and cancellation
 
 When active capacity is unavailable, `SaturationPolicy.WAIT` waits in a bounded
@@ -114,6 +123,19 @@ Other SDK methods may return `None` for some inputs. Adapt that return shape
 inside the admitted factory; don't call the SDK before admission to discover
 the shape. `stream()` requires a context manager yielding an iterator.
 
+## Resizing demand
+
+An active reservation from `call()` or an open `stream()` can adjust its demand
+in place with `try_resize(demand)`, available on both the original
+`AdmissionRequest` and on `AdmittedStream`; they share one reservation, so
+either handle resizes it. Pass the new total demand, not a delta. Shrinking
+always succeeds and wakes FIFO waiters that might now fit. Growing returns
+`False`, unchanged, if the class has any pending request or its
+`demand_capacity` can't accommodate the increase; equal demand always succeeds.
+`try_resize` never waits. It raises `ValueError` for invalid or over-capacity
+demand, and `RuntimeError` before admission, after release, or once a stream
+begins closing, including through the original request handle at that point.
+
 ## Lazy sequences and observation
 
 For sequential work, `iter_calls()` consumes callables lazily. Each `next()`
@@ -128,8 +150,11 @@ for image in owner.iter_calls(control, calls):
 ```
 
 Owner snapshots expose bounded counts and admission outcomes without endpoint
-credentials, command arguments, or output payloads. Values printed or logged by
-your application remain your responsibility.
+credentials, command arguments, or output payloads. Each `ClassSnapshot` also
+carries `demand`, a `DemandSnapshot` of exact active and pending demand totals
+plus their own high-water marks, kept separate from the class's active/pending
+request counts and their high-water marks. Values printed or logged by your
+application remain your responsibility.
 
 Reentering the same owner from an admitted operation fails in the calling
 context. Avoid nested admission to that owner; treat the outer composite as one

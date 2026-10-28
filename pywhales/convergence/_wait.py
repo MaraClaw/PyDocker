@@ -47,6 +47,7 @@ def capture_service(
     policy: InspectionPolicy,
     timeout: float,
     cancel: Event | None = None,
+    approved_node_ids: tuple[str, ...] | None = None,
 ) -> ServiceTarget | Failure | Deadline | Cancelled:
     """Capture an immutable service ID and generation within a bounded observation.
 
@@ -56,18 +57,33 @@ def capture_service(
         policy: Required observation limits.
         timeout: Positive finite total seconds for capture.
         cancel: Optional cancellation event.
+        approved_node_ids: Fixed, nonempty distinct node IDs for a Global service;
+            omit for a Replicated service.
 
     Returns:
         A target or a typed failure, deadline, or cancellation outcome.
+
+    Raises:
+        ValueError: If supplied node membership is not a nonempty tuple of distinct,
+            nonempty strings, or the timeout or service ID is invalid.
     """
     _positive(timeout)
     if not service_id:
         raise ValueError("Service ID must not be empty")
+    if approved_node_ids is not None and (
+        type(approved_node_ids) is not tuple
+        or not approved_node_ids
+        or any(type(node_id) is not str or not node_id for node_id in approved_node_ids)
+        or len(set(approved_node_ids)) != len(approved_node_ids)
+    ):
+        raise ValueError("Approved node IDs must be a nonempty tuple of distinct IDs")
     deadline = time.monotonic() + timeout
     try:
         with observation(policy, deadline=deadline, cancel=cancel):
             return target_from_wire(
-                client.client_config, inspect_service(client.client_config, service_id)
+                client.client_config,
+                inspect_service(client.client_config, service_id),
+                approved_node_ids,
             )
     except ObservationCancelled:
         return Cancelled()
@@ -184,6 +200,18 @@ def wait(
                     ),
                     ongoing_updates=sum(item.ongoing_updates for item in observations)
                     + rechecked_updates,
+                    missing_ready_nodes=sum(
+                        item.missing_ready_nodes for item in observations
+                    ),
+                    duplicate_node_assignments=sum(
+                        item.duplicate_node_assignments for item in observations
+                    ),
+                    missing_node_assignments=sum(
+                        item.missing_node_assignments for item in observations
+                    ),
+                    outside_approved_nodes=sum(
+                        item.outside_approved_nodes for item in observations
+                    ),
                 )
                 if ready:
                     return Success()

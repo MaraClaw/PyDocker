@@ -64,7 +64,8 @@ elif args[:2] == ["service", "ps"]:
         threading.Event().wait()
     print("\\n".join(task["ID"] for task in tasks if task["ServiceID"] == args[-1]))
 elif args[:3] == ["inspect", "--type", "task"]:
-    print(json.dumps([task for task in tasks if task["ID"] == args[3]]))
+    override = data.get("task_inspect_overrides", {}).get(args[3])
+    print(json.dumps([override] if override is not None else [task for task in tasks if task["ID"] == args[3]]))
 elif args[:2] in (["stack", "deploy"], ["service", "update"]):
     pass
 else:
@@ -248,6 +249,15 @@ def test_zero_and_fixed_stack_membership(
     )
 
 
+def test_stack_rejects_mutable_membership(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    store(tmp_path, [global_service()], [])
+    members: Any = [capture_global(fake_cli, policy)]
+    with pytest.raises(ValueError):
+        StackTarget(services=members)
+
+
 def test_version_change_is_superseded(
     fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
 ) -> None:
@@ -260,14 +270,18 @@ def test_version_change_is_superseded(
     assert isinstance(result, Failure) and result.reason == "superseded"
 
 
+@pytest.mark.parametrize("global_mode", [False, True])
 def test_cancellation_reaps_hung_fake_cli(
     fake_cli: DockerClient,
     policy: InspectionPolicy,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    global_mode: bool,
 ) -> None:
-    store(tmp_path, [service()], [task()])
-    target = capture(fake_cli, policy)
+    store(tmp_path, [global_service() if global_mode else service()], [task()])
+    target = (
+        capture_global(fake_cli, policy) if global_mode else capture(fake_cli, policy)
+    )
     (tmp_path / "hang").touch()
     cancel = Event()
     processes: list[subprocess.Popen[bytes]] = []
@@ -707,10 +721,21 @@ def test_expiry_at_final_checkpoint_discards_candidate(
 def test_final_stack_rechecks_continue_after_an_ongoing_update(
     fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
 ) -> None:
-    first, second = service(), service("service-b")
-    store(tmp_path, [first, second], [task(), task("task-b", "service-b")])
+    first, second = global_service(), service("service-b")
+    store(
+        tmp_path,
+        [first, second],
+        [
+            global_task("task-a", "node-a"),
+            global_task("task-c", "node-b"),
+            task("task-b", "service-b"),
+        ],
+    )
     target = StackTarget(
-        services=(capture(fake_cli, policy), capture(fake_cli, policy, "service-b"))
+        services=(
+            capture_global(fake_cli, policy),
+            capture(fake_cli, policy, "service-b"),
+        )
     )
     updating = {**first, "UpdateStatus": {"State": "updating"}}
     superseded = {**second, "Version": {"Index": 8}}
@@ -749,3 +774,273 @@ def test_capture_deadline_has_no_complete_cycle_detail(
     result = capture_service(fake_cli, "service-a", policy=policy, timeout=2)
     assert isinstance(result, Deadline) and result.detail is None
     assert (tmp_path / "started").exists()
+
+
+def global_service(identity: str = "service-a") -> dict[str, Any]:
+    snapshot = service(identity)
+    snapshot["Spec"]["Mode"] = {"Global": {}}
+    return snapshot
+
+
+def global_task(
+    identity: str, node_id: str, service_id: str = "service-a"
+) -> dict[str, Any]:
+    current = task(identity, service_id)
+    current.pop("Slot")
+    current["NodeID"] = node_id
+    return current
+
+
+def capture_global(
+    client: DockerClient, policy: InspectionPolicy, identity: str = "service-a"
+) -> ServiceTarget:
+    result = capture_service(
+        client,
+        identity,
+        policy=policy,
+        timeout=5,
+        approved_node_ids=("node-a", "node-b"),
+    )
+    assert isinstance(result, ServiceTarget)
+    return result
+
+
+@pytest.mark.parametrize(
+    "membership", [(), ("node-a", "node-a"), ("",), (1,), ["node-a"]]
+)
+def test_global_capture_rejects_invalid_membership_before_launch(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    membership: tuple[str, ...],
+) -> None:
+    with pytest.raises(ValueError):
+        capture_service(
+            fake_cli,
+            "service-a",
+            policy=policy,
+            timeout=5,
+            approved_node_ids=membership,
+        )
+    assert not (tmp_path / "calls").exists()
+
+
+def test_capture_freezes_global_membership_and_rejects_replicated_override(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    store(tmp_path, [global_service(), service("service-b")], [])
+    target = capture_global(fake_cli, policy)
+    assert target.mode == "global" and target.approved_node_ids == ("node-a", "node-b")
+    result = capture_service(
+        fake_cli, "service-b", policy=policy, timeout=5, approved_node_ids=("node-a",)
+    )
+    assert isinstance(result, Failure) and result.reason == "unsupported"
+
+
+@pytest.mark.parametrize(
+    "mutation, expected",
+    [
+        ("absent", DeadlineDetail(1, missing_ready_nodes=1)),
+        (
+            "missing",
+            DeadlineDetail(1, missing_ready_nodes=1, missing_node_assignments=1),
+        ),
+        ("empty", DeadlineDetail(1, missing_ready_nodes=1, missing_node_assignments=1)),
+        (
+            "duplicate",
+            DeadlineDetail(1, missing_ready_nodes=1, duplicate_node_assignments=1),
+        ),
+        ("extra-duplicate", DeadlineDetail(1, duplicate_node_assignments=1)),
+        ("outside", DeadlineDetail(1, missing_ready_nodes=1, outside_approved_nodes=1)),
+        ("extra-outside", DeadlineDetail(1, outside_approved_nodes=1)),
+        ("stale", DeadlineDetail(1, missing_ready_nodes=1, stale_templates=1)),
+        ("nonrunning", DeadlineDetail(1, missing_ready_nodes=1, non_running_tasks=1)),
+        ("history", DeadlineDetail(1, missing_ready_nodes=1)),
+    ],
+)
+def test_global_membership_blockers_are_safe_affected_service_counts(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    mutation: str,
+    expected: DeadlineDetail,
+) -> None:
+    first, second = global_task("task-a", "node-a"), global_task("task-b", "node-b")
+    tasks = [first, second]
+    if mutation == "absent":
+        tasks.pop()
+    elif mutation == "missing":
+        del second["NodeID"]
+    elif mutation == "empty":
+        second["NodeID"] = ""
+    elif mutation == "duplicate":
+        second["NodeID"] = "node-a"
+    elif mutation == "extra-duplicate":
+        tasks.append(global_task("task-c", "node-a"))
+    elif mutation == "outside":
+        second["NodeID"] = "private-outside-node"
+    elif mutation == "extra-outside":
+        tasks.append(global_task("task-c", "private-outside-node"))
+    elif mutation == "stale":
+        second["Spec"]["ContainerSpec"]["Image"] = "private-template"
+    elif mutation == "nonrunning":
+        second["Status"]["State"] = "starting"
+    else:
+        second["DesiredState"] = "shutdown"
+    store(tmp_path, [global_service()], tasks)
+    result = wait(
+        capture_global(fake_cli, policy), policy=policy, timeout=4, poll_interval=10
+    )
+    assert isinstance(result, Deadline) and result.detail == expected
+    assert "node-a" not in repr(result) and "private" not in repr(result)
+
+
+@pytest.mark.parametrize("node_id", [None, 4, True, [], {}])
+def test_global_malformed_node_wire_fails_safely(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path, node_id: object
+) -> None:
+    current = global_task("task-a", "node-a")
+    current["NodeID"] = node_id
+    store(tmp_path, [global_service()], [current])
+    result = wait(
+        capture_global(fake_cli, policy), policy=policy, timeout=5, poll_interval=1
+    )
+    assert isinstance(result, Failure) and result.reason == "observation"
+    assert "NodeID" not in repr(result)
+
+
+@pytest.mark.parametrize("field", ["ID", "ServiceID"])
+def test_global_mismatched_task_identity_fails_safely(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path, field: str
+) -> None:
+    current = global_task("task-a", "node-a")
+    store(tmp_path, [global_service()], [current])
+    data = json.loads((tmp_path / "data.json").read_text())
+    data["task_inspect_overrides"] = {"task-a": {**current, field: "wrong-id"}}
+    (tmp_path / "data.json").write_text(json.dumps(data))
+    result = wait(
+        capture_global(fake_cli, policy), policy=policy, timeout=5, poll_interval=1
+    )
+    assert isinstance(result, Failure) and result.reason == "observation"
+    assert "wrong-id" not in repr(result)
+
+
+def test_global_reassignment_and_history_converge_in_mixed_stack(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    first = global_task("task-a", "node-a")
+    wrong = global_task("task-b", "node-a")
+    replacement = global_task("task-c", "node-b")
+    history = {**wrong, "DesiredState": "shutdown"}
+    store(
+        tmp_path,
+        [global_service(), service("service-b")],
+        [task("task-d", "service-b")],
+    )
+    target = StackTarget(
+        services=(
+            capture_global(fake_cli, policy),
+            capture(fake_cli, policy, "service-b"),
+        )
+    )
+    data = json.loads((tmp_path / "data.json").read_text())
+    data["task_sequences"] = {
+        "service-a": [[first, wrong], [first, history, replacement]]
+    }
+    (tmp_path / "data.json").write_text(json.dumps(data))
+    assert isinstance(
+        wait(target, policy=policy, timeout=10, poll_interval=0.01), Success
+    )
+    calls = [json.loads(line) for line in (tmp_path / "calls").read_text().splitlines()]
+    assert (
+        sum(call[:2] == ["service", "ps"] and call[-1] == "service-a" for call in calls)
+        == 2
+    )
+    assert calls[-2:] == [
+        ["service", "inspect", "service-a"],
+        ["service", "inspect", "service-b"],
+    ]
+
+
+def test_global_final_recheck_detects_supersession_in_mixed_stack(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    first, second = global_service(), service("service-b")
+    store(
+        tmp_path,
+        [first, second],
+        [
+            global_task("task-a", "node-a"),
+            global_task("task-b", "node-b"),
+            task("task-c", "service-b"),
+        ],
+    )
+    target = StackTarget(
+        services=(
+            capture_global(fake_cli, policy),
+            capture(fake_cli, policy, "service-b"),
+        )
+    )
+    changed = {**first, "Version": {"Index": 6}}
+    data = json.loads((tmp_path / "data.json").read_text())
+    data["sequences"] = {"service-a": [first, first, changed]}
+    (tmp_path / "data.json").write_text(json.dumps(data))
+    result = wait(target, policy=policy, timeout=10, poll_interval=1)
+    assert isinstance(result, Failure) and result.reason == "superseded"
+
+
+def test_global_partial_recheck_retains_previous_complete_cycle_and_reaps_child(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = global_task("task-a", "node-a")
+    second = global_task("task-b", "node-b")
+    store(
+        tmp_path,
+        [global_service(), service("service-b")],
+        [task("task-c", "service-b")],
+    )
+    target = StackTarget(
+        services=(
+            capture_global(fake_cli, policy),
+            capture(fake_cli, policy, "service-b"),
+        )
+    )
+    data = json.loads((tmp_path / "data.json").read_text())
+    stale = global_task("task-a", "node-a")
+    stale["Spec"]["ForceUpdate"] = 99
+    data["task_sequences"] = {"service-a": [[], [stale], [first, second]]}
+    data["hang_at"] = {"args": ["service", "inspect", "service-b"], "occurrence": 5}
+    (tmp_path / "data.json").write_text(json.dumps(data))
+    processes: list[subprocess.Popen[bytes]] = []
+    popen = subprocess.Popen
+
+    def track(
+        args: list[str],
+        *,
+        stdout: int,
+        stderr: int,
+        env: Mapping[str, str],
+        pass_fds: Sequence[int],
+    ) -> subprocess.Popen[bytes]:
+        process = popen(args, stdout=stdout, stderr=stderr, env=env, pass_fds=pass_fds)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", track)
+    result = wait(target, policy=policy, timeout=10, poll_interval=0.01)
+    assert isinstance(result, Deadline)
+    assert result.detail == DeadlineDetail(2, missing_ready_nodes=1, stale_templates=1)
+    assert (tmp_path / "started").exists()
+    assert all(process.returncode is not None for process in processes)
+    assert all(
+        process.stdout is not None and process.stdout.closed for process in processes
+    )
+    assert all(
+        process.stderr is not None and process.stderr.closed for process in processes
+    )
+    calls = [json.loads(line) for line in (tmp_path / "calls").read_text().splitlines()]
+    assert calls[-1] == ["service", "inspect", "service-b"]
+    assert calls.count(calls[-1]) == 5

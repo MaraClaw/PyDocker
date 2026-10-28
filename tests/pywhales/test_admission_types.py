@@ -7,6 +7,7 @@ from pywhales.admission import (
     AdmissionRequest,
     AdmissionSnapshot,
     AdmittedStream,
+    DemandSnapshot,
     PressureClass,
 )
 from pywhales.components.image.streams import MultiImageStream
@@ -41,3 +42,6 @@ def _check_admission_generic_inference(
     assert_type(owner.snapshot().classes[0].outcomes.rejected_closed, int)
     assert_type(owner.close(), None)
     assert_type(owner.wait_drained(timeout=1), bool)
+    assert_type(owner.request(pressure, demand=2).try_resize(3), bool)
+    assert_type(owner.request(pressure).stream(lambda: process).try_resize(2), bool)
+    assert_type(owner.snapshot().classes[0].demand, DemandSnapshot)

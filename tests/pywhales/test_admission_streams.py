@@ -55,7 +55,7 @@ class Source(AbstractContextManager[Iterator[int]], Iterator[int]):
 def _owner() -> tuple[AdmissionOwner, PressureClass]:
     pressure = PressureClass("stream")
     return AdmissionOwner(
-        EndpointIdentity("local"), {pressure: ClassLimit(1, 0)}
+        EndpointIdentity("local"), {pressure: ClassLimit(1, 0, demand_capacity=5)}
     ), pressure
 
 
@@ -106,10 +106,11 @@ def test_setup_failure_releases_without_exiting_partial_source(stage: str) -> No
         return source
 
     with pytest.raises(KeyboardInterrupt) as raised:
-        owner.request(pressure).stream(factory)
+        owner.request(pressure, demand=4).stream(factory)
     assert raised.value is error
     assert source.exits == []
     assert owner.snapshot().classes[0].outcomes.failed == 1
+    assert owner.snapshot().classes[0].demand.active == 0
     assert owner.request(pressure).call(lambda: 4) == 4
 
 
@@ -125,7 +126,8 @@ def test_original_failure_survives_suppression_and_cleanup_error(
         source.iteration_error = original
     if cleanup:
         source.cleanup_error = secondary
-    stream = owner.request(pressure).stream(lambda: source)
+    stream = owner.request(pressure, demand=4).stream(lambda: source)
+    assert stream.try_resize(3)
     with (
         pytest.raises(BaseExceptionGroup if cleanup else KeyboardInterrupt) as raised,
         stream,
@@ -141,6 +143,7 @@ def test_original_failure_survives_suppression_and_cleanup_error(
     assert source.exits == [original]
     assert owner.snapshot().classes[0].outcomes.failed == 1
     assert owner.snapshot().classes[0].active == 0
+    assert owner.snapshot().classes[0].demand.active == 0
 
 
 def test_clean_close_propagates_terminal_error_from_source_exit() -> None:

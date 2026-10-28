@@ -1,5 +1,6 @@
 """Validation, safe reporting, and isolated admission contracts."""
 
+from contextlib import nullcontext
 from dataclasses import FrozenInstanceError
 
 import pytest
@@ -8,6 +9,7 @@ from pywhales.admission import (
     AdmissionOwner,
     AdmissionRejected,
     ClassLimit,
+    DemandSnapshot,
     EndpointIdentity,
     PressureClass,
     RejectionReason,
@@ -119,3 +121,57 @@ def test_closed_rejections_saturate_separately_without_wrapping() -> None:
         counts.cancelled,
         counts.queue_timed_out,
     ) == (0, 0, 0, 0, 0)
+
+
+@pytest.mark.parametrize("capacity", [0, -1, True, 1.5, "2"])
+def test_limit_rejects_invalid_demand_capacity(capacity: int) -> None:
+    # Given / When / Then: invalid capacity fails at construction.
+    with pytest.raises(ValueError):
+        ClassLimit(1, 0, demand_capacity=capacity)
+
+
+@pytest.mark.parametrize("demand", [0, -1, True, 1.5, "2", None, lambda: 1])
+def test_invalid_demand_never_registers_a_request(demand: int) -> None:
+    # Given
+    pressure = PressureClass("read")
+    owner = AdmissionOwner(EndpointIdentity("local"), {pressure: ClassLimit(2, 2)})
+    # When / Then
+    with pytest.raises(ValueError):
+        owner.request(pressure, demand=demand)
+    snapshot = owner.snapshot().classes[0]
+    assert snapshot.demand == DemandSnapshot(0, 0, 0, 0)
+    assert (snapshot.active, snapshot.pending) == (0, 0)
+
+
+def test_oversized_demand_fails_before_work_is_supplied() -> None:
+    # Given
+    pressure = PressureClass("read")
+    owner = AdmissionOwner(
+        EndpointIdentity("local"), {pressure: ClassLimit(2, 2, demand_capacity=3)}
+    )
+    # When / Then
+    with pytest.raises(ValueError):
+        owner.request(pressure, demand=4)
+    assert owner.snapshot().classes[0].demand == DemandSnapshot(0, 0, 0, 0)
+
+
+def test_demand_snapshots_are_immutable_and_independent_of_request_counts() -> None:
+    # Given
+    pressure = PressureClass("read")
+    limit = ClassLimit(3, 2, SaturationPolicy.REJECT, demand_capacity=10)
+    owner = AdmissionOwner(EndpointIdentity("local"), {pressure: limit})
+    with owner.request(pressure, demand=4).stream(
+        lambda: nullcontext(iter(()))
+    ) as stream:
+        before = owner.snapshot().classes[0]
+        # When
+        assert stream.try_resize(7)
+        # Then
+        after = owner.snapshot().classes[0]
+        assert (before.active, after.active, after.active_high_water) == (1, 1, 1)
+        assert before.demand == DemandSnapshot(4, 0, 4, 0)
+        assert after.demand == DemandSnapshot(7, 0, 7, 0)
+        attribute = "active"
+        with pytest.raises(FrozenInstanceError):
+            setattr(after.demand, attribute, 0)
+    assert owner.snapshot().classes[0].demand == DemandSnapshot(0, 0, 7, 0)

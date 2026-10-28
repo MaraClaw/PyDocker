@@ -2,20 +2,33 @@
 
 import os
 import subprocess
+from collections.abc import Buffer, Iterator
 from contextlib import suppress
+from io import BufferedReader, RawIOBase
+from select import select
 from subprocess import Popen
 from threading import Event, Lock, Thread
 from time import monotonic, sleep
-from typing import IO
+from typing import IO, override
 
 from pywhales.exceptions import DockerTimeout
 
 
 class ArchiveDeadline:
-    """Reap an expired archive child independently of its caller's iterator."""
+    """Account for archive pipe I/O and reap an expired local child.
+
+    Counters include successful writes and reads, never submitted buffer sizes.
+    The pipe lock serializes caller I/O with watchdog drains. Reap the process
+    and join thread before publishing counters; a deadline is optional.
+    """
 
     def __init__(
-        self, process: Popen[bytes], command: list[str], deadline: float, *, raw: bool
+        self,
+        process: Popen[bytes],
+        command: list[str],
+        deadline: float | None,
+        *,
+        raw: bool,
     ) -> None:
         self.process = process
         self.command = command
@@ -24,16 +37,24 @@ class ArchiveDeadline:
         self.expired = False
         self.stdout: bytes | None = None
         self.stderr: bytes | None = None
+        self.stdin_bytes: int | None = None if process.stdin is None else 0
+        self.stdout_bytes: int | None = None if process.stdout is None else 0
+        self.stderr_bytes: int | None = None if process.stderr is None else 0
         self.released = Event()
         self.lock = Lock()
         for pipe in (process.stdin, process.stdout, process.stderr):
-            if pipe is not None:
+            if pipe is not None and (
+                deadline is not None or (pipe is process.stdin and os.name != "nt")
+            ):
                 os.set_blocking(pipe.fileno(), False)
         self.thread = Thread(target=self._watch, daemon=True)
         self.thread.start()
 
     def _watch(self) -> None:
         try:
+            if self.deadline is None:
+                self.process.wait()
+                return
             while True:
                 remaining = self.deadline - monotonic()
                 try:
@@ -68,13 +89,28 @@ class ArchiveDeadline:
         chunks = []
         while True:
             try:
-                chunk = os.read(pipe.fileno(), 65536)
+                chunk = self._read(pipe, 65536)
             except BlockingIOError:
                 break
             if not chunk:
                 break
             chunks.append(chunk)
         return b"".join(chunks)
+
+    def _read(self, pipe: IO[bytes], size: int) -> bytes:
+        """Read once under the caller-held lock and account at the pipe boundary."""
+        chunk = os.read(pipe.fileno(), size)
+        self.record_read(pipe, chunk)
+        return chunk
+
+    def record_read(self, pipe: IO[bytes], chunk: bytes) -> None:
+        """Account for one pipe-boundary read while holding the lock."""
+        if pipe is self.process.stdout:
+            assert self.stdout_bytes is not None
+            self.stdout_bytes += len(chunk)
+        elif pipe is self.process.stderr:
+            assert self.stderr_bytes is not None
+            self.stderr_bytes += len(chunk)
 
     def check(self) -> None:
         if self.expired:
@@ -94,10 +130,15 @@ class ArchiveDeadline:
                 if self.expired:
                     continue
                 try:
-                    return os.read(pipe.fileno(), size)
+                    return self._read(pipe, size)
                 except BlockingIOError:
                     pass
             sleep(0.01)
+
+    def lines(self, pipe: IO[bytes]) -> Iterator[bytes]:
+        """Yield buffered lines, counting raw reads including read-ahead."""
+        with BufferedReader(_ArchiveReader(self, pipe)) as reader:
+            yield from reader
 
     def write(self, pipe: IO[bytes], data: bytes) -> None:
         self.check()
@@ -112,6 +153,31 @@ class ArchiveDeadline:
                 with suppress(BlockingIOError):
                     end = offset + 4096 if os.name == "nt" else len(view)
                     written = os.write(pipe.fileno(), view[offset:end])
+                    assert self.stdin_bytes is not None
+                    self.stdin_bytes += written
             offset += written
             if not written:
-                sleep(0.01)
+                if self.deadline is None:
+                    select([], [pipe], [])
+                else:
+                    sleep(0.01)
+
+
+class _ArchiveReader(RawIOBase):
+    """Adapt measured reads without taking ownership of the Popen-owned pipe."""
+
+    def __init__(self, owner: ArchiveDeadline, pipe: IO[bytes]) -> None:
+        super().__init__()
+        self._owner = owner
+        self._pipe = pipe
+
+    @override
+    def readable(self) -> bool:
+        return True
+
+    @override
+    def readinto(self, buffer: Buffer) -> int:
+        view = memoryview(buffer)
+        chunk = self._owner.read(self._pipe, len(view))
+        view[: len(chunk)] = chunk
+        return len(chunk)

@@ -48,6 +48,7 @@ class ExecutionTelemetry:
         self._lock = Lock()
         self.stdout_bytes: int | None = None
         self.stderr_bytes: int | None = None
+        self.stdin_bytes: int | None = None
         self.return_code: int | None = None
 
     def start(self) -> None:
@@ -83,6 +84,7 @@ class ExecutionTelemetry:
                 self.stderr_bytes,
                 attempt_id=self._attempt_id,
                 return_code=self.return_code,
+                stdin_bytes=self.stdin_bytes,
             )
         deliver(self._observer, record)
 
@@ -100,5 +102,7 @@ class ExecutionTelemetry:
             self.finish("success")
         elif issubclass(exc_type, (DockerTimeout, ObservationTimeout)):
             self.finish("timeout")
+        elif issubclass(exc_type, GeneratorExit):
+            self.finish("closed")
         else:
             self.finish("failure")

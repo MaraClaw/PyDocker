@@ -37,6 +37,7 @@ from pywhales._execution_policy import (
     get_execution_policy,
 )
 from pywhales._process_stream import ProcessStream as ProcessStream
+from pywhales._stdin_pump import StdinPump
 from pywhales.exceptions import DockerException, DockerTimeout, ObservationLimitError
 from pywhales.exceptions import get_docker_exception_type as get_docker_exception_type
 from pywhales.telemetry._lifecycle import ExecutionTelemetry
@@ -315,7 +316,7 @@ def run(
                 observation,
                 telemetry=telemetry,
             )
-        elif timeout is None:
+        elif timeout is None and input is None:
             telemetry.start()
             completed_process = subprocess.run(
                 args,
@@ -327,7 +328,7 @@ def run(
             )
         else:
             telemetry.start()
-            deadline = monotonic() + timeout
+            deadline = None if timeout is None else monotonic() + timeout
             process = Popen(
                 args,
                 stdin=PIPE if input is not None else None,
@@ -337,17 +338,19 @@ def run(
                 pass_fds=pass_fds,
             )
             try:
-                with process:
-                    communicate_input = input
+                with process, StdinPump(process, input, telemetry):
                     while True:
                         try:
                             # Bound OS waits without shortening the invocation's deadline.
                             stdout, stderr = process.communicate(
-                                communicate_input,
-                                timeout=min(86400, max(0, deadline - monotonic())),
+                                timeout=(
+                                    None
+                                    if deadline is None
+                                    else min(86400, max(0, deadline - monotonic()))
+                                ),
                             )
                         except subprocess.TimeoutExpired:
-                            communicate_input = None
+                            assert deadline is not None
                             if monotonic() < deadline:
                                 continue
                             timed_out = process.poll() is None
@@ -368,6 +371,7 @@ def run(
                                     raw_diagnostics=policy.raw_diagnostics,
                                 ) from None
                         break
+                    telemetry.captured(stdout, stderr)
                     completed_process = subprocess.CompletedProcess(
                         args, process.returncode, stdout, stderr
                     )

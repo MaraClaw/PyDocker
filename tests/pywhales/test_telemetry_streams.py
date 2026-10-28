@@ -26,6 +26,7 @@ def completion(records: list[TelemetryRecord]) -> CompletionRecord:
     completed = records[1]
     assert isinstance(completed, CompletionRecord)
     assert completed.attempt_id == records[0].attempt_id
+    assert completed.stdin_bytes is None
     return completed
 
 

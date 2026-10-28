@@ -11,6 +11,7 @@ import json
 import os
 from collections import OrderedDict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import suppress
 from datetime import datetime
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
@@ -54,6 +55,7 @@ from pywhales.components.image.streams import (
     MultiImageStream,
 )
 from pywhales.exceptions import DockerException, NoSuchImage
+from pywhales.telemetry._lifecycle import ExecutionTelemetry
 from pywhales.utils import (
     MappedProcessStream,
     ValidPath,
@@ -501,52 +503,48 @@ class ImageCLI(DockerCLICaller):
         )
         command = [str(argument) for argument in full_cmd]
         environment = finalize_environment(environment, command)
-        deadline = (
-            None
-            if policy.default_timeout is None
-            else monotonic() + policy.default_timeout
-        )
-        with Popen(
-            command,
-            stdin=PIPE,
-            stdout=PIPE,
-            env=environment,
-            bufsize=0 if deadline is not None else -1,
-        ) as process:
-            assert process.stdin is not None
-            assert process.stdout is not None
-            owner = (
+        with ExecutionTelemetry(policy.telemetry_observer, "archive_load") as telemetry:
+            telemetry.start()
+            deadline = (
                 None
-                if deadline is None
-                else ArchiveDeadline(
+                if policy.default_timeout is None
+                else monotonic() + policy.default_timeout
+            )
+            with Popen(
+                command, stdin=PIPE, stdout=PIPE, env=environment, bufsize=0
+            ) as process:
+                assert process.stdin is not None
+                assert process.stdout is not None
+                owner = ArchiveDeadline(
                     process, command, deadline, raw=policy.raw_diagnostics
                 )
-            )
-            for buffer_bytes in input:
-                if owner is None:
-                    process.stdin.write(buffer_bytes)
-                    process.stdin.flush()
-                else:
-                    owner.write(process.stdin, buffer_bytes)
-            if owner is not None:
-                owner.check()
-            process.stdin.close()
-            if owner is None:
-                stdout = process.stdout.read()
-            else:
-                chunks = []
-                while chunk := owner.read(process.stdout):
-                    chunks.append(chunk)
-                stdout = b"".join(chunks)
-                owner.check()
-            exit_code = process.wait()
-            if owner is not None:
-                owner.check()
-        if exit_code != 0:
-            raise DockerException(
-                command, exit_code, raw_diagnostics=policy.raw_diagnostics
-            )
-        return stdout.decode().splitlines()
+                try:
+                    for buffer_bytes in input:
+                        owner.write(process.stdin, buffer_bytes)
+                    owner.check()
+                    process.stdin.close()
+                    chunks = []
+                    while chunk := owner.read(process.stdout):
+                        chunks.append(chunk)
+                    stdout = b"".join(chunks)
+                    owner.check()
+                    exit_code = process.wait()
+                    owner.check()
+                finally:
+                    if process.poll() is None:
+                        with suppress(ProcessLookupError):
+                            process.kill()
+                    process.wait()
+                    owner.thread.join()
+                    telemetry.return_code = process.returncode
+                    telemetry.stdin_bytes = owner.stdin_bytes
+                    telemetry.stdout_bytes = owner.stdout_bytes
+                    telemetry.stderr_bytes = owner.stderr_bytes
+            if exit_code != 0:
+                raise DockerException(
+                    command, exit_code, raw_diagnostics=policy.raw_diagnostics
+                )
+            return stdout.decode().splitlines()
 
     def list(
         self,
@@ -1159,8 +1157,9 @@ class ImageCLI(DockerCLICaller):
 
         Yields:
             Archive-byte chunks from stdout, with no progress-record framing or
-            configured payload budget. Exhaustion or generator closure leaves
-            the subprocess context, which closes pipes and waits for the child.
+            configured payload budget. Exhaustion or generator closure closes
+            pipes, reaps the local child, and joins its accounting thread before
+            completing telemetry. Closure kills a still-running local child.
 
         Raises:
             NoSuchImage: The save CLI reports a missing image.
@@ -1173,53 +1172,59 @@ class ImageCLI(DockerCLICaller):
         )
         command = [str(argument) for argument in full_cmd]
         environment = finalize_environment(environment, command)
-        deadline = (
-            None
-            if policy.default_timeout is None
-            else monotonic() + policy.default_timeout
-        )
-        with Popen(
-            command,
-            stdout=PIPE,
-            stderr=PIPE,
-            env=environment,
-            bufsize=0 if deadline is not None else -1,
-        ) as process:
-            assert process.stdout is not None
-            assert process.stderr is not None
-            owner = (
+        with ExecutionTelemetry(policy.telemetry_observer, "archive_save") as telemetry:
+            telemetry.start()
+            deadline = (
                 None
-                if deadline is None
-                else ArchiveDeadline(
+                if policy.default_timeout is None
+                else monotonic() + policy.default_timeout
+            )
+            with Popen(
+                command, stdout=PIPE, stderr=PIPE, env=environment, bufsize=0
+            ) as process:
+                assert process.stdout is not None
+                assert process.stderr is not None
+                owner = ArchiveDeadline(
                     process, command, deadline, raw=policy.raw_diagnostics
                 )
-            )
-            if owner is None:
-                yield from process.stdout
-                exit_code = process.wait(0.1)
-            else:
-                while chunk := owner.read(process.stdout):
-                    yield chunk
-                owner.check()
-                exit_code = process.wait()
-                owner.check()
-            if exit_code != 0:
-                if owner is not None:
-                    os.set_blocking(process.stderr.fileno(), True)
-                stderr = process.stderr.read()
-                if "No such image" in stderr.decode():
-                    raise NoSuchImage(
-                        command,
-                        exit_code,
-                        stderr=stderr,
-                        raw_diagnostics=policy.raw_diagnostics,
-                    )
-                raise DockerException(
-                    command,
-                    exit_code,
-                    stderr=stderr,
-                    raw_diagnostics=policy.raw_diagnostics,
-                )
+                try:
+                    if deadline is None:
+                        yield from owner.lines(process.stdout)
+                        exit_code = process.wait(0.1)
+                    else:
+                        while chunk := owner.read(process.stdout):
+                            yield chunk
+                        owner.check()
+                        exit_code = process.wait()
+                        owner.check()
+                    if exit_code != 0:
+                        with owner.lock:
+                            os.set_blocking(process.stderr.fileno(), True)
+                            stderr = process.stderr.read()
+                            owner.record_read(process.stderr, stderr)
+                        if "No such image" in stderr.decode():
+                            raise NoSuchImage(
+                                command,
+                                exit_code,
+                                stderr=stderr,
+                                raw_diagnostics=policy.raw_diagnostics,
+                            )
+                        raise DockerException(
+                            command,
+                            exit_code,
+                            stderr=stderr,
+                            raw_diagnostics=policy.raw_diagnostics,
+                        )
+                finally:
+                    if process.poll() is None:
+                        with suppress(ProcessLookupError):
+                            process.kill()
+                    process.wait()
+                    owner.thread.join()
+                    telemetry.return_code = process.returncode
+                    telemetry.stdin_bytes = owner.stdin_bytes
+                    telemetry.stdout_bytes = owner.stdout_bytes
+                    telemetry.stderr_bytes = owner.stderr_bytes
 
     def tag(self, source_image: Image | str, new_tag: str) -> None:
         """Add a tag to a Docker image.

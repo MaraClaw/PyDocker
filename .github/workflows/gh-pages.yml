@@ -40,7 +40,7 @@ jobs:
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.13.6"
-          python-version: "3.14.8"
+          python-version: "3.14.10"
       - name: Verify receipt, destination, release and matching rendered site
         env:
           GH_TOKEN: ${{ github.token }}

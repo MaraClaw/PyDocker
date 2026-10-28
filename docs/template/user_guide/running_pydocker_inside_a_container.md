@@ -36,7 +36,7 @@ Next to this `main.py`, make a `Dockerfile`.
 
 ```Dockerfile
 # Dockerfile
-FROM python:3.14.8
+FROM python:3.14.10
 
 RUN wget https://download.docker.com/linux/static/stable/x86_64/docker-27.3.1.tgz -O /tmp/docker-27.3.1.tgz
 RUN tar -C /tmp -xzf /tmp/docker-27.3.1.tgz

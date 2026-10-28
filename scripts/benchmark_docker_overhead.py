@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # /// script
-# requires-python = ">=3.14.8"
+# requires-python = ">=3.14.10"
 # dependencies = []
 # ///
 """Measure simulated wrapper overhead using the checkout's installed dependencies.

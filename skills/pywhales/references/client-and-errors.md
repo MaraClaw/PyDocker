@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-Use Python >=3.14.8. In a uv-managed application, add the dependency with
+Use Python >=3.14.10. In a uv-managed application, add the dependency with
 `uv add pywhales`. The package doesn't supply the Docker CLI: Docker must be on
 PATH, and the selected engine must be reachable. Compose and Buildx commands
 also need their respective Docker CLI plugins.

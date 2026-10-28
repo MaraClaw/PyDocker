@@ -19,7 +19,7 @@ jobs:
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.13.6"
-          python-version: "3.14.8"
+          python-version: "3.14.10"
       - name: Install locked dependencies
         run: uv sync --locked
       - name: prepare
@@ -45,7 +45,7 @@ jobs:
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.13.6"
-          python-version: "3.14.8"
+          python-version: "3.14.10"
       - name: Install locked dependencies
         run: uv sync --locked
       - name: Run all checks
@@ -82,7 +82,7 @@ jobs:
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.13.6"
-          python-version: "3.14.8"
+          python-version: "3.14.10"
       - name: Install locked dependencies
         run: uv sync --locked
       - name: Setup Docker
@@ -100,7 +100,7 @@ jobs:
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.13.6"
-          python-version: "3.14.8"
+          python-version: "3.14.10"
       - name: Install locked dependencies
         run: uv sync --locked
       - name: Setup Docker
@@ -118,7 +118,7 @@ jobs:
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.13.6"
-          python-version: "3.14.8"
+          python-version: "3.14.10"
       - name: Install locked dependencies
         run: uv sync --locked
       - name: Setup Docker
@@ -139,7 +139,7 @@ jobs:
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.13.6"
-          python-version: "3.14.8"
+          python-version: "3.14.10"
       - name: Install locked dependencies
         run: uv sync --locked
       - name: Install verified Linux amd64 plugins
@@ -157,7 +157,7 @@ jobs:
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.13.6"
-          python-version: "3.14.8"
+          python-version: "3.14.10"
       - name: Install locked dependencies
         run: uv sync --locked
       - name: Setup Docker
@@ -189,7 +189,7 @@ jobs:
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.13.6"
-          python-version: "3.14.8"
+          python-version: "3.14.10"
       - run: uv build --no-sources --sdist --wheel
       - name: Isolate-install both exact distributions
         run: uv run --locked python -m scripts.delivery smoke
@@ -223,7 +223,7 @@ jobs:
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.13.6"
-          python-version: "3.14.8"
+          python-version: "3.14.10"
       - name: Seal exact uploader identities after every required check
         env:
           GH_TOKEN: ${{ github.token }}

@@ -189,8 +189,8 @@ def test_top_preserves_attribution_when_inspecting_owned_live_project(
 ) -> None:
     compose_file = tmp_path / "top-compose.yml"
     compose_file.write_text(
-        'services:\n  web:\n    image: python:3.14.8-slim-trixie\n    command: ["sleep", "300"]\n'
-        '  worker:\n    image: python:3.14.8-slim-trixie\n    command: ["sleep", "301"]\n'
+        'services:\n  web:\n    image: python:3.14.10-slim-trixie\n    command: ["sleep", "300"]\n'
+        '  worker:\n    image: python:3.14.10-slim-trixie\n    command: ["sleep", "301"]\n'
     )
     project = DockerClient(
         client_call=docker_client.client_config.client_call,

@@ -83,7 +83,7 @@ def smoke(root: Path) -> None:
                     "--no-config",
                     "--no-cache",
                     "--python",
-                    "3.14.8",
+                    "3.14.10",
                     "--with",
                     str(root / "dist" / filename),
                     "--",

@@ -7,7 +7,7 @@ description: >-
   or troubleshooting pywhales usage, output types, streaming, and cleanup. This
   skill is for consuming pywhales, not developing or contributing to the library.
 compatibility: >-
-  Python >=3.14.8 with pywhales installed; Docker CLI on PATH and a reachable
+  Python >=3.14.10 with pywhales installed; Docker CLI on PATH and a reachable
   Docker engine. Compose and Buildx plugins are required for their commands.
 ---
 

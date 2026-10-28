@@ -194,3 +194,50 @@ def test_interrupted_cleanup_wait_still_waits_then_releases_permit() -> None:
     stream.close()
     assert owner.snapshot().classes[0].active == 0
     assert owner.snapshot().classes[0].outcomes.failed == 1
+
+
+def test_closed_owner_drain_waits_for_source_exit_and_inflight_read() -> None:
+    pressure = PressureClass("stream")
+    owner = AdmissionOwner(EndpointIdentity("local"), {pressure: ClassLimit(1, 0)})
+    source = ClosingSource()
+    source.hold_exit = True
+    stream = owner.request(pressure).stream(lambda: source)
+    waiting, cleanup_waiting = Event(), Event()
+    wait, stream_wait = owner._condition.wait, stream._condition.wait
+
+    def signal_wait(timeout: float | None = None) -> bool:
+        waiting.set()
+        return wait(timeout)
+
+    def signal_cleanup(timeout: float | None = None) -> bool:
+        cleanup_waiting.set()
+        return stream_wait(timeout)
+
+    with ThreadPoolExecutor(3) as executor:
+        read = executor.submit(next, stream)
+        try:
+            assert source.reading.wait(3)
+            owner.close()
+            assert not source.exit_started.is_set()
+            with patch.object(owner._condition, "wait", side_effect=signal_wait):
+                drained = executor.submit(owner.wait_drained, timeout=3)
+                assert waiting.wait(3)
+            with patch.object(stream._condition, "wait", side_effect=signal_cleanup):
+                closed = executor.submit(stream.close)
+                assert source.exit_started.wait(3)
+                assert not owner.wait_drained(timeout=0.001)
+                source.finish_exit.set()
+                assert cleanup_waiting.wait(3)
+                assert not owner.wait_drained(timeout=0.001)
+                assert not drained.done() and not closed.done()
+                source.finish_read.set()
+                closed.result(3)
+            assert drained.result(3)
+            with pytest.raises(StopIteration):
+                read.result(3)
+        finally:
+            source.finish_exit.set()
+            source.finish_read.set()
+            source.wake.set()
+    stream.close()
+    assert owner.snapshot().classes[0].outcomes.stream_closed == 1

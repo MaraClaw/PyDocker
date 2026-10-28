@@ -201,3 +201,37 @@ def test_launch_timeout_clock_is_unchanged_after_queue_wait() -> None:
             release.set()
         first.result(3)
     _assert_reaped(children[0])
+
+
+@pytest.mark.parametrize("child_exited", [False, True])
+def test_idle_real_child_stream_holds_drain_until_explicit_cleanup(
+    child_exited: bool,
+) -> None:
+    pressure = PressureClass("stream")
+    owner = AdmissionOwner(EndpointIdentity("local"), {pressure: ClassLimit(1, 0)})
+    code = "print('ready', flush=True)"
+    if not child_exited:
+        code += "; input()"
+    child = stream_stdout_and_stderr(
+        [sys.executable, "-u", "-c", code], pipe_stdin=True
+    )
+    stream = owner.request(pressure).stream(lambda: child)
+    try:
+        if child_exited:
+            child._process.wait(3)
+
+        owner.close()
+
+        assert not owner.wait_drained(timeout=0.001)
+        assert owner.snapshot().classes[0].active == 1
+        if not child_exited:
+            assert child._process.poll() is None
+            assert (
+                child._process.stdout is not None and not child._process.stdout.closed
+            )
+        stream.close()
+        assert owner.wait_drained(timeout=1)
+    finally:
+        stream.close()
+    _assert_reaped(child)
+    assert owner.snapshot().classes[0].outcomes.stream_closed == 1

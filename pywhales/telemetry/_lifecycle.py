@@ -1,13 +1,14 @@
 """Per-launch metadata state with isolated callback delivery.
 
-Only numeric measurements and closed vocabularies cross this boundary. Ordinary
-observer exceptions are deliberately contained without rendering their details.
+Only opaque attempt identifiers, numeric measurements, and closed vocabularies
+cross this boundary. Observer exceptions are contained without rendering details.
 """
 
 from threading import Lock
 from time import monotonic
 from types import TracebackType
 from typing import Self
+from uuid import uuid4
 
 from pywhales.exceptions import DockerTimeout, ObservationTimeout
 from pywhales.telemetry import (
@@ -42,15 +43,20 @@ class ExecutionTelemetry:
         self._observer = observer
         self._family: OperationFamily = family
         self._started: float | None = None
+        self._attempt_id: str | None = None
         self._finished = False
         self._lock = Lock()
         self.stdout_bytes: int | None = None
         self.stderr_bytes: int | None = None
+        self.return_code: int | None = None
 
     def start(self) -> None:
         """Emit launch before starting the local clock and attempting spawn."""
         if self._observer is not None:
-            deliver(self._observer, LaunchRecord(self._family))
+            self._attempt_id = uuid4().hex
+            deliver(
+                self._observer, LaunchRecord(self._family, attempt_id=self._attempt_id)
+            )
             self._started = monotonic()
 
     def captured(self, stdout: bytes | None, stderr: bytes | None) -> None:
@@ -61,7 +67,12 @@ class ExecutionTelemetry:
     def finish(self, outcome: Outcome) -> None:
         """Publish the first completion outside the state lock."""
         with self._lock:
-            if self._observer is None or self._started is None or self._finished:
+            if (
+                self._observer is None
+                or self._started is None
+                or self._attempt_id is None
+                or self._finished
+            ):
                 return
             self._finished = True
             record = CompletionRecord(
@@ -70,6 +81,8 @@ class ExecutionTelemetry:
                 max(0, monotonic() - self._started),
                 self.stdout_bytes,
                 self.stderr_bytes,
+                attempt_id=self._attempt_id,
+                return_code=self.return_code,
             )
         deliver(self._observer, record)
 

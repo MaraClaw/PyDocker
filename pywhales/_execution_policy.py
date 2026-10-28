@@ -4,16 +4,23 @@ Resolve policy before converting command arguments to plain strings so later
 config mutations affect new launches without altering an existing snapshot.
 """
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from enum import Enum, auto
+from types import MappingProxyType
 from typing import Final, Protocol, Self
 
+from pywhales._environment import consume_frozen_environment, copy_environment
 from pywhales.telemetry import TelemetryObserver
 
 
 class ExecutionPolicySource(Protocol):
     """Readable client settings used to snapshot each subprocess launch."""
+
+    @property
+    def environment(self) -> Mapping[str, str] | None:
+        """Return the current client environment overlay."""
+        ...
 
     @property
     def stream_buffer_bytes(self) -> int | None:
@@ -42,11 +49,17 @@ class ExecutionPolicy:
         raw_diagnostics: Whether automatic diagnostics may include confidential
             command, environment, and captured-output values.
         telemetry_observer: Optional payload-free observer snapshotted by reference.
+        environment: Immutable client overlay captured at policy selection.
+        frozen_environment: Optional preselected full environment for this launch.
     """
 
     stream_buffer_bytes: int | None = None
     raw_diagnostics: bool = False
     telemetry_observer: TelemetryObserver | None = None
+    environment: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType({}), repr=False
+    )
+    frozen_environment: Mapping[str, str] | None = field(default=None, repr=False)
 
 
 class BufferDefault(Enum):
@@ -112,9 +125,15 @@ def get_execution_policy(command: Sequence[object]) -> ExecutionPolicy:
     """
     if command and isinstance(command[0], PolicyExecutable):
         source = command[0].policy_source
+        frozen = consume_frozen_environment(source)
+        environment = source.environment if frozen is None else None
         return ExecutionPolicy(
             source.stream_buffer_bytes,
             source.raw_diagnostics,
             source.telemetry_observer,
+            MappingProxyType(copy_environment(environment))
+            if environment is not None
+            else MappingProxyType({}),
+            frozen,
         )
     return ExecutionPolicy()

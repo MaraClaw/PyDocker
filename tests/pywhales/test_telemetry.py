@@ -40,9 +40,13 @@ def test_metadata_is_sanitized_when_captured_results_contain_secrets(
     )
 
     assert result == (secret + "\ufffd", secret)
-    assert records[0] == LaunchRecord("captured")
+    launch = records[0]
+    assert isinstance(launch, LaunchRecord)
+    assert launch.family == "captured" and launch.schema_version == 2
     completed = records[1]
     assert isinstance(completed, CompletionRecord)
+    assert completed.attempt_id == launch.attempt_id
+    assert completed.schema_version == 2 and completed.return_code == 0
     assert completed.outcome == "success"
     assert (completed.stdout_bytes, completed.stderr_bytes) == (
         len(secret) + 2,
@@ -76,6 +80,9 @@ def test_original_result_is_preserved_when_observer_throws(failure: bool) -> Non
     completed = records[1]
     assert isinstance(completed, CompletionRecord)
     assert completed.outcome == ("failure" if failure else "success")
+    assert isinstance(records[0], LaunchRecord)
+    assert completed.attempt_id == records[0].attempt_id
+    assert completed.return_code == (7 if failure else 0)
 
 
 def test_timeout_counts_raw_bytes_when_partial_output_is_captured() -> None:
@@ -97,6 +104,7 @@ def test_timeout_counts_raw_bytes_when_partial_output_is_captured() -> None:
     assert raised.value.stdout == "partial\ufffd"
     completed = records[1]
     assert isinstance(completed, CompletionRecord)
+    assert completed.return_code == raised.value.return_code
     assert (completed.outcome, completed.stdout_bytes, completed.stderr_bytes) == (
         "timeout",
         8,
@@ -114,6 +122,7 @@ def test_counts_are_unavailable_when_output_is_inherited() -> None:
 
     completed = records[1]
     assert isinstance(completed, CompletionRecord)
+    assert completed.return_code == 0
     assert (completed.stdout_bytes, completed.stderr_bytes) == (None, 0)
 
 
@@ -135,6 +144,7 @@ def test_spawn_failure_preserves_exception_when_observer_throws() -> None:
     assert raised.value is original
     completed = records[1]
     assert isinstance(completed, CompletionRecord)
+    assert completed.return_code is None
     assert (completed.outcome, completed.stdout_bytes, completed.stderr_bytes) == (
         "failure",
         None,
@@ -223,3 +233,17 @@ def test_duration_excludes_admission_and_readiness_clocks(
     completed = records[1]
     assert isinstance(completed, CompletionRecord)
     assert completed.duration_seconds == 2.5
+
+
+def test_disabled_observer_uses_neither_identifier_nor_telemetry_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pywhales.telemetry import _lifecycle
+
+    def forbidden() -> None:
+        raise AssertionError("disabled telemetry performed work")
+
+    monkeypatch.setattr(_lifecycle, "uuid4", forbidden)
+    monkeypatch.setattr(_lifecycle, "monotonic", forbidden)
+    config = ClientConfig(client_call=[sys.executable, "-c", "pass"])
+    assert run(config.docker_cmd) == ""

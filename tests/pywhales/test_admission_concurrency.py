@@ -1,6 +1,6 @@
 from collections.abc import Generator, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from threading import Barrier, Event, current_thread
 from unittest.mock import patch
 
@@ -10,9 +10,11 @@ from pywhales import DockerClient
 from pywhales.admission import (
     AdmissionCancelled,
     AdmissionOwner,
+    AdmissionRejected,
     ClassLimit,
     EndpointIdentity,
     PressureClass,
+    RejectionReason,
 )
 
 
@@ -144,3 +146,125 @@ def test_cancelled_real_create_never_performs_pull_preflight_or_launch() -> None
             request.call(lambda: client.create("private-image"))
         preflight.assert_not_called()
         launch.assert_not_called()
+
+
+@pytest.mark.parametrize("cancel_first", [False, True])
+def test_close_wakes_pending_callers_and_serializes_cancellation(
+    cancel_first: bool,
+) -> None:
+    pressures = (PressureClass("read"), PressureClass("write"))
+    owner = AdmissionOwner(
+        EndpointIdentity("local"),
+        {pressure: ClassLimit(1, 1) for pressure in pressures},
+    )
+    streams = [
+        owner.request(pressure).stream(lambda: nullcontext(iter(())))
+        for pressure in pressures
+    ]
+    requests = [owner.request(pressure) for pressure in pressures]
+    wait = owner._condition.wait
+
+    with ThreadPoolExecutor(2) as executor:
+        results = []
+        try:
+            for request in requests:
+                queued = Event()
+
+                def signal_wait(
+                    timeout: float | None = None, signal: Event = queued
+                ) -> bool:
+                    signal.set()
+                    return wait(timeout)
+
+                with patch.object(owner._condition, "wait", side_effect=signal_wait):
+                    results.append(
+                        executor.submit(
+                            request.call, lambda: pytest.fail("closed callback ran")
+                        )
+                    )
+                    assert queued.wait(3)
+            with owner._condition:
+                if cancel_first:
+                    assert requests[0].cancel()
+                owner.close()
+                owner.close()
+                assert all(not request.cancel() for request in requests)
+                snapshot = owner.snapshot()
+                assert snapshot.closed
+                assert all(
+                    entry.pending == 0 and entry.active == 1
+                    for entry in snapshot.classes
+                )
+                assert [
+                    entry.outcomes.rejected_closed for entry in snapshot.classes
+                ] == [int(not cancel_first), 1]
+
+            for index, result in enumerate(results):
+                if cancel_first and index == 0:
+                    with pytest.raises(AdmissionCancelled):
+                        result.result(3)
+                else:
+                    with pytest.raises(AdmissionRejected) as raised:
+                        result.result(3)
+                    assert raised.value.reason is RejectionReason.CLOSED
+        finally:
+            for stream in streams:
+                stream.close()
+    counts = owner.snapshot().classes[0].outcomes
+    assert (counts.cancelled, counts.rejected_closed, counts.failed) == (
+        int(cancel_first),
+        int(not cancel_first),
+        0,
+    )
+    assert owner.wait_drained(timeout=1)
+
+
+@pytest.mark.parametrize("_repetition", range(10))
+def test_close_races_grant_without_interrupting_the_winner(_repetition: int) -> None:
+    pressure = PressureClass("read")
+    owner = AdmissionOwner(EndpointIdentity("local"), {pressure: ClassLimit(1, 1)})
+    held, queued, release = Event(), Event(), Event()
+    race = Barrier(2)
+    calls: list[int] = []
+
+    def active() -> None:
+        held.set()
+        assert release.wait(3)
+        race.wait(3)
+
+    def close() -> None:
+        race.wait(3)
+        owner.close()
+
+    wait = owner._condition.wait
+
+    def signal_wait(timeout: float | None = None) -> bool:
+        queued.set()
+        return wait(timeout)
+
+    with ThreadPoolExecutor(3) as executor:
+        first = executor.submit(owner.request(pressure).call, active)
+        try:
+            assert held.wait(3)
+            with patch.object(owner._condition, "wait", side_effect=signal_wait):
+                second = executor.submit(
+                    owner.request(pressure).call, lambda: calls.append(1)
+                )
+                assert queued.wait(3)
+                closer = executor.submit(close)
+                release.set()
+                closer.result(3)
+                try:
+                    second.result(3)
+                except AdmissionRejected as error:
+                    assert error.reason is RejectionReason.CLOSED
+                    assert calls == []
+                else:
+                    assert calls == [1]
+        finally:
+            release.set()
+        first.result(3)
+    snapshot = owner.snapshot().classes[0]
+    assert snapshot.active == snapshot.pending == 0
+    assert snapshot.outcomes.completed + snapshot.outcomes.rejected_closed == 2
+    assert snapshot.outcomes.failed == 0

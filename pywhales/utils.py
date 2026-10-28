@@ -30,13 +30,14 @@ from typing import (
 
 import pydantic
 
+from pywhales._environment import finalize_environment, resolve_environment
 from pywhales._execution_policy import (
     DEFAULT_BUFFER,
     BufferDefault,
     get_execution_policy,
 )
 from pywhales._process_stream import ProcessStream as ProcessStream
-from pywhales.exceptions import DockerException, DockerTimeout
+from pywhales.exceptions import DockerException, DockerTimeout, ObservationLimitError
 from pywhales.exceptions import get_docker_exception_type as get_docker_exception_type
 from pywhales.telemetry._lifecycle import ExecutionTelemetry
 
@@ -253,7 +254,7 @@ def run(
         input: Bytes to send through child stdin; ``None`` inherits stdin.
         return_stderr: Return both decoded streams when true instead of stdout
             alone. Uncaptured streams are represented by empty strings.
-        env: Environment overrides merged with the current process environment.
+        env: Overrides applied after inherited and client environment layers.
         tty: Route output to current sys.stdout and sys.stderr instead of
             capturing it. This option does not allocate a pseudo-terminal.
         pass_fds: Additional descriptors to keep open in the child, subject to
@@ -276,12 +277,20 @@ def run(
             regardless of the automatic diagnostic-text policy.
     """
     validate_timeout(timeout)
-    policy = get_execution_policy(args)
+    from pywhales._observation import get_observation
+
+    observation = get_observation()
+    try:
+        policy = get_execution_policy(args)
+        subprocess_env = resolve_environment(
+            policy.environment, env, frozen=policy.frozen_environment
+        )
+    except TypeError, ValueError:
+        if observation is not None:
+            raise ObservationLimitError("environment", None, None) from None
+        raise
     args = [str(x) for x in args]
-    subprocess_env = dict(os.environ)
-    subprocess_env.update(env)
-    if len(args) > 1 and args[1] == "buildx":
-        subprocess_env["DOCKER_CLI_EXPERIMENTAL"] = "enabled"
+    subprocess_env = finalize_environment(subprocess_env, args)
     if tty:
         stdout_dest = sys.stdout
     elif capture_stdout:
@@ -295,9 +304,6 @@ def run(
     else:
         stderr_dest = None
     _log_command(args, subprocess_env, raw_diagnostics=policy.raw_diagnostics)
-    from pywhales._observation import get_observation
-
-    observation = get_observation()
     with ExecutionTelemetry(policy.telemetry_observer, "captured") as telemetry:
         if observation is not None:
             if tty or not capture_stdout or not capture_stderr or input is not None:
@@ -328,48 +334,53 @@ def run(
         else:
             telemetry.start()
             deadline = monotonic() + timeout
-            with Popen(
+            process = Popen(
                 args,
                 stdin=PIPE if input is not None else None,
                 stdout=stdout_dest,
                 stderr=stderr_dest,
                 env=subprocess_env,
                 pass_fds=pass_fds,
-            ) as process:
-                communicate_input = input
-                while True:
-                    try:
-                        # Bound OS waits without shortening the invocation's deadline.
-                        stdout, stderr = process.communicate(
-                            communicate_input,
-                            timeout=min(86400, max(0, deadline - monotonic())),
-                        )
-                    except subprocess.TimeoutExpired:
-                        communicate_input = None
-                        if monotonic() < deadline:
-                            continue
-                        timed_out = process.poll() is None
-                        if timed_out:
-                            process.kill()
+            )
+            try:
+                with process:
+                    communicate_input = input
+                    while True:
                         try:
-                            stdout, stderr = process.communicate(timeout=1)
-                        except subprocess.TimeoutExpired as captured:
-                            stdout, stderr = captured.output, captured.stderr
-                        process.wait()
-                        if timed_out:
-                            telemetry.captured(stdout, stderr)
-                            raise DockerTimeout(
-                                args,
-                                process.returncode,
-                                stdout,
-                                stderr,
-                                raw_diagnostics=policy.raw_diagnostics,
-                            ) from None
-                    break
-                completed_process = subprocess.CompletedProcess(
-                    args, process.returncode, stdout, stderr
-                )
+                            # Bound OS waits without shortening the invocation's deadline.
+                            stdout, stderr = process.communicate(
+                                communicate_input,
+                                timeout=min(86400, max(0, deadline - monotonic())),
+                            )
+                        except subprocess.TimeoutExpired:
+                            communicate_input = None
+                            if monotonic() < deadline:
+                                continue
+                            timed_out = process.poll() is None
+                            if timed_out:
+                                process.kill()
+                            try:
+                                stdout, stderr = process.communicate(timeout=1)
+                            except subprocess.TimeoutExpired as captured:
+                                stdout, stderr = captured.output, captured.stderr
+                            process.wait()
+                            if timed_out:
+                                telemetry.captured(stdout, stderr)
+                                raise DockerTimeout(
+                                    args,
+                                    process.returncode,
+                                    stdout,
+                                    stderr,
+                                    raw_diagnostics=policy.raw_diagnostics,
+                                ) from None
+                        break
+                    completed_process = subprocess.CompletedProcess(
+                        args, process.returncode, stdout, stderr
+                    )
+            finally:
+                telemetry.return_code = process.returncode
 
+        telemetry.return_code = completed_process.returncode
         telemetry.captured(completed_process.stdout, completed_process.stderr)
         if completed_process.returncode != 0:
             exception_type = get_docker_exception_type(completed_process.stderr)
@@ -554,8 +565,8 @@ def _start_process(
     Args:
         full_cmd: Executable and arguments, retaining any originating policy
             carrier until its settings have been snapshotted.
-        env: Environment overrides merged with the current environment; ``None``
-            inherits the environment directly.
+        env: Overrides applied after inherited and client environment layers;
+            ``None`` adds no operation overrides.
         pass_fds: Additional descriptors to preserve in the child.
         pipe_stdin: Open a writable stdin pipe when true; otherwise inherit stdin.
         timeout: Positive finite seconds from launch, or ``None`` for no deadline.
@@ -580,20 +591,19 @@ def _start_process(
         type(buffer_bytes) is not int or buffer_bytes <= 0
     ):
         raise ValueError("buffer_bytes must be a positive integer or None")
-    if env is None:
-        subprocess_env = None
-    else:
-        subprocess_env = dict(os.environ)
-        subprocess_env.update(env)
+    subprocess_env = resolve_environment(
+        policy.environment, env, frozen=policy.frozen_environment
+    )
 
     telemetry = ExecutionTelemetry(policy.telemetry_observer, "stream")
     telemetry.start()
     deadline = None if timeout is None else monotonic() + timeout
     try:
         args = [str(x) for x in full_cmd]
+        subprocess_env = finalize_environment(subprocess_env, args)
         _log_command(
             args,
-            os.environ if subprocess_env is None else subprocess_env,
+            subprocess_env,
             raw_diagnostics=policy.raw_diagnostics,
         )
         process = Popen(
@@ -637,7 +647,7 @@ def stream_stdout_and_stderr(
     Args:
         full_cmd: Executable and arguments; an originating policy carrier is
             read before converting arguments to strings.
-        env: Environment overrides, or ``None`` to inherit the current environment.
+        env: Operation overrides, or ``None`` for inherited and client layers only.
         pass_fds: Additional descriptors kept open in the child, subject to
             platform support.
         pipe_stdin: Make result.stdin writable when true; otherwise it is None

@@ -13,6 +13,7 @@ from pywhales.admission import (
     RejectionReason,
     SaturationPolicy,
 )
+from pywhales.admission._state import UINT64_MAX, Outcome
 
 
 @pytest.mark.parametrize("token", ["", "_bad", "a/b", "a:b", "a b", "é", "a" * 65])
@@ -74,3 +75,47 @@ def test_rejection_has_bounded_reason_and_safe_text() -> None:
     error = AdmissionRejected(RejectionReason.QUEUE_FULL)
     assert error.reason is RejectionReason.QUEUE_FULL
     assert str(error) == "admission rejected: queue_full"
+
+
+def test_close_is_idempotent_and_snapshots_remain_immutable() -> None:
+    pressure = PressureClass("read")
+    owner = AdmissionOwner(EndpointIdentity("local"), {pressure: ClassLimit(1, 0)})
+    dormant = [owner.request(pressure) for _ in range(100)]
+    before = owner.snapshot()
+
+    owner.close()
+    owner.close()
+
+    after = owner.snapshot()
+    assert not before.closed and after.closed
+    assert after.classes[0].pending == 0
+    assert after.classes[0].outcomes.rejected_closed == 0
+    assert len(dormant) == 100
+    for target, attribute in (
+        (after, "closed"),
+        (after.classes[0].outcomes, "rejected_closed"),
+    ):
+        with pytest.raises(FrozenInstanceError):
+            setattr(target, attribute, 1)
+
+
+def test_closed_rejections_saturate_separately_without_wrapping() -> None:
+    pressure = PressureClass("read")
+    owner = AdmissionOwner(EndpointIdentity("local"), {pressure: ClassLimit(1, 0)})
+    owner._buckets[pressure].counts[Outcome.REJECTED_CLOSED] = UINT64_MAX - 1
+    owner.close()
+
+    for _ in range(2):
+        with pytest.raises(AdmissionRejected) as raised:
+            owner.request(pressure).call(lambda: pytest.fail("closed callback ran"))
+        assert raised.value.reason is RejectionReason.CLOSED
+
+    counts = owner.snapshot().classes[0].outcomes
+    assert counts.rejected_closed == UINT64_MAX and counts.saturated
+    assert (
+        counts.failed,
+        counts.rejected_busy,
+        counts.rejected_full,
+        counts.cancelled,
+        counts.queue_timed_out,
+    ) == (0, 0, 0, 0, 0)

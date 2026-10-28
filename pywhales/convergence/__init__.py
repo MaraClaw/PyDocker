@@ -3,6 +3,7 @@
 from pywhales.convergence._types import (
     Cancelled,
     Deadline,
+    DeadlineDetail,
     Failure,
     Outcome,
     ServiceTarget,
@@ -14,6 +15,7 @@ from pywhales.convergence._wait import capture_service, wait
 __all__ = [
     "Cancelled",
     "Deadline",
+    "DeadlineDetail",
     "Failure",
     "Outcome",
     "ServiceTarget",

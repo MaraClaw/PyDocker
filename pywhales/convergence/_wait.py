@@ -3,14 +3,17 @@
 import math
 import time
 from threading import Event
+from typing import assert_never
 
 from pydantic import ValidationError
 
 from pywhales._observation import check_observation, observation
 from pywhales.client_config import ClientNotFoundError, ParsingError
+from pywhales.convergence._service import ServiceObservation, check_service
 from pywhales.convergence._types import (
     Cancelled,
     Deadline,
+    DeadlineDetail,
     Failure,
     Outcome,
     ServiceTarget,
@@ -18,14 +21,11 @@ from pywhales.convergence._types import (
     Success,
 )
 from pywhales.convergence._wire import (
-    canonical,
     fingerprint,
     inspect_service,
-    inspect_task,
     target_from_wire,
 )
 from pywhales.docker_client import DockerClient
-from pywhales.enums import TaskState
 from pywhales.exceptions import (
     DockerException,
     ObservationCancelled,
@@ -33,7 +33,6 @@ from pywhales.exceptions import (
     ObservationTimeout,
 )
 from pywhales.inventory import InspectionPolicy
-from pywhales.utils import run
 
 
 def _positive(value: float) -> None:
@@ -86,77 +85,6 @@ def capture_service(
         return Failure(reason="observation", service_id=service_id, cause=error)
 
 
-def _check_service(target: ServiceTarget) -> tuple[bool, Failure | None]:
-    service = inspect_service(target.client_config, target.service_id)
-    if (
-        service.version.index != target.version
-        or fingerprint(service) != target.fingerprint
-    ):
-        return False, Failure(reason="superseded", service_id=target.service_id)
-    state = service.update.state if service.update is not None else None
-    if state in {
-        "paused",
-        "rollback_started",
-        "rollback_paused",
-        "rollback_completed",
-        "failed",
-    }:
-        return False, Failure(
-            reason="update_failed", service_id=target.service_id, state=state
-        )
-    if state not in {None, "updating", "completed"}:
-        return False, Failure(reason="malformed", service_id=target.service_id)
-    ids = run(
-        [
-            *target.client_config.docker_cmd,
-            "service",
-            "ps",
-            "--quiet",
-            "--no-trunc",
-            target.service_id,
-        ]
-    ).splitlines()
-    if any(not task_id for task_id in ids) or len(ids) != len(set(ids)):
-        raise ParsingError("Invalid task listing")
-    slots: set[int] = set()
-    seen_slots: set[int] = set()
-    desired_running = 0
-    ambiguous = False
-    for task_id in ids:
-        check_observation()
-        task = inspect_task(target.client_config, task_id)
-        if task.service_id != target.service_id:
-            raise ParsingError("Task service identity mismatch")
-        if task.desired not in TaskState or task.status.state not in TaskState:
-            raise ParsingError("Unknown task state")
-        if task.desired != "running":
-            continue
-        desired_running += 1
-        if (
-            task.slot is None
-            or task.slot < 1
-            or task.slot > target.replicas
-            or task.spec is None
-        ):
-            ambiguous = True
-            continue
-        if task.slot in seen_slots:
-            ambiguous = True
-        seen_slots.add(task.slot)
-        if (
-            task.status.state == "running"
-            and canonical(task.spec, template=True) == target.template
-        ):
-            slots.add(task.slot)
-    ready = (
-        not ambiguous
-        and desired_running == target.replicas
-        and len(slots) == target.replicas
-        and state != "updating"
-    )
-    return ready, None
-
-
 def wait(
     target: ServiceTarget | StackTarget,
     *,
@@ -178,24 +106,32 @@ def wait(
         Success, terminal failure, deadline, or cancellation. Failure causes and
         captured templates may contain confidential wire data. Cleanup can outlast
         the deadline and stops only local CLI processes, not daemon-side work.
+        Deadline detail retains only the latest complete cycle after all applicable
+        generation rechecks, never a partial cycle or a fresh inspection at expiry.
     """
     _positive(timeout)
     _positive(poll_interval)
     deadline = time.monotonic() + timeout
     targets = (target,) if isinstance(target, ServiceTarget) else target.services
     current: str | None = None
+    last_complete: DeadlineDetail | None = None
     try:
         with observation(policy, deadline=deadline, cancel=cancel) as state:
             while True:
                 check_observation(state)
-                ready = True
+                observations: list[ServiceObservation] = []
                 for service in targets:
                     check_observation(state)
                     current = service.service_id
-                    satisfied, failure = _check_service(service)
-                    if failure is not None:
-                        return failure
-                    ready = ready and satisfied
+                    match check_service(service):
+                        case Failure() as failure:
+                            return failure
+                        case ServiceObservation() as checked:
+                            observations.append(checked)
+                        case unreachable:
+                            assert_never(unreachable)
+                ready = all(item.ready for item in observations)
+                rechecked_updates = 0
                 if ready:
                     for service in targets:
                         current = service.service_id
@@ -231,9 +167,26 @@ def wait(
                             )
                         if update == "updating":
                             ready = False
-                    if ready:
-                        return Success()
+                            rechecked_updates += 1
                 check_observation(state)
+                last_complete = DeadlineDetail(
+                    captured_services=len(targets),
+                    missing_ready_slots=sum(
+                        item.missing_ready_slots for item in observations
+                    ),
+                    duplicate_slots=sum(item.duplicate_slots for item in observations),
+                    stale_templates=sum(item.stale_templates for item in observations),
+                    non_running_tasks=sum(
+                        item.non_running_tasks for item in observations
+                    ),
+                    invalid_task_shape=sum(
+                        item.invalid_task_shape for item in observations
+                    ),
+                    ongoing_updates=sum(item.ongoing_updates for item in observations)
+                    + rechecked_updates,
+                )
+                if ready:
+                    return Success()
                 next_poll = time.monotonic() + poll_interval
                 while time.monotonic() < next_poll:
                     check_observation(state)
@@ -247,7 +200,7 @@ def wait(
     except ObservationCancelled:
         return Cancelled()
     except ObservationTimeout:
-        return Deadline()
+        return Deadline(last_complete)
     except (
         DockerException,
         ObservationLimitError,

@@ -246,3 +246,34 @@ def test_cancel_before_use_is_once_only_and_request_stays_single_use() -> None:
     with pytest.raises(RuntimeError):
         request.call(lambda: 1)
     assert not request.cancel()
+
+
+@pytest.mark.parametrize("cancel_first", [False, True])
+def test_dormant_request_observes_close_without_replacing_cancellation(
+    cancel_first: bool,
+) -> None:
+    pressure = PressureClass("read")
+    owner = AdmissionOwner(EndpointIdentity("local"), {pressure: ClassLimit(1, 0)})
+    request = owner.request(pressure)
+    calls: list[int] = []
+    if cancel_first:
+        assert request.cancel()
+
+    owner.close()
+
+    assert not request.cancel()
+    with pytest.raises(
+        AdmissionCancelled if cancel_first else AdmissionRejected
+    ) as raised:
+        request.call(lambda: calls.append(1))
+    if not cancel_first:
+        assert isinstance(raised.value, AdmissionRejected)
+        assert raised.value.reason is RejectionReason.CLOSED
+    with pytest.raises(RuntimeError):
+        request.call(lambda: calls.append(2))
+    assert calls == []
+    counts = owner.snapshot().classes[0].outcomes
+    assert (counts.cancelled, counts.rejected_closed) == (
+        int(cancel_first),
+        int(not cancel_first),
+    )

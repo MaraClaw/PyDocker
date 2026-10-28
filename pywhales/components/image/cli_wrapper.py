@@ -28,6 +28,8 @@ from typing import (
 from pydantic import JsonValue
 
 import pywhales.components.buildx.cli_wrapper
+from pywhales._environment import finalize_environment, resolve_environment
+from pywhales._execution_policy import get_execution_policy
 from pywhales.client_config import (
     ClientConfig,
     Command,
@@ -488,9 +490,13 @@ class ImageCLI(DockerCLICaller):
     def _load_from_generator(
         self, full_cmd: Sequence[object], input: Iterable[bytes]
     ) -> builtins.list[str]:
-        raw_diagnostics = self.client_config.raw_diagnostics
+        policy = get_execution_policy(full_cmd)
+        environment = resolve_environment(
+            policy.environment, frozen=policy.frozen_environment
+        )
         command = [str(argument) for argument in full_cmd]
-        with Popen(command, stdin=PIPE, stdout=PIPE) as process:
+        environment = finalize_environment(environment, command)
+        with Popen(command, stdin=PIPE, stdout=PIPE, env=environment) as process:
             assert process.stdin is not None
             assert process.stdout is not None
             for buffer_bytes in input:
@@ -500,7 +506,9 @@ class ImageCLI(DockerCLICaller):
             stdout = process.stdout.read()
             exit_code = process.wait()
         if exit_code != 0:
-            raise DockerException(command, exit_code, raw_diagnostics=raw_diagnostics)
+            raise DockerException(
+                command, exit_code, raw_diagnostics=policy.raw_diagnostics
+            )
         return stdout.decode().splitlines()
 
     def list(
@@ -1134,9 +1142,13 @@ class ImageCLI(DockerCLICaller):
             NoSuchImage: The save CLI reports a missing image.
             DockerException: The save CLI exits unsuccessfully.
         """
-        raw_diagnostics = self.client_config.raw_diagnostics
+        policy = get_execution_policy(full_cmd)
+        environment = resolve_environment(
+            policy.environment, frozen=policy.frozen_environment
+        )
         command = [str(argument) for argument in full_cmd]
-        with Popen(command, stdout=PIPE, stderr=PIPE) as process:
+        environment = finalize_environment(environment, command)
+        with Popen(command, stdout=PIPE, stderr=PIPE, env=environment) as process:
             assert process.stdout is not None
             assert process.stderr is not None
             yield from process.stdout
@@ -1148,10 +1160,13 @@ class ImageCLI(DockerCLICaller):
                         command,
                         exit_code,
                         stderr=stderr,
-                        raw_diagnostics=raw_diagnostics,
+                        raw_diagnostics=policy.raw_diagnostics,
                     )
                 raise DockerException(
-                    command, exit_code, stderr=stderr, raw_diagnostics=raw_diagnostics
+                    command,
+                    exit_code,
+                    stderr=stderr,
+                    raw_diagnostics=policy.raw_diagnostics,
                 )
 
     def tag(self, source_image: Image | str, new_tag: str) -> None:

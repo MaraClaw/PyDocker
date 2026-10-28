@@ -1,6 +1,7 @@
 """Bounded synchronous FIFO admission independent of SDK execution."""
 
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from sys import float_info
 from threading import TIMEOUT_MAX, Condition
 from time import monotonic
 from typing import assert_never
@@ -11,6 +12,7 @@ from ._contracts import (
     EndpointIdentity,
     PressureClass,
     SaturationPolicy,
+    validate_drain_timeout,
     validate_queue_timeout,
 )
 from ._errors import (
@@ -43,11 +45,64 @@ class AdmissionOwner:
         self._endpoint = endpoint
         self._buckets = {pressure: Bucket(limit) for pressure, limit in limits.items()}
         self._condition = Condition()
+        self._closed = False
+
+    def close(self) -> None:
+        """Permanently reject new admission and wake all pending callers.
+
+        Closure is idempotent and serialized with cancellation and grants. Active
+        work keeps its permits; streams still require consumption or explicit
+        cleanup. Dormant requests remain unregistered and reject on activation.
+        """
+        with self._condition:
+            if self._closed:
+                return
+            self._closed = True
+            for bucket in self._buckets.values():
+                for ticket in bucket.pending:
+                    ticket.done = True
+                    bucket.record(Outcome.REJECTED_CLOSED)
+                bucket.pending.clear()
+            self._condition.notify_all()
+
+    def wait_drained(self, *, timeout: float) -> bool:
+        """Wait for all active permits without closing or cancelling work.
+
+        An open owner may accept more work after this returns. Close it first for
+        terminal draining. Streams retain permits through source cleanup and
+        in-flight reads, even after their local child processes exit.
+
+        Args:
+            timeout: Positive finite seconds from this call, including time spent
+                awaiting the admission lock. Individual waits respect platform limits.
+
+        Returns:
+            True if no active permits remain, or False if the deadline expires
+            while active work remains.
+
+        Raises:
+            ValueError: If timeout is boolean, nonpositive, or nonfinite.
+            AdmissionReentryError: If an active callback on this owner would wait
+                for its own permit. Cross-thread nesting remains unsupported.
+        """
+        validate_drain_timeout(timeout)
+        check_reentry(id(self))
+        deadline = monotonic() + min(timeout, float_info.max)
+        with self._condition:
+            while any(bucket.active for bucket in self._buckets.values()):
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(min(remaining, TIMEOUT_MAX))
+            return True
 
     def request(
         self, pressure_class: PressureClass, queue_timeout: float | None = None
     ) -> AdmissionRequest:
         """Return an inert single-use request without occupying pending capacity.
+
+        A closed owner still returns inert handles; activation rejects without
+        invoking user work unless cancellation was already terminal before close.
 
         Args:
             pressure_class: A configured application-defined pressure class.
@@ -88,6 +143,7 @@ class AdmissionOwner:
                     bucket.snapshot(pressure)
                     for pressure, bucket in self._buckets.items()
                 ),
+                self._closed,
             )
 
     def _acquire(self, request: AdmissionRequest) -> None:
@@ -99,6 +155,10 @@ class AdmissionOwner:
             ticket.started = True
             if ticket.cancelled:
                 raise AdmissionCancelled()
+            if self._closed:
+                ticket.done = True
+                bucket.record(Outcome.REJECTED_CLOSED)
+                raise AdmissionRejected(RejectionReason.CLOSED)
             try:
                 check_reentry(id(self))
             except AdmissionReentryError:
@@ -132,6 +192,8 @@ class AdmissionOwner:
                 while True:
                     if ticket.cancelled:
                         raise AdmissionCancelled()
+                    if self._closed:
+                        raise AdmissionRejected(RejectionReason.CLOSED)
                     remaining = None if deadline is None else deadline - monotonic()
                     if remaining is not None and remaining <= 0:
                         ticket.done = True
@@ -164,7 +226,7 @@ class AdmissionOwner:
     def _cancel(self, request: AdmissionRequest) -> bool:
         with self._condition:
             ticket, bucket = request._ticket, request._bucket
-            if ticket.cancelled or ticket.active or ticket.done:
+            if self._closed or ticket.cancelled or ticket.active or ticket.done:
                 return False
             ticket.cancelled = True
             ticket.done = True

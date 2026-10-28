@@ -7,9 +7,12 @@ import pytest
 from pywhales.admission import (
     AdmissionOwner,
     AdmissionQueueTimeout,
+    AdmissionReentryError,
+    AdmissionRejected,
     ClassLimit,
     EndpointIdentity,
     PressureClass,
+    RejectionReason,
 )
 
 
@@ -83,3 +86,153 @@ def test_queue_deadline_covers_time_awaiting_admission_lock() -> None:
         0,
         1,
     )
+
+
+@pytest.mark.parametrize(
+    "timeout",
+    [None, 0, -1, -(10**400), True, float("inf"), float("-inf"), float("nan"), "1"],
+)
+def test_drain_rejects_invalid_timeout_before_waiting(timeout: float) -> None:
+    pressure = PressureClass("read")
+    owner = AdmissionOwner(EndpointIdentity("local"), {pressure: ClassLimit(1, 0)})
+    with patch.object(owner._condition, "wait") as wait, pytest.raises(ValueError):
+        owner.wait_drained(timeout=timeout)
+    wait.assert_not_called()
+
+
+@pytest.mark.parametrize("closed", [False, True])
+@pytest.mark.parametrize("timeout", [1, 10**400])
+def test_empty_owner_drains_without_implicitly_closing(
+    closed: bool, timeout: float
+) -> None:
+    pressure = PressureClass("read")
+    owner = AdmissionOwner(EndpointIdentity("local"), {pressure: ClassLimit(1, 0)})
+    if closed:
+        owner.close()
+
+    assert owner.wait_drained(timeout=timeout)
+
+    assert owner.snapshot().closed is closed
+
+
+def test_drain_expiry_preserves_active_work() -> None:
+    pressure = PressureClass("read")
+    owner = AdmissionOwner(EndpointIdentity("local"), {pressure: ClassLimit(1, 0)})
+    entered, release = Event(), Event()
+
+    def held() -> int:
+        entered.set()
+        assert release.wait(3)
+        return 7
+
+    with ThreadPoolExecutor(1) as executor:
+        result = executor.submit(owner.request(pressure).call, held)
+        try:
+            assert entered.wait(3)
+            owner.close()
+
+            assert not owner.wait_drained(timeout=0.001)
+
+            assert not result.done()
+            assert owner.snapshot().classes[0].active == 1
+        finally:
+            release.set()
+        assert result.result(3) == 7
+    assert owner.wait_drained(timeout=1)
+    assert owner.snapshot().classes[0].outcomes.completed == 1
+
+
+@pytest.mark.parametrize("timeout", [1e100, 10**400])
+def test_large_drain_timeout_bounds_each_wait_and_rechecks_after_wakeup(
+    timeout: float,
+) -> None:
+    pressure = PressureClass("read")
+    owner = AdmissionOwner(EndpointIdentity("local"), {pressure: ClassLimit(1, 0)})
+    bucket = owner._buckets[pressure]
+    bucket.active = 1
+    waits: list[float | None] = []
+
+    def wake(timeout: float | None = None) -> bool:
+        waits.append(timeout)
+        assert timeout is not None and 0 < timeout <= TIMEOUT_MAX
+        if len(waits) == 2:
+            bucket.active = 0
+        return True
+
+    with patch.object(owner._condition, "wait", side_effect=wake):
+        assert owner.wait_drained(timeout=timeout)
+    assert waits == [TIMEOUT_MAX, TIMEOUT_MAX]
+
+
+def test_drain_rejects_same_owner_callback_even_after_close() -> None:
+    pressure = PressureClass("read")
+    owner = AdmissionOwner(EndpointIdentity("local"), {pressure: ClassLimit(1, 0)})
+    other = AdmissionOwner(EndpointIdentity("other"), {pressure: ClassLimit(1, 0)})
+
+    def callback() -> None:
+        owner.close()
+        assert other.wait_drained(timeout=1)
+        with pytest.raises(AdmissionReentryError):
+            owner.wait_drained(timeout=1)
+
+    owner.request(pressure).call(callback)
+    assert owner.wait_drained(timeout=1)
+
+
+@pytest.mark.parametrize("close_first", [False, True])
+def test_close_and_queue_deadline_preserve_first_terminal_outcome(
+    close_first: bool,
+) -> None:
+    pressure = PressureClass("read")
+    owner = AdmissionOwner(EndpointIdentity("local"), {pressure: ClassLimit(1, 1)})
+    owner._buckets[pressure].active = 1
+    request = owner.request(pressure, queue_timeout=1)
+
+    def wake(timeout: float | None = None) -> bool:
+        if close_first:
+            owner.close()
+        owner._buckets[pressure].active = 0
+        return True
+
+    with (
+        patch("pywhales.admission._owner.monotonic", side_effect=[100, 100, 101]),
+        patch.object(owner._condition, "wait", side_effect=wake),
+        pytest.raises(
+            AdmissionRejected if close_first else AdmissionQueueTimeout
+        ) as raised,
+    ):
+        request.call(lambda: pytest.fail("terminal callback ran"))
+    owner.close()
+    assert not request.cancel()
+    if close_first:
+        assert isinstance(raised.value, AdmissionRejected)
+        assert raised.value.reason is RejectionReason.CLOSED
+    counts = owner.snapshot().classes[0].outcomes
+    assert (counts.rejected_closed, counts.queue_timed_out, counts.failed) == (
+        int(close_first),
+        int(not close_first),
+        0,
+    )
+
+
+def test_drain_deadline_covers_time_awaiting_admission_lock() -> None:
+    pressure = PressureClass("read")
+    owner = AdmissionOwner(EndpointIdentity("local"), {pressure: ClassLimit(1, 0)})
+    owner._buckets[pressure].active = 1
+    started = Event()
+    now = [100.0]
+
+    def clock() -> float:
+        value = now[0]
+        started.set()
+        return value
+
+    with (
+        ThreadPoolExecutor(1) as executor,
+        patch("pywhales.admission._owner.monotonic", side_effect=clock),
+    ):
+        with owner._condition:
+            result = executor.submit(owner.wait_drained, timeout=1)
+            assert started.wait(3)
+            now[0] = 102.0
+        assert not result.result(3)

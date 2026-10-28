@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from threading import Event, Thread
@@ -80,6 +81,26 @@ def test_effective_environment_is_checked_before_launch() -> None:
         run([sys.executable, "-c", "pass"], env={"PRIVATE": "secret\0value"})
     assert failure.value.reason == "environment"
     assert "secret" not in str(failure.value)
+
+
+@pytest.mark.parametrize("layer", ["client", "operation"])
+def test_invalid_environment_during_observation_is_safe_and_never_launches(
+    layer: str,
+) -> None:
+    config = ClientConfig(client_call=[sys.executable])
+    command = [*config.docker_cmd, "-c", "pass"]
+    invalid = {"PRIVATE": "secret\0value"}
+    if layer == "client":
+        config.environment = invalid
+    with (
+        patch("pywhales._bounded_capture.subprocess.Popen") as launch,
+        observation(policy()),
+        pytest.raises(ObservationLimitError) as failure,
+    ):
+        run(command, env=invalid if layer == "operation" else {})
+    assert failure.value.reason == "environment"
+    assert "secret" not in "".join(traceback.format_exception(failure.value))
+    launch.assert_not_called()
 
 
 @pytest.mark.parametrize(

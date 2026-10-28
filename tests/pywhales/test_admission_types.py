@@ -37,3 +37,7 @@ def _check_admission_generic_inference(
     )
     assert_type(next(owner.request(pressure).stream(lambda: multi)), tuple[str, bytes])
     assert_type(owner.snapshot(), AdmissionSnapshot)
+    assert_type(owner.snapshot().closed, bool)
+    assert_type(owner.snapshot().classes[0].outcomes.rejected_closed, int)
+    assert_type(owner.close(), None)
+    assert_type(owner.wait_drained(timeout=1), bool)

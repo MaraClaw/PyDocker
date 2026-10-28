@@ -114,4 +114,5 @@ def bounded_capture(
         process.stdout.close()
         process.stderr.close()
         process.wait()
+        telemetry.return_code = process.returncode
         telemetry.stdout_bytes, telemetry.stderr_bytes = read_bytes.values()

@@ -54,7 +54,12 @@ def smoke(root: Path) -> None:
     """Install wheel and sdist separately outside the checkout with isolated Python."""
     root = root.resolve()
     version = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
-    files = {path.name: path.read_bytes() for path in (root / "dist").iterdir()}
+    # uv's output-directory marker is not part of the uploaded distributions.
+    files = {
+        path.name: path.read_bytes()
+        for path in (root / "dist").iterdir()
+        if path.name != ".gitignore"
+    }
     inspect(files, version)
     code = (
         "import importlib.metadata,importlib.util,json,pathlib,sys,pywhales;"

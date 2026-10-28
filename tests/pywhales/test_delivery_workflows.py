@@ -755,13 +755,19 @@ def test_distribution_checks_read_contents_not_filenames(
         inspect(files, "0.6.1")
 
 
+@pytest.mark.parametrize("build_sidecar", [False, True])
 def test_smoke_uses_separate_isolated_installs_outside_source(
-    service: Service, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    service: Service,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_sidecar: bool,
 ) -> None:
     (tmp_path / "pyproject.toml").write_text('[project]\nversion = "0.6.1"\n')
     (tmp_path / "dist").mkdir()
     for filename, data in service.material.items():
         (tmp_path / "dist" / filename).write_bytes(data)
+    if build_sidecar:
+        (tmp_path / "dist" / ".gitignore").write_text("*\n")
     calls: list[tuple[list[str], str]] = []
 
     def install(
@@ -783,6 +789,27 @@ def test_smoke_uses_separate_isolated_installs_outside_source(
         and not Path(cwd).is_relative_to(tmp_path)
         for command, cwd in calls
     )
+
+
+@pytest.mark.parametrize(
+    "extra", ["unexpected.txt", ".unexpected", "pywhales-0.6.0.tar.gz"]
+)
+def test_smoke_rejects_unexpected_build_files(tmp_path: Path, extra: str) -> None:
+    (tmp_path / "pyproject.toml").write_text('[project]\nversion = "0.6.1"\n')
+    (tmp_path / "dist").mkdir()
+    for filename, data in distributions().items():
+        (tmp_path / "dist" / filename).write_bytes(data)
+    (tmp_path / "dist" / extra).write_bytes(b"unexpected")
+
+    with pytest.raises(Rejected, match="distribution filenames"):
+        smoke(tmp_path)
+
+
+def test_distribution_inspection_rejects_build_sidecar() -> None:
+    files = distributions() | {".gitignore": b"*\n"}
+
+    with pytest.raises(Rejected, match="distribution filenames"):
+        inspect(files, "0.6.1")
 
 
 @pytest.mark.parametrize("checkout_import", [False, True])

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import builtins
 import json
-import warnings
 from collections import OrderedDict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import datetime
@@ -17,7 +16,6 @@ from pathlib import Path
 from subprocess import PIPE, Popen
 from types import TracebackType
 from typing import (
-    Any,
     Literal,
     Never,
     Self,
@@ -514,7 +512,7 @@ class ImageCLI(DockerCLICaller):
     def list(
         self,
         repository_or_tag: str | None = None,
-        filters: Iterable[ImageListFilter] | Mapping[str, Any] = (),
+        filters: Iterable[ImageListFilter] = (),
         all: bool = False,
     ) -> builtins.list[Image]:
         """Return unique image IDs present in the selected Docker daemon.
@@ -525,7 +523,7 @@ class ImageCLI(DockerCLICaller):
 
         Args:
             repository_or_tag: Optional CLI repository or tag selector.
-            filters: CLI filter pairs. Mapping input is accepted but deprecated.
+            filters: CLI filter pairs.
             all: Include intermediate images.
 
         Returns:
@@ -533,16 +531,7 @@ class ImageCLI(DockerCLICaller):
             the originating client configuration.
         """
         if isinstance(filters, Mapping):
-            filter_items = filters.items()
-            warnings.warn(
-                "Passing filters as a mapping is deprecated, replace with an "
-                "iterable of tuples instead, as so:\n"
-                f"filters={list(filter_items)}",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        else:
-            filter_items = filters
+            raise TypeError("filters must be an iterable of pairs, not a mapping")
         full_cmd = Command(
             [
                 *self.docker_cmd,
@@ -553,7 +542,9 @@ class ImageCLI(DockerCLICaller):
             ]
         )
         full_cmd.add_flag("--all", all)
-        full_cmd.add_args_iterable("--filter", (f"{f[0]}={f[1]}" for f in filter_items))
+        full_cmd.add_args_iterable(
+            "--filter", (f"{key}={value}" for key, value in filters)
+        )
 
         if repository_or_tag is not None:
             full_cmd.append(repository_or_tag)
@@ -567,7 +558,7 @@ class ImageCLI(DockerCLICaller):
     def prune(
         self,
         all: bool = False,
-        filters: Iterable[ImageListFilter] | Mapping[str, Any] = (),
+        filters: Iterable[ImageListFilter] = (),
     ) -> str:
         """Remove unused images without prompting.
 
@@ -579,19 +570,12 @@ class ImageCLI(DockerCLICaller):
             The output of the CLI (the layers removed).
         """
         if isinstance(filters, Mapping):
-            filter_items = filters.items()
-            warnings.warn(
-                "Passing filters as a mapping is deprecated, replace with an "
-                "iterable of tuples instead, as so:\n"
-                f"filters={list(filter_items)}",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        else:
-            filter_items = filters
+            raise TypeError("filters must be an iterable of pairs, not a mapping")
         full_cmd = Command([*self.docker_cmd, "image", "prune", "--force"])
         full_cmd.add_flag("--all", all)
-        full_cmd.add_args_iterable("--filter", (f"{f[0]}={f[1]}" for f in filter_items))
+        full_cmd.add_args_iterable(
+            "--filter", (f"{key}={value}" for key, value in filters)
+        )
         return run(full_cmd)
 
     @overload

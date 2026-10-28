@@ -1321,8 +1321,7 @@ def test_list_filters(ctr_client: DockerClient) -> None:
         container.kill()
 
 
-def test_list_filters_old_signature(docker_client: DockerClient) -> None:
-    """Verify legacy mapping filters warn while selecting the labeled containers."""
+def test_list_filters_client(docker_client: DockerClient) -> None:
     random_label_value = random_name()
 
     containers_with_labels = []
@@ -1349,15 +1348,9 @@ def test_list_filters_old_signature(docker_client: DockerClient) -> None:
             )
         )
 
-    expected_warning = (
-        r"Passing filters as a mapping is deprecated, replace with an iterable "
-        r"of tuples instead, as so:\n"
-        r"filters=\[\(.*\)\]"
+    expected_containers_with_labels = docker_client.container.list(
+        filters=[("label", f"dodo={random_label_value}")]
     )
-    with pytest.warns(DeprecationWarning, match=expected_warning):
-        expected_containers_with_labels = docker_client.container.list(
-            filters={"label": f"dodo={random_label_value}"}
-        )
 
     assert set(expected_containers_with_labels) == set(containers_with_labels)
 
@@ -1669,21 +1662,21 @@ def test_update_nosuchcontainer(ctr_client: DockerClient) -> None:
 
 
 def test_prune(ctr_client: DockerClient) -> None:
-    for container in ctr_client.container.list(filters={"name": "test-container"}):
+    for container in ctr_client.container.list(filters=[("name", "test-container")]):
         ctr_client.container.remove(container, force=True)
     container = ctr_client.container.create("busybox")
     assert container in ctr_client.container.list(all=True)
 
     # container not pruned because it is not old enough
-    ctr_client.container.prune(filters={"until": "100h"})
+    ctr_client.container.prune(filters=[("until", "100h")])
     assert container in ctr_client.container.list(all=True)
 
     # container not pruned because it is does not have label "dne"
-    ctr_client.container.prune(filters={"label": "dne"})
+    ctr_client.container.prune(filters=[("label", "dne")])
     assert container in ctr_client.container.list(all=True)
 
     # container not pruned because it is not old enough and does not have label "dne"
-    ctr_client.container.prune(filters={"until": "100h", "label": "dne"})
+    ctr_client.container.prune(filters=[("until", "100h"), ("label", "dne")])
     assert container in ctr_client.container.list(all=True)
 
     # container pruned
@@ -1692,13 +1685,15 @@ def test_prune(ctr_client: DockerClient) -> None:
 
 
 def test_prune_streaming(ctr_client: DockerClient) -> None:
-    for container in ctr_client.container.list(filters={"name": "test-container"}):
+    for container in ctr_client.container.list(filters=[("name", "test-container")]):
         ctr_client.container.remove(container, force=True)
     container = ctr_client.container.create("busybox")
     assert container in ctr_client.container.list(all=True)
 
     # container not pruned because it is not old enough
-    logs = list(ctr_client.container.prune(filters={"until": "100h"}, stream_logs=True))
+    logs = list(
+        ctr_client.container.prune(filters=[("until", "100h")], stream_logs=True)
+    )
     assert container in ctr_client.container.list(all=True)
 
     assert len(logs) >= 1
@@ -1710,7 +1705,9 @@ def test_prune_streaming(ctr_client: DockerClient) -> None:
     assert b"Total reclaimed space:" in logs_as_big_binary
 
     # container not pruned because it is does not have label "dne"
-    logs = list(ctr_client.container.prune(filters={"label": "dne"}, stream_logs=True))
+    logs = list(
+        ctr_client.container.prune(filters=[("label", "dne")], stream_logs=True)
+    )
     assert container in ctr_client.container.list(all=True)
 
     assert len(logs) >= 1
@@ -1724,7 +1721,7 @@ def test_prune_streaming(ctr_client: DockerClient) -> None:
     # container not pruned because it is not old enough and does not have label "dne"
     logs = list(
         ctr_client.container.prune(
-            filters={"until": "100h", "label": "dne"}, stream_logs=True
+            filters=[("until", "100h"), ("label", "dne")], stream_logs=True
         )
     )
     assert container in ctr_client.container.list(all=True)

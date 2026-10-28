@@ -43,7 +43,7 @@ uv run --locked pytest tests/pywhales/components/buildx/imagetools/test_models.p
   in `test_logging.py`. Image stream tests cover operation snapshots across lazy and queued children.
 - Assert raw failure details through `stderr`, `stdout`, or `docker_command`, not safe exception text.
   Test rendering separately in safe/raw modes, including full traceback chains and no inspect dumps in safe mode.
-- Wrapper diagnostics must remain safe with or without `PYDOCKER_DEBUG`; raw opt-in must not change returned payloads.
+- Wrapper diagnostics must remain safe with or without `PYWHALES_DEBUG`; raw opt-in must not change returned payloads.
 - `test_bulk_reload.py` must cover all eleven kinds, exact config-identity grouping, upfront rejection,
   and unchanged original caches/timestamps when any later group fails; publish once per distinct handle.
 

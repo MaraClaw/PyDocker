@@ -27,7 +27,7 @@ def test_default_diagnostics_hide_payloads_without_altering_execution(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     secret = "safe-secret-sentinel"
-    monkeypatch.setenv("PYDOCKER_DEBUG", "1")
+    monkeypatch.setenv("PYWHALES_DEBUG", "1")
     monkeypatch.setenv("INHERITED_SECRET", secret)
     caplog.set_level(logging.DEBUG)
     command = [
@@ -57,7 +57,7 @@ def test_concurrent_clients_keep_policy_through_command_composition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     caplog.set_level(logging.DEBUG)
-    monkeypatch.setenv("PYDOCKER_DEBUG", "1")
+    monkeypatch.setenv("PYWHALES_DEBUG", "1")
     barrier = Barrier(2)
 
     def execute(raw: bool) -> DockerException:

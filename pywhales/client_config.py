@@ -10,7 +10,6 @@ import json
 import os
 import shutil
 import tempfile
-import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -140,8 +139,6 @@ class ClientConfig:
         tlsverify: Whether to emit TLS verification; only true emits it.
         compose_files: Ordered Compose configuration files.
         compose_profiles: Compose profiles enabled through repeated options.
-        compose_env_file: Deprecated single environment file, ignored when
-            compose_env_files is nonempty.
         compose_env_files: Ordered environment files; later files override
             earlier values according to Compose semantics.
         compose_project_name: Compose project-name override.
@@ -180,7 +177,6 @@ class ClientConfig:
     client_binary_path: ValidPath | None = None
     compose_files: list[ValidPath] = field(default_factory=list)
     compose_profiles: list[str] = field(default_factory=list)
-    compose_env_file: ValidPath | None = None
     compose_env_files: Sequence[ValidPath] = field(default_factory=list)
     compose_project_name: str | None = None
     compose_project_directory: ValidPath | None = None
@@ -293,9 +289,7 @@ class ClientConfig:
     def get_compose_command(self, *, progress: str | None = None) -> Command:
         """Build Compose globals, optionally overriding progress for one command.
 
-        Nonempty compose_env_files takes precedence over compose_env_file and
-        preserves file order. Using the deprecated single-file setting warns,
-        including when that setting is ignored in favor of multiple files.
+        Environment files are emitted in their configured order.
 
         Args:
             progress: Per-command progress override; ``None`` uses the configured
@@ -311,19 +305,7 @@ class ClientConfig:
         base_cmd = Command([*self.docker_cmd, "compose"])
         base_cmd.add_args_iterable_or_single("--file", self.compose_files)
         base_cmd.add_args_iterable_or_single("--profile", self.compose_profiles)
-        if self.compose_env_files:
-            if self.compose_env_file is not None:
-                warnings.warn(
-                    "You can't set both `compose_env_file` and `compose_env_files`. Files used in `compose_env_files` will be used.",
-                    stacklevel=2,
-                )
-            base_cmd.add_args_iterable("--env-file", self.compose_env_files)
-        elif self.compose_env_file is not None:
-            warnings.warn(
-                "`compose_env_file` is deprecated. Use `compose_env_files` instead.",
-                stacklevel=2,
-            )
-            base_cmd.add_simple_arg("--env-file", self.compose_env_file)
+        base_cmd.add_args_iterable("--env-file", self.compose_env_files)
 
         base_cmd.add_simple_arg("--project-name", self.compose_project_name)
         base_cmd.add_simple_arg("--project-directory", self.compose_project_directory)

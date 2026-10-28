@@ -150,7 +150,7 @@ def measure(name: str, operation: Callable[[], None], repetitions: int) -> Measu
     with (
         patch("subprocess.run", new=execution.run),
         patch("subprocess.Popen", side_effect=RuntimeError("Process execution denied")),
-        patch.dict("os.environ", {"PYDOCKER_DEBUG": "0"}),
+        patch.dict("os.environ", {"PYWHALES_DEBUG": "0"}),
     ):
         for _ in range(repetitions):
             start = perf_counter_ns()

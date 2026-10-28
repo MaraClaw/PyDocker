@@ -83,7 +83,7 @@ The strict coverage command is an integration run, not a safe default for a work
 - Missing runtime support can skip tests locally; CI uses `--no-runtime-skip` to turn unavailable runtime checks into failures.
 - `scripts/ci-setup.sh` calls `scripts/add-local-docker-registry.sh`, which overwrites `/etc/docker/daemon.json` and restarts Docker with sudo.
 - That setup also installs plugins; it's CI provisioning, not safe workstation setup. Don't run it casually.
-- `PYDOCKER_DEBUG=1` enables execution diagnostics that withhold command, environment, and captured-output values by default.
+- `PYWHALES_DEBUG=1` enables execution diagnostics that withhold command, environment, and captured-output values by default.
   `DockerClient(raw_diagnostics=True)` opts that client into raw diagnostics; see `pywhales/AGENTS.md` for the confidentiality boundary.
 - Documentation generation is Docker-free by default. `--live-examples` explicitly opts into real Docker operations.
 - Edit `docs/template/` and source docstrings, not generated documentation output.

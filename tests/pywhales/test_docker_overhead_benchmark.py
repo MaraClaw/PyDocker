@@ -51,7 +51,7 @@ def test_counts_when_real_library_uses_simulated_execution(
 
 
 def test_json_schema_when_cli_runs_without_docker(tmp_path: Path) -> None:
-    environment = {**os.environ, "PATH": str(tmp_path), "PYDOCKER_DEBUG": "1"}
+    environment = {**os.environ, "PATH": str(tmp_path), "PYWHALES_DEBUG": "1"}
 
     completed = subprocess.run(
         [sys.executable, str(SCRIPT), "--repetitions", "2"],

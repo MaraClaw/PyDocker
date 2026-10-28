@@ -37,7 +37,7 @@ source paths refer to the daemon host, not automatically to the Python machine.
 
 Keep Compose globals on its client: `compose_files`, `compose_profiles`,
 `compose_project_name`, `compose_project_directory`, and `compose_env_files`.
-Use plural `compose_env_files`, not deprecated `compose_env_file`.
+Environment files are applied in order, with later files overriding earlier ones.
 
 ## Handle the Right Failure
 
@@ -72,12 +72,12 @@ existing secret mechanism; don't embed them in generated examples or reports.
 
 ## Troubleshooting Without Credential Leaks
 
-`PYDOCKER_DEBUG=1` enables execution diagnostics, with command and environment
+`PYWHALES_DEBUG=1` enables execution diagnostics, with command and environment
 values withheld by default. A separate `DockerClient(raw_diagnostics=True)`
 opts into detailed logs and errors, including the merged environment in debug
 printing and inspect-response dumps on model failures. Use that opt-in only in
-a trusted troubleshooting environment. The legacy `PYTHON_ON_WHALES_DEBUG` is
-consulted only if `PYDOCKER_DEBUG` is unset. Raw exception attributes, returned
+a trusted troubleshooting environment. Only the exact value `1` enables debug
+printing. Raw exception attributes, returned
 payloads, uncaptured terminal output, and caller logging remain outside this
 policy.
 

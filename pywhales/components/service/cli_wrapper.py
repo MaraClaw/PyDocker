@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import builtins
 import json
-import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timedelta
 from types import MappingProxyType, TracebackType
 from typing import (
-    Any,
     Literal,
     Self,
     assert_never,
@@ -544,30 +542,22 @@ class ServiceCLI(DockerCLICaller):
             with iterator:
                 return "".join(x[1].decode() for x in iterator)
 
-    def list(
-        self, filters: Iterable[ServiceListFilter] | Mapping[str, Any] = ()
-    ) -> builtins.list[Service]:
+    def list(self, filters: Iterable[ServiceListFilter] = ()) -> builtins.list[Service]:
         """List services in the selected Swarm.
 
         Args:
             filters: Docker filter pairs; the default selects all services.
-                Mapping inputs are deprecated.
 
         Returns:
             Service handles with full IDs. Nonempty results require a second CLI
             call to resolve the truncated IDs returned by service list.
         """
-        filter_items = filters.items() if isinstance(filters, Mapping) else filters
         if isinstance(filters, Mapping):
-            warnings.warn(
-                "Passing filters as a mapping is deprecated, replace with an "
-                "iterable of tuples instead, as so:\n"
-                f"filters={list(filter_items)}",
-                DeprecationWarning,
-                stacklevel=2,
-            )
+            raise TypeError("filters must be an iterable of pairs, not a mapping")
         full_cmd = Command([*self.docker_cmd, "service", "list", "--quiet"])
-        full_cmd.add_args_iterable("--filter", (f"{f[0]}={f[1]}" for f in filter_items))
+        full_cmd.add_args_iterable(
+            "--filter", (f"{key}={value}" for key, value in filters)
+        )
 
         ids_truncated = run(full_cmd).splitlines()
 

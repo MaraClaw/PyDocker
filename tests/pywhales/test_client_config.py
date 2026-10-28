@@ -351,24 +351,15 @@ def test_pretty_exception_message_and_report(mocker: MockerFixture) -> None:
     Path(word).unlink()
 
 
-def test_compose_env_file() -> None:
-    """Verify the legacy env-file warning and its single command-line option."""
-    with pytest.warns(UserWarning):
-        example_env_file_name = "example.env"
-        client_config = ClientConfig(compose_env_file=example_env_file_name)
-        assert client_config.docker_compose_cmd.count("--env-file") == 1
-        # Since we are operating of a list of commands, we first find the index of the `--env-file` argument, then we check that the next argument is the file name.
-        index = client_config.docker_compose_cmd.index("--env-file")
-        assert client_config.docker_compose_cmd[index + 1] == example_env_file_name
-
-
 @pytest.mark.parametrize(
     "compose_env_files",
     [
         ["example1.env", "example2.env"],
         ["example1.env"],
+        [],
+        ["example1.env", "example1.env", "example2.env"],
     ],
-    ids=["multiple_files", "single_file"],
+    ids=["multiple_files", "single_file", "empty", "repeated"],
 )
 def test_compose_env_files(compose_env_files: Sequence[str]) -> None:
     """Preserve every configured env-file argument in input order."""
@@ -382,23 +373,6 @@ def test_compose_env_files(compose_env_files: Sequence[str]) -> None:
     assert len(indices) == len(compose_env_files)
     for index, env_file in zip(indices, compose_env_files, strict=True):
         assert client_config.docker_compose_cmd[index + 1] == env_file
-
-
-def test_compose_env_files_and_env_file() -> None:
-    """Prefer env-files over the deprecated single-file option and warn."""
-    env_files_input = "example1.env"
-    env_file_input = "example2.env"
-
-    with pytest.warns(UserWarning):
-        client_config = ClientConfig(
-            compose_env_files=[env_files_input], compose_env_file=env_file_input
-        )
-        assert client_config.docker_compose_cmd.count("--env-file") == len(
-            [env_files_input]
-        )
-        # Since we are operating of a list of commands, we first find the index of the `--env-file` argument, then we check that the next argument is the file name.
-        index = client_config.docker_compose_cmd.index("--env-file")
-        assert client_config.docker_compose_cmd[index + 1] == env_files_input
 
 
 @contextmanager
@@ -429,7 +403,7 @@ def test_run_compose_command_with_env_file() -> None:
     """Verify Compose interpolation defaults and ordered env-file overrides.
 
     Requires the Docker CLI and Compose plugin to render configuration. Exercise
-    both single-file APIs and both file orders; later files override earlier B
+    a single file and both file orders; later files override earlier B
     values while absent A and B values use the service's zero defaults.
     """
     with _create_temp_env_files() as (env_file_1, env_file_2):
@@ -444,18 +418,6 @@ def test_run_compose_command_with_env_file() -> None:
         assert isinstance(environment, dict)
         assert "A" in environment and environment["A"] == "0"
         assert "B" in environment and environment["B"] == "0"
-
-        # Test with single env-file using the old `compose_env_file` argument
-        client = DockerClient(
-            compose_files=[COMPOSE_FILE],
-            compose_env_file=env_file_1,
-        )
-        config = client.compose.config()
-        assert config.services is not None
-        environment = config.services[SERVICE].environment
-        assert isinstance(environment, dict)
-        assert "A" in environment and environment["A"] == "1"
-        assert "B" in environment and environment["B"] == "1"
 
         # Test with single env-file using the new `compose_env_files` argument
         client = DockerClient(

@@ -181,20 +181,13 @@ def test_list_filters(ctr_client: DockerClient) -> None:
         assert listed_volumes == [vol2]
 
 
-def test_list_filters_old_signature(docker_client: DockerClient) -> None:
-    """Check backward compatibility of the DockerClient.volume.list() API."""
-    expected_warning = (
-        r"Passing filters as a mapping is deprecated, replace with an iterable "
-        r"of tuples instead, as so:\n"
-        r"filters=\[\(.*\)\]"
-    )
+def test_list_filters_client(docker_client: DockerClient) -> None:
     select_label = random_name()
     with (
         docker_client.volume.create(),
         docker_client.volume.create(labels={select_label: ""}) as vol2,
     ):
-        with pytest.warns(DeprecationWarning, match=expected_warning):
-            listed_volumes = docker_client.volume.list(filters={"label": select_label})
+        listed_volumes = docker_client.volume.list(filters=[("label", select_label)])
         assert listed_volumes == [vol2]
 
 
@@ -317,13 +310,13 @@ def test_volume_exists(ctr_client: DockerClient) -> None:
 
 
 def test_prune(ctr_client: DockerClient) -> None:
-    for volume in ctr_client.volume.list(filters={"name": "test-volume"}):
+    for volume in ctr_client.volume.list(filters=[("name", "test-volume")]):
         volume.remove()
     volume = ctr_client.volume.create("test-volume")
     assert volume in ctr_client.volume.list()
 
     # volume not pruned because it does not have label "dne"
-    ctr_client.volume.prune(filters={"label": "dne"}, all=True)
+    ctr_client.volume.prune(filters=[("label", "dne")], all=True)
     assert volume in ctr_client.volume.list()
 
     # could only find "label" filter for `docker volume prune`

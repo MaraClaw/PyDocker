@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import builtins
-import warnings
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
@@ -65,7 +64,6 @@ class StackCLI(DockerCLICaller):
         self,
         name: str,
         compose_files: ValidPath | Sequence[ValidPath] = (),
-        orchestrator: str | None = None,
         prune: bool = False,
         resolve_image: str = "always",
         with_registry_auth: bool = False,
@@ -77,21 +75,10 @@ class StackCLI(DockerCLICaller):
         This changes daemon-managed services and displays Docker's stdout.
         Failure or local interruption does not undo daemon-side mutations.
 
-        Compatibility forwarding of the deprecated ``orchestrator`` argument is
-        retained in this change. The warning window and removal release remain
-        maintainer decisions; removal requires a separate future change. Omit
-        the argument in new and updated calls. If the CLI rejects the flag, its
-        ordinary error propagates without probing, retrying, or dropping it.
-
         Args:
             name: The name of the stack to deploy. Mandatory.
             compose_files: One or more docker-compose files. If there are more than
                 one, they will be fused together.
-            orchestrator: Deprecated orchestrator selection. Non-None values,
-                including an empty string, emit one caller-located
-                DeprecationWarning before CLI execution and are forwarded
-                unchanged. Omitted or explicit None emits no warning and omits
-                the option.
             prune: Prune services that are no longer referenced
             resolve_image: Query the registry to resolve image digest
                 and supported platforms `"always"|"changed"|"never"` (default `"always"`).
@@ -111,16 +98,9 @@ class StackCLI(DockerCLICaller):
             A named stack handle after the deploy CLI exits, not a guarantee that
             all deployed service tasks have converged.
         """
-        if orchestrator is not None:
-            warnings.warn(
-                "The orchestrator argument is deprecated; omit it.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
         full_cmd = Command([*self.docker_cmd, "stack", "deploy"])
 
         full_cmd.add_args_iterable_or_single("--compose-file", compose_files)
-        full_cmd.add_simple_arg("--orchestrator", orchestrator)
         full_cmd.add_flag("--prune", prune)
         full_cmd.add_simple_arg("--resolve-image", resolve_image)
         full_cmd.add_flag("--with-registry-auth", with_registry_auth)

@@ -909,7 +909,7 @@ def test_passing_env_files(tmp_path: Path) -> None:
         compose_files=[
             PROJECT_ROOT / "tests/pywhales/components/dummy_compose_ends_quickly.yml"
         ],
-        compose_env_file=compose_env_file,
+        compose_env_files=[compose_env_file],
         compose_compatibility=True,
     )
     output = docker.compose.config()

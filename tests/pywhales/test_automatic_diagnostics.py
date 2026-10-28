@@ -19,18 +19,17 @@ from pywhales.utils import ProcessStream
 def debug_environment(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Isolate both debug variables and select the parametrized diagnostic mode.
+    """Isolate the debug variable and select the parametrized diagnostic mode.
 
     Pytest restores the original environment after each test.
 
     Args:
-        request: Supplies whether PYDOCKER_DEBUG is enabled for this case.
+        request: Supplies whether PYWHALES_DEBUG is enabled for this case.
         monkeypatch: Removes inherited flags and scopes any enabled flag.
     """
-    monkeypatch.delenv("PYTHON_ON_WHALES_DEBUG", raising=False)
-    monkeypatch.delenv("PYDOCKER_DEBUG", raising=False)
+    monkeypatch.delenv("PYWHALES_DEBUG", raising=False)
     if request.param:
-        monkeypatch.setenv("PYDOCKER_DEBUG", "1")
+        monkeypatch.setenv("PYWHALES_DEBUG", "1")
 
 
 @pytest.mark.parametrize("raw_diagnostics", [False, True], ids=["safe", "raw"])

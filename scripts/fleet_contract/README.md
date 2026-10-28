@@ -100,8 +100,8 @@ Runtime checks reject:
 A draft can replace each not-yet-selected group (or its `support_row`) with
 `{"decision_id":"budgets"}`. Its `decisions` must contain one matching unique ID
 and exact field path, owner, rationale and blocking effect (`live_run`,
-`qualification`, `legacy_compatibility`). Matrix versions and legacy policy
-choices use the same marker and indexed paths such as
+`qualification`, `legacy_compatibility`). Unresolved matrix versions or legacy
+policy choices can use the same marker and indexed paths such as
 `rows.0.versions.docker_engine`. Empty arrays/null are not unresolved markers.
 Every marker must resolve to a decision and every decision must refer to a marker.
 
@@ -135,9 +135,9 @@ contains `compose`; Buildx is applicable when `required_features` contains
 owned decision markers are allowed only in untested rows. Actual observed
 versions cannot contain markers and must match the selected row.
 
-`legacy06` explicitly leaves both compatibility window and removal policy open
-with maintainer owners/rationales/blocking effects. This does not choose a release
-boundary, silently drop a flag or implement proposal06.
+`legacy06` records that the deprecated `stack.deploy()` orchestrator compatibility
+ends before 0.6.0 and the argument is removed in 0.6.0. This release policy does
+not qualify any Docker combination.
 
 ## Result And Report Semantics
 

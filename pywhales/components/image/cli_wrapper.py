@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import builtins
 import json
+import os
 from collections import OrderedDict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import datetime
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from subprocess import PIPE, Popen
+from time import monotonic
 from types import TracebackType
 from typing import (
     Literal,
@@ -26,6 +28,7 @@ from typing import (
 from pydantic import JsonValue
 
 import pywhales.components.buildx.cli_wrapper
+from pywhales._archive_deadline import ArchiveDeadline
 from pywhales._environment import finalize_environment, resolve_environment
 from pywhales._execution_policy import get_execution_policy
 from pywhales.client_config import (
@@ -58,6 +61,7 @@ from pywhales.utils import (
     run,
     stream_stdout_and_stderr,
     to_list,
+    validate_timeout,
 )
 
 type ImageListFilter = (
@@ -447,7 +451,9 @@ class ImageCLI(DockerCLICaller):
 
         Path input consumes a process-backed progress stream before returning.
         Byte input is written to a local CLI's stdin and fully consumed during
-        the call. These archive bytes are not progress-log records.
+        the call. These archive bytes are not progress-log records. A configured
+        default deadline reaps the local CLI even if the input iterator stalls;
+        an iterator's Python code is not interrupted.
 
         Args:
             input: Archive path, complete archive bytes, or an iterator of archive
@@ -489,20 +495,53 @@ class ImageCLI(DockerCLICaller):
         self, full_cmd: Sequence[object], input: Iterable[bytes]
     ) -> builtins.list[str]:
         policy = get_execution_policy(full_cmd)
+        validate_timeout(policy.default_timeout)
         environment = resolve_environment(
             policy.environment, frozen=policy.frozen_environment
         )
         command = [str(argument) for argument in full_cmd]
         environment = finalize_environment(environment, command)
-        with Popen(command, stdin=PIPE, stdout=PIPE, env=environment) as process:
+        deadline = (
+            None
+            if policy.default_timeout is None
+            else monotonic() + policy.default_timeout
+        )
+        with Popen(
+            command,
+            stdin=PIPE,
+            stdout=PIPE,
+            env=environment,
+            bufsize=0 if deadline is not None else -1,
+        ) as process:
             assert process.stdin is not None
             assert process.stdout is not None
+            owner = (
+                None
+                if deadline is None
+                else ArchiveDeadline(
+                    process, command, deadline, raw=policy.raw_diagnostics
+                )
+            )
             for buffer_bytes in input:
-                process.stdin.write(buffer_bytes)
-                process.stdin.flush()
+                if owner is None:
+                    process.stdin.write(buffer_bytes)
+                    process.stdin.flush()
+                else:
+                    owner.write(process.stdin, buffer_bytes)
+            if owner is not None:
+                owner.check()
             process.stdin.close()
-            stdout = process.stdout.read()
+            if owner is None:
+                stdout = process.stdout.read()
+            else:
+                chunks = []
+                while chunk := owner.read(process.stdout):
+                    chunks.append(chunk)
+                stdout = b"".join(chunks)
+                owner.check()
             exit_code = process.wait()
+            if owner is not None:
+                owner.check()
         if exit_code != 0:
             raise DockerException(
                 command, exit_code, raw_diagnostics=policy.raw_diagnostics
@@ -1075,8 +1114,9 @@ class ImageCLI(DockerCLICaller):
         Inspection occurs eagerly before returning. An output path runs the save
         CLI during the call; omitted output returns a generator whose save CLI
         starts on first iteration. Exhaust or close that generator to leave its
-        subprocess context. Cleanup can wait for the CLI; it does not provide the
-        cancellation or buffer-budget guarantees of a progress ProcessStream.
+        subprocess context. A configured default deadline reaps the CLI while
+        consumption is paused and is reported on resumption. Archive bytes have
+        no progress-stream buffer budget; no daemon rollback is guaranteed.
 
         Args:
             images: Single image or non-empty iterable of images to save.
@@ -1127,17 +1167,45 @@ class ImageCLI(DockerCLICaller):
             DockerException: The save CLI exits unsuccessfully.
         """
         policy = get_execution_policy(full_cmd)
+        validate_timeout(policy.default_timeout)
         environment = resolve_environment(
             policy.environment, frozen=policy.frozen_environment
         )
         command = [str(argument) for argument in full_cmd]
         environment = finalize_environment(environment, command)
-        with Popen(command, stdout=PIPE, stderr=PIPE, env=environment) as process:
+        deadline = (
+            None
+            if policy.default_timeout is None
+            else monotonic() + policy.default_timeout
+        )
+        with Popen(
+            command,
+            stdout=PIPE,
+            stderr=PIPE,
+            env=environment,
+            bufsize=0 if deadline is not None else -1,
+        ) as process:
             assert process.stdout is not None
             assert process.stderr is not None
-            yield from process.stdout
-            exit_code = process.wait(0.1)
+            owner = (
+                None
+                if deadline is None
+                else ArchiveDeadline(
+                    process, command, deadline, raw=policy.raw_diagnostics
+                )
+            )
+            if owner is None:
+                yield from process.stdout
+                exit_code = process.wait(0.1)
+            else:
+                while chunk := owner.read(process.stdout):
+                    yield chunk
+                owner.check()
+                exit_code = process.wait()
+                owner.check()
             if exit_code != 0:
+                if owner is not None:
+                    os.set_blocking(process.stderr.fileno(), True)
                 stderr = process.stderr.read()
                 if "No such image" in stderr.decode():
                     raise NoSuchImage(

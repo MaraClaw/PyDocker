@@ -49,7 +49,7 @@ deletion choice, not a default cleanup setting.
 | --- | --- |
 | `client.compose.build(...)` | `None`; normal output is displayed |
 | `client.compose.up(...)` | `None`; it doesn't return containers or captured logs |
-| Either with `stream_logs=True` | Owned stream yielding `(source, bytes)` |
+| Either with `stream_logs=True` | Owned `(source, bytes)` stream; `None` for an explicit empty service list |
 | `client.compose.ps()` | `list[Container]` for the selected project |
 | `client.compose.logs(...)` | `str`; use `stream=True` for `(source, bytes)` |
 | `client.compose.execute(service, command, tty=False)` | `str`; detached or TTY execution returns `None` |
@@ -60,9 +60,27 @@ CLI processes and support context-manager cleanup; drain them to observe
 failures. Closing them doesn't tear down the project.
 
 For `build` and `up`, `services=None` means all services while `services=[]`
-means no work. Don't replace one with the other in a translation. Keep
-dependencies enabled unless the original command requests otherwise.
+means no work. `pull` has the same selection rule; `ps` and `logs` instead
+treat both `None` and `[]` as all services. Don't normalize these differences.
+`up` and `run` enable dependencies by default; `build`'s separate
+`with_dependencies` option defaults to `False`.
 `quiet=True` is incompatible with `stream_logs=True`.
+
+## Distinguish Timeout Meanings
+
+`down`, `restart`, and `stop` accept `timeout` as a Compose shutdown grace
+period forwarded to the CLI, not a local subprocess deadline. `down` accepts
+integer seconds; `restart` and `stop` also accept a `timedelta`, truncated to
+whole seconds. These launches can still raise `DockerTimeout` if the client's
+separate `default_timeout` expires.
+
+`run`, `logs`, `pull`, and `events` instead accept a keyword-only `timeout` in
+positive finite seconds that replaces the client's `default_timeout` for that
+one local CLI launch; `None` inherits it. Expiry kills and reaps the local
+Compose CLI and raises `DockerTimeout`; it does not stop services or guarantee
+that daemon-side work stops. Don't confuse the two: `compose.up(wait_timeout=60)`
+is a third, separate concept, the Compose-side `--wait-timeout` bound on
+service readiness, not a local CLI deadline either.
 
 ## One-Off Commands and TTY Defaults
 
@@ -91,6 +109,10 @@ Compose. Newer options, such as build `check`/`print` and up `watch` or
 `exit_code_from`, require a supporting plugin. PyWhales forwards flags without
 version probing or automatic downgrade. Blocking `compose.build(print=True)`
 still returns `None`; stream it if the output must be consumed.
+
+`compose.watch(...)` itself returns an owned `(source, bytes)` stream; it
+doesn't take `stream_logs=True`. It defaults to `prune=False` (explicitly
+forwarded as `--prune=false`), and an explicit empty service list does no work.
 
 Preview mode is the client global `compose_dry_run=True`, not an `up()` keyword.
 Use a separate preview client with the same files/project settings. It still

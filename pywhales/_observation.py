@@ -8,8 +8,20 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from threading import Event
 
-from pywhales.exceptions import ObservationCancelled, ObservationTimeout
+from pywhales.exceptions import (
+    ObservationCancelled,
+    ObservationLimitError,
+    ObservationTimeout,
+)
 from pywhales.inventory import InspectionPolicy
+
+
+@dataclass(slots=True)
+class _ResponseAccount:
+    """Track actual bytes consumed during one observation scope."""
+
+    limit: int
+    consumed: int = 0
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -19,6 +31,34 @@ class ObservationState:
     policy: InspectionPolicy
     deadline: float | None
     cancel_tokens: tuple[Event, ...]
+    response_accounts: tuple[_ResponseAccount, ...]
+
+    def response_allowance(self, command_remaining: int) -> int:
+        """Return the tightest remaining command or scope allowance."""
+        return max(
+            0,
+            min(
+                (
+                    command_remaining,
+                    *(
+                        account.limit - account.consumed
+                        for account in self.response_accounts
+                    ),
+                )
+            ),
+        )
+
+    def charge_response(self, size: int) -> None:
+        """Charge all enclosing scopes before reporting any overflow."""
+        exceeded = None
+        for account in self.response_accounts:
+            account.consumed += size
+            if account.consumed > account.limit and exceeded is None:
+                exceeded = account
+        if exceeded is not None:
+            raise ObservationLimitError(
+                "total_response", exceeded.limit, exceeded.consumed
+            )
 
 
 _current_observation: ContextVar[ObservationState | None] = ContextVar(
@@ -29,6 +69,11 @@ _current_observation: ContextVar[ObservationState | None] = ContextVar(
 def get_observation() -> ObservationState | None:
     """Return the effective state for the current context, if any."""
     return _current_observation.get()
+
+
+def _minimum_optional(first: int | None, second: int | None) -> int | None:
+    limits = [value for value in (first, second) if value is not None]
+    return min(limits) if limits else None
 
 
 def check_observation(state: ObservationState | None = None) -> None:
@@ -67,12 +112,19 @@ def observation(
     if deadline is not None and not math.isfinite(deadline):
         raise ValueError("Observation deadline must be finite")
     parent = get_observation()
+    response_limit = policy.max_total_response_bytes
     if parent is not None:
         policy = InspectionPolicy(
             max_references=min(parent.policy.max_references, policy.max_references),
             max_argv_bytes=min(parent.policy.max_argv_bytes, policy.max_argv_bytes),
             max_response_bytes=min(
                 parent.policy.max_response_bytes, policy.max_response_bytes
+            ),
+            max_total_references=_minimum_optional(
+                parent.policy.max_total_references, policy.max_total_references
+            ),
+            max_total_response_bytes=_minimum_optional(
+                parent.policy.max_total_response_bytes, policy.max_total_response_bytes
             ),
         )
     deadlines = tuple(
@@ -81,10 +133,16 @@ def observation(
         if value is not None
     )
     tokens = parent.cancel_tokens if parent is not None else ()
+    accounts = parent.response_accounts if parent is not None else ()
     state = ObservationState(
         policy=policy,
         deadline=min(deadlines) if deadlines else None,
         cancel_tokens=(*tokens, cancel) if cancel is not None else tokens,
+        response_accounts=(
+            (*accounts, _ResponseAccount(response_limit))
+            if response_limit is not None
+            else accounts
+        ),
     )
     token = _current_observation.set(state)
     try:

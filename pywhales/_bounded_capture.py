@@ -92,8 +92,11 @@ def bounded_capture(
                         - len(stdout)
                         - len(stderr)
                     )
-                    chunk = os.read(fd, min(available, remaining + 1, 65536))
+                    allowance = observation.response_allowance(remaining)
+                    chunk = os.read(fd, min(available, allowance + 1, 65536))
                     read_bytes[fd] += len(chunk)
+                    if chunk:
+                        observation.charge_response(len(chunk))
                     if not chunk:
                         pipes.discard(fd)
                     elif len(chunk) > remaining:

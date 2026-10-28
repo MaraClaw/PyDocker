@@ -127,8 +127,17 @@ def _chunks(
 def _stage(
     items: Sequence[InventoryRequest | InventoryResource], policy: InspectionPolicy
 ) -> tuple[list[InventoryRecord], list[InventoryResource]]:
-    groups = _normalize(items)
     with observation(policy) as state:
+        limit = state.policy.max_total_references
+        if limit is not None:
+            count = 0
+            for item in items:
+                count += (
+                    len(item.references) if isinstance(item, InventoryRequest) else 1
+                )
+                if count > limit:
+                    raise ObservationLimitError("total_references", limit, count)
+        groups = _normalize(items)
         plans: list[
             tuple[_Group, list[str], Mapping[str, str], list[list[_Occurrence]]]
         ] = []

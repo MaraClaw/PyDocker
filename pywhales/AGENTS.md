@@ -50,7 +50,8 @@
 
 ## Subprocesses And Ownership
 
-- `run()` uses `subprocess.run()` without a timeout, or `Popen.communicate()` with a deadline.
+- `run()` uses `subprocess.run()` when neither a timeout nor byte input is supplied.
+  Measured-input and deadline paths use `Popen.communicate()` with owned stdin-writer cleanup.
 - `stream_stdout_and_stderr()` starts `Popen` immediately and returns a `ProcessStream` yielding
   `(source, bytes)` records. `MappedProcessStream` carries ownership through output transforms.
 - A timeout is `None` or positive finite seconds, never `bool`; validate it before the selected launch.

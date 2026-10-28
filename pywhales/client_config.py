@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, override
 import pydantic
 
 from . import utils
+from ._environment import copy_environment
 from ._execution_policy import PolicyExecutable
 from ._types import JsonObject
 from .enums import ClientTypeInput, ComposeProgressInput
@@ -162,6 +163,8 @@ class ClientConfig:
             attributes, uncaptured terminal output, or caller-owned logging.
         telemetry_observer: Optional sanitized launch/completion callback, frozen
             by reference for each launch. Raw diagnostics never relax its schema.
+        environment: Copied child environment overlay, hidden from repr but
+            included in equality. Mutations affect subsequent independent launches.
     """
 
     config: ValidPath | None = None
@@ -192,14 +195,18 @@ class ClientConfig:
     stream_buffer_bytes: int | None = None
     raw_diagnostics: bool = False
     telemetry_observer: TelemetryObserver | None = field(default=None, repr=False)
+    environment: Mapping[str, str] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        """Validate configured output budgets without probing the CLI.
+        """Validate and copy environment settings and budgets without probing the CLI.
 
         Raises:
-            ValueError: If either budget is not a positive integer or ``None``;
-                booleans are not accepted as integers.
+            ValueError: If either budget is not a positive integer or ``None``,
+                including boolean values, or an environment entry is invalid.
+            TypeError: If the environment is not a mapping of string keys and values.
         """
+        if self.environment is not None:
+            self.environment = copy_environment(self.environment)
         for name, budget in (
             ("image_stream_buffer_bytes", self.image_stream_buffer_bytes),
             ("stream_buffer_bytes", self.stream_buffer_bytes),

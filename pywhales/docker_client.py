@@ -8,7 +8,7 @@ operations require their corresponding external CLI support when invoked.
 import base64
 import json
 import warnings
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Annotated
 
 import pydantic
@@ -158,6 +158,7 @@ class DockerClient(DockerCLICaller):
         stream_buffer_bytes: int | None = None,
         raw_diagnostics: bool = False,
         telemetry_observer: TelemetryObserver | None = None,
+        environment: Mapping[str, str] | None = None,
     ) -> None:
         """Configure command groups and aliases without invoking the CLI.
 
@@ -218,10 +219,14 @@ class DockerClient(DockerCLICaller):
             telemetry_observer: Optional sanitized launch/completion observer.
                 Snapshotted by reference at each launch; ordinary callback errors
                 are contained. Raw diagnostics never enable payload telemetry.
+            environment: Child environment overlay copied into a newly created
+                config. It does not affect executable lookup or the parent process.
 
         Raises:
             ValueError: If a newly created config has a budget that is not a
-                positive integer or ``None``; booleans are rejected.
+                positive integer or ``None``, or an invalid environment entry.
+            TypeError: If a newly created config's environment is not a mapping
+                of string keys to string values.
         """
         if client_binary != "docker":
             warnings.warn(
@@ -259,6 +264,7 @@ class DockerClient(DockerCLICaller):
                 stream_buffer_bytes=stream_buffer_bytes,
                 raw_diagnostics=raw_diagnostics,
                 telemetry_observer=telemetry_observer,
+                environment=environment,
             )
         super().__init__(client_config)
 

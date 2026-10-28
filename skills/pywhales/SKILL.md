@@ -3,9 +3,11 @@ name: pywhales
 description: >-
   Use the installed pywhales package to automate Docker from Python applications
   and scripts. Use when translating docker run/build/compose commands into Python,
-  managing containers or images with pywhales, using Buildx or Compose from Python,
-  or troubleshooting pywhales usage, output types, streaming, and cleanup. This
-  skill is for consuming pywhales, not developing or contributing to the library.
+  managing containers or images with pywhales, pulling/pushing/saving/loading
+  images, using Buildx or Compose from Python, adding telemetry or admission
+  limits, waiting for Swarm service/stack convergence, or troubleshooting
+  pywhales usage, output types, streaming, and cleanup. This skill is for
+  consuming pywhales, not developing or contributing to the library.
 compatibility: >-
   Python >=3.14.10 with pywhales installed; Docker CLI on PATH and a reachable
   Docker engine. Compose and Buildx plugins are required for their commands.
@@ -15,6 +17,7 @@ compatibility: >-
 
 Use the Python API that wraps the Docker CLI. Don't substitute Docker SDK APIs
 or treat the `pywhales` console command as a Docker command runner.
+This guidance targets PyWhales 0.6.5; check installed support before using newer options.
 
 Work in the user's application or script with the installed package. A PyWhales
 repository checkout, changes to its internals, and its contributor test suite
@@ -39,10 +42,13 @@ are not part of this workflow.
 
 | Read when | Reference |
 | --- | --- |
-| Setting up imports, local/remote clients, CLI prerequisites, or handling errors | [Client, setup, and errors](references/client-and-errors.md) |
+| Setting up imports, local/remote clients, CLI prerequisites, default deadlines, or handling errors | [Client, setup, and errors](references/client-and-errors.md) |
 | Translating run/exec/ps, choosing output modes, mounting files, or cleaning up containers and streams | [Containers, output, and lifecycle](references/containers-and-output.md) |
+| Pulling, pushing, saving, or loading images and registry archives | [Registry transfers and archives](references/registry-and-archives.md) |
 | Building images, selecting exporters, streaming builds, or checking Dockerfiles | [Buildx](references/buildx.md) |
 | Selecting Compose files/projects, building services, running jobs, or managing a stack | [Compose](references/compose.md) |
+| Observing executions with sanitized telemetry or bounding concurrent work with admission | [Telemetry and admission](references/telemetry-and-admission.md) |
+| Bounding batch inspection, waiting for Swarm convergence, or evaluating opt-in application reconciliation | [Observation budgets and convergence](references/observation-and-convergence.md) |
 | Checking installed API support and verifying the user's automation | [Usage validation](references/validation.md) |
 
 ## Quick Translation

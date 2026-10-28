@@ -10,13 +10,11 @@ import builtins
 import json
 import shlex
 import textwrap
-import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType, TracebackType
 from typing import (
-    Any,
     Literal,
     Self,
     Unpack,
@@ -1523,7 +1521,7 @@ class ContainerCLI(DockerCLICaller):
     def list(
         self,
         all: bool = False,
-        filters: Iterable[ContainerListFilter] | Mapping[str, Any] = (),
+        filters: Iterable[ContainerListFilter] = (),
     ) -> builtins.list[Container]:
         """List containers on the selected daemon, which may be remote.
 
@@ -1536,19 +1534,14 @@ class ContainerCLI(DockerCLICaller):
         Returns:
             Container handles in CLI order using the originating configuration.
         """
-        filter_items = filters.items() if isinstance(filters, Mapping) else filters
         if isinstance(filters, Mapping):
-            warnings.warn(
-                "Passing filters as a mapping is deprecated, replace with an "
-                "iterable of tuples instead, as so:\n"
-                f"filters={list(filter_items)}",
-                DeprecationWarning,
-                stacklevel=2,
-            )
+            raise TypeError("filters must be an iterable of pairs, not a mapping")
         full_cmd = self.docker_cmd
         full_cmd += ["container", "list", "-q", "--no-trunc"]
         full_cmd.add_flag("--all", all)
-        full_cmd.add_args_iterable("--filter", (f"{f[0]}={f[1]}" for f in filter_items))
+        full_cmd.add_args_iterable(
+            "--filter", (f"{key}={value}" for key, value in filters)
+        )
 
         # TODO: add a test for the fix of is_immutable_id, without it, we get
         # race conditions (we read the attributes of a container but it might not exist.
@@ -1584,7 +1577,7 @@ class ContainerCLI(DockerCLICaller):
     @overload
     def prune(
         self,
-        filters: Iterable[ContainerListFilter] | Mapping[str, object] = (),
+        filters: Iterable[ContainerListFilter] = (),
         *,
         stream_logs: Literal[True],
     ) -> Iterable[tuple[str, bytes]]: ...
@@ -1592,20 +1585,20 @@ class ContainerCLI(DockerCLICaller):
     @overload
     def prune(
         self,
-        filters: Iterable[ContainerListFilter] | Mapping[str, object] = (),
+        filters: Iterable[ContainerListFilter] = (),
         stream_logs: Literal[False] = ...,
     ) -> None: ...
 
     @overload
     def prune(
         self,
-        filters: Iterable[ContainerListFilter] | Mapping[str, object] = (),
+        filters: Iterable[ContainerListFilter] = (),
         stream_logs: bool = False,
     ) -> Iterable[tuple[str, bytes]] | None: ...
 
     def prune(
         self,
-        filters: Iterable[ContainerListFilter] | Mapping[str, Any] = (),
+        filters: Iterable[ContainerListFilter] = (),
         stream_logs: bool = False,
     ) -> Iterable[tuple[str, bytes]] | None:
         """Remove containers that are not running.
@@ -1622,17 +1615,12 @@ class ContainerCLI(DockerCLICaller):
             An owned stream of `(source, bytes)` records when `stream_logs=True`;
             otherwise `None` after the local prune CLI completes.
         """
-        filter_items = filters.items() if isinstance(filters, Mapping) else filters
         if isinstance(filters, Mapping):
-            warnings.warn(
-                "Passing filters as a mapping is deprecated, replace with an "
-                "iterable of tuples instead, as so:\n"
-                f"filters={list(filter_items)}",
-                DeprecationWarning,
-                stacklevel=2,
-            )
+            raise TypeError("filters must be an iterable of pairs, not a mapping")
         full_cmd = Command([*self.docker_cmd, "container", "prune", "--force"])
-        full_cmd.add_args_iterable("--filter", (f"{f[0]}={f[1]}" for f in filter_items))
+        full_cmd.add_args_iterable(
+            "--filter", (f"{key}={value}" for key, value in filters)
+        )
         if stream_logs:
             return stream_stdout_and_stderr(full_cmd)
         run(full_cmd)

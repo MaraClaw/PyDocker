@@ -1767,16 +1767,9 @@ def test_list_filters(ctr_client: DockerClient) -> None:
     assert tags == {"hello-world:latest"}
 
 
-def test_list_filters_old_signature(docker_client: DockerClient) -> None:
-    """Check backward compatibility of the DockerClient.image.list() API."""
+def test_list_filters_client(docker_client: DockerClient) -> None:
     docker_client.pull(["hello-world", "busybox"])
-    expected_warning = (
-        r"Passing filters as a mapping is deprecated, replace with an iterable "
-        r"of tuples instead, as so:\n"
-        r"filters=\[\(.*\)\]"
-    )
-    with pytest.warns(DeprecationWarning, match=expected_warning):
-        images_listed = docker_client.image.list(filters={"reference": "hello-world"})
+    images_listed = docker_client.images(filters=[("reference", "hello-world")])
     tags = {tag.split("/")[-1] for image in images_listed for tag in _repo_tags(image)}
     assert tags == {"hello-world:latest"}
 

@@ -6,13 +6,11 @@ import builtins
 import json
 import os
 import tempfile
-import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType, TracebackType
 from typing import (
-    Any,
     Literal,
     Self,
     overload,
@@ -247,31 +245,23 @@ class VolumeCLI(DockerCLICaller):
         else:
             return True
 
-    def list(
-        self, filters: Iterable[VolumeListFilter] | Mapping[str, Any] = ()
-    ) -> builtins.list[Volume]:
+    def list(self, filters: Iterable[VolumeListFilter] = ()) -> builtins.list[Volume]:
         """List Docker volumes.
 
         Args:
             filters: See the [Docker documentation page about filtering
                 ](https://docs.docker.com/engine/reference/commandline/volume_ls/#filtering).
                 An example `filters=[("dangling", "true"), ("driver", "local")]`.
-                Mapping inputs are deprecated; the default adds no filters.
 
         Returns:
             Volume handles in CLI output order.
         """
-        filter_items = filters.items() if isinstance(filters, Mapping) else filters
         if isinstance(filters, Mapping):
-            warnings.warn(
-                "Passing filters as a mapping is deprecated, replace with an "
-                "iterable of tuples instead, as so:\n"
-                f"filters={list(filter_items)}",
-                DeprecationWarning,
-                stacklevel=2,
-            )
+            raise TypeError("filters must be an iterable of pairs, not a mapping")
         full_cmd = Command([*self.docker_cmd, "volume", "list", "--quiet"])
-        full_cmd.add_args_iterable("--filter", (f"{f[0]}={f[1]}" for f in filter_items))
+        full_cmd.add_args_iterable(
+            "--filter", (f"{key}={value}" for key, value in filters)
+        )
 
         volumes_names = run(full_cmd).splitlines()
 
@@ -281,7 +271,7 @@ class VolumeCLI(DockerCLICaller):
 
     def prune(
         self,
-        filters: Iterable[VolumeListFilter] | Mapping[str, Any] = (),
+        filters: Iterable[VolumeListFilter] = (),
         all: bool = False,
     ) -> None:
         """Remove unused Docker volumes without a confirmation prompt.
@@ -290,21 +280,15 @@ class VolumeCLI(DockerCLICaller):
             filters: See the [Docker documentation page about filtering
                 ](https://docs.docker.com/engine/reference/commandline/volume_ls/#filtering).
                 An example `filters=[("dangling", "true"), ("driver", "local")]`.
-                Mapping inputs are deprecated; the default adds no filters.
             all: Remove all unused volumes, not just anonymous ones.
         """
-        filter_items = filters.items() if isinstance(filters, Mapping) else filters
         if isinstance(filters, Mapping):
-            warnings.warn(
-                "Passing filters as a mapping is deprecated, replace with an "
-                "iterable of tuples instead, as so:\n"
-                f"filters={list(filter_items)}",
-                DeprecationWarning,
-                stacklevel=2,
-            )
+            raise TypeError("filters must be an iterable of pairs, not a mapping")
         full_cmd = Command([*self.docker_cmd, "volume", "prune", "--force"])
         full_cmd.add_flag("--all", all)
-        full_cmd.add_args_iterable("--filter", (f"{f[0]}={f[1]}" for f in filter_items))
+        full_cmd.add_args_iterable(
+            "--filter", (f"{key}={value}" for key, value in filters)
+        )
 
         run(full_cmd)
 

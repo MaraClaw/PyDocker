@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import builtins
 import json
-import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from types import MappingProxyType, TracebackType
 from typing import (
-    Any,
     Literal,
     Self,
     overload,
@@ -344,55 +342,39 @@ class NetworkCLI(DockerCLICaller):
             networks.append(network)
         return networks
 
-    def list(
-        self, filters: Iterable[NetworkListFilter] | Mapping[str, Any] = ()
-    ) -> builtins.list[Network]:
+    def list(self, filters: Iterable[NetworkListFilter] = ()) -> builtins.list[Network]:
         """List all the networks available.
 
         Args:
             filters: Docker filter pairs; the default selects all networks.
-                Mapping inputs are deprecated.
 
         Returns:
             Network handles in CLI output order.
         """
-        filter_items = filters.items() if isinstance(filters, Mapping) else filters
         if isinstance(filters, Mapping):
-            warnings.warn(
-                "Passing filters as a mapping is deprecated, replace with an "
-                "iterable of tuples instead, as so:\n"
-                f"filters={list(filter_items)}",
-                DeprecationWarning,
-                stacklevel=2,
-            )
+            raise TypeError("filters must be an iterable of pairs, not a mapping")
         full_cmd = Command([*self.docker_cmd, "network", "ls", "--no-trunc", "--quiet"])
-        full_cmd.add_args_iterable("--filter", (f"{f[0]}={f[1]}" for f in filter_items))
+        full_cmd.add_args_iterable(
+            "--filter", (f"{key}={value}" for key, value in filters)
+        )
 
         ids = run(full_cmd).splitlines()
         return [Network(self.client_config, id_, is_immutable_id=True) for id_ in ids]
 
-    def prune(
-        self, filters: Iterable[NetworkListFilter] | Mapping[str, Any] = ()
-    ) -> None:
+    def prune(self, filters: Iterable[NetworkListFilter] = ()) -> None:
         """Remove Docker networks which are not used by any containers.
 
         Docker's confirmation prompt is bypassed.
 
         Args:
-            filters: Docker filter pairs restricting removal. Mapping inputs are
-                deprecated; the default adds no filters.
+            filters: Docker filter pairs restricting removal; the default adds no filters.
         """
-        filter_items = filters.items() if isinstance(filters, Mapping) else filters
         if isinstance(filters, Mapping):
-            warnings.warn(
-                "Passing filters as a mapping is deprecated, replace with an "
-                "iterable of tuples instead, as so:\n"
-                f"filters={list(filter_items)}",
-                DeprecationWarning,
-                stacklevel=2,
-            )
+            raise TypeError("filters must be an iterable of pairs, not a mapping")
         full_cmd = Command([*self.docker_cmd, "network", "prune", "--force"])
-        full_cmd.add_args_iterable("--filter", (f"{f[0]}={f[1]}" for f in filter_items))
+        full_cmd.add_args_iterable(
+            "--filter", (f"{key}={value}" for key, value in filters)
+        )
         run(full_cmd)
 
     def remove(self, networks: ValidNetwork | Sequence[ValidNetwork]) -> None:

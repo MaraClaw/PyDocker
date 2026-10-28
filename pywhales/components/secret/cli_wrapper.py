@@ -3,11 +3,9 @@
 import builtins
 import datetime as dt
 import json
-import warnings
 from collections.abc import Iterable, Mapping
 from types import TracebackType
 from typing import (
-    Any,
     Literal,
     Self,
     assert_never,
@@ -177,29 +175,21 @@ class SecretCLI(DockerCLICaller):
             case unreachable:
                 assert_never(unreachable)
 
-    def list(
-        self, filters: Iterable[SecretListFilter] | Mapping[str, Any] = ()
-    ) -> builtins.list[Secret]:
+    def list(self, filters: Iterable[SecretListFilter] = ()) -> builtins.list[Secret]:
         """List secrets in the selected Swarm.
 
         Args:
             filters: Docker filter pairs; the default selects all secrets.
-                Mapping inputs are deprecated.
 
         Returns:
             Secret handles in CLI output order.
         """
-        filter_items = filters.items() if isinstance(filters, Mapping) else filters
         if isinstance(filters, Mapping):
-            warnings.warn(
-                "Passing filters as a mapping is deprecated, replace with an "
-                "iterable of tuples instead, as so:\n"
-                f"filters={list(filter_items)}",
-                DeprecationWarning,
-                stacklevel=2,
-            )
+            raise TypeError("filters must be an iterable of pairs, not a mapping")
         full_cmd = Command([*self.docker_cmd, "secret", "list", "--quiet"])
-        full_cmd.add_args_iterable("--filter", (f"{f[0]}={f[1]}" for f in filter_items))
+        full_cmd.add_args_iterable(
+            "--filter", (f"{key}={value}" for key, value in filters)
+        )
         ids = run(full_cmd).splitlines()
         return [Secret(self.client_config, id_, is_immutable_id=True) for id_ in ids]
 

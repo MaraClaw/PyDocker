@@ -105,7 +105,7 @@ def test_parsing_events() -> None:
 
 def test_prune_prunes_image(ctr_client: DockerClient) -> None:
     # TODO: Test dangling image
-    for container in ctr_client.container.list(filters={"ancestor": "busybox"}):
+    for container in ctr_client.container.list(filters=[("ancestor", "busybox")]):
         ctr_client.container.remove(container, force=True)
     image = ctr_client.pull("busybox")
     assert image in ctr_client.image.list()

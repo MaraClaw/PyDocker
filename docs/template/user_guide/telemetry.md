@@ -26,12 +26,14 @@ from that client retain the policy through ordinary list composition, shallow
 copy, and deep copy. A supplied `client_config` takes precedence over constructor
 settings, including `telemetry_observer`.
 
-## Version 1 schema and confidentiality
+## Version 2 schema and confidentiality
 
-The vocabulary is closed. `schema_version` is `1`; `phase` is `launch` or
+The vocabulary is closed. `schema_version` is `2`; `phase` is `launch` or
 `completion`; `family` is `captured` or `stream`. Family describes the shared
 execution path, not an operation inferred from argv. Completion `outcome` is
 exactly one of `success`, `failure`, `timeout`, or `closed`.
+Each launch attempt has an opaque random `attempt_id`, shared with its completion;
+it carries no command, endpoint, credential, PID, or remote-operation meaning.
 
 Records never include commands or arguments, endpoint addresses, contexts,
 environment keys or values, stdin, stdout/stderr payloads, exception text, or
@@ -53,6 +55,9 @@ before completion delivery. It includes local spawn, execution and cleanup; for
 streams it also includes consumer pauses until exhaustion, failure delivery, or
 close. It is not admission queue wait, Docker daemon task duration, rollout
 convergence, or application readiness. Callback time isn't a separate metric.
+Completion also includes `return_code`, the native status of the reaped local
+process, independent of `outcome`, or `None` when unavailable (including failed
+spawn). It does not describe daemon-side work.
 
 Counts measure raw bytes captured or read from each local pipe, before decoding,
 newline removal, or application transforms. They include read bytes discarded by

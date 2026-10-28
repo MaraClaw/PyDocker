@@ -23,7 +23,13 @@ from pywhales.components.plugin.models import (
     PluginInspectResult,
     PluginSettings,
 )
-from pywhales.utils import ValidPath, custom_parse_object_as, run, to_list
+from pywhales.utils import (
+    ValidPath,
+    custom_parse_object_as,
+    run,
+    to_list,
+    validate_timeout,
+)
 
 
 class Plugin(ReloadableObjectFromJson[PluginInspectResult]):
@@ -104,9 +110,19 @@ class Plugin(ReloadableObjectFromJson[PluginInspectResult]):
         """
         self._docker_plugin.enable(self, timeout=timeout)
 
-    def push(self, disable_content_trust: bool = True) -> None:
-        """Push this plugin, skipping content-trust signing by default."""
-        self._docker_plugin.push(self, disable_content_trust=disable_content_trust)
+    def push(
+        self, disable_content_trust: bool = True, *, timeout: float | None = None
+    ) -> None:
+        """Push this plugin, skipping content-trust signing by default.
+
+        Args:
+            disable_content_trust: Skip image signing (default `True`).
+            timeout: Positive finite seconds from the push CLI's own launch,
+                replacing the client default; `None` inherits it.
+        """
+        self._docker_plugin.push(
+            self, disable_content_trust=disable_content_trust, timeout=timeout
+        )
 
     def remove(self, force: bool = False) -> None:
         """Remove this plugin, optionally forcing removal of an active plugin."""
@@ -273,18 +289,35 @@ class PluginCLI(DockerCLICaller):
         ids = run(full_cmd).splitlines()
         return [Plugin(self.client_config, id_, is_immutable_id=True) for id_ in ids]
 
-    def push(self, plugin: ValidPlugin, disable_content_trust: bool = True) -> None:
+    def push(
+        self,
+        plugin: ValidPlugin,
+        disable_content_trust: bool = True,
+        *,
+        timeout: float | None = None,
+    ) -> None:
         """Push a plugin to a registry.
 
         Args:
             plugin: The plugin to push
             disable_content_trust: Skip image signing (default `True`)
+            timeout: Positive finite seconds from the push CLI's own launch,
+                replacing the client default; `None` inherits it. This is a
+                local subprocess deadline, not the daemon-side HTTP timeout
+                used by `enable()`.
+
+        Raises:
+            ValueError: `timeout` is not positive and finite.
+            DockerTimeout: The push CLI exceeds its deadline and is killed and
+                reaped, without undoing the push or guaranteeing that
+                daemon-side work stops.
         """
+        validate_timeout(timeout)
         full_cmd = Command([*self.docker_cmd, "plugin", "push"])
         if not disable_content_trust:
             full_cmd.append("--disable-content-trust=false")
         full_cmd.append(plugin)
-        run(full_cmd)
+        run(full_cmd, timeout=timeout)
 
     def remove(
         self, x: ValidPlugin | Sequence[ValidPlugin], force: bool = False

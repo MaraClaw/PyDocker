@@ -162,6 +162,7 @@ class ClientConfig:
             by reference for each launch. Raw diagnostics never relax its schema.
         environment: Copied child environment overlay, hidden from repr but
             included in equality. Mutations affect subsequent independent launches.
+        default_timeout: Positive finite seconds per CLI launch, or None for no deadline.
     """
 
     config: ValidPath | None = None
@@ -192,17 +193,19 @@ class ClientConfig:
     raw_diagnostics: bool = False
     telemetry_observer: TelemetryObserver | None = field(default=None, repr=False)
     environment: Mapping[str, str] | None = field(default=None, repr=False)
+    default_timeout: float | None = None
 
     def __post_init__(self) -> None:
         """Validate and copy environment settings and budgets without probing the CLI.
 
         Raises:
-            ValueError: If either budget is not a positive integer or ``None``,
-                including boolean values, or an environment entry is invalid.
+            ValueError: If a budget or default timeout is invalid, including
+                boolean values, or an environment entry is invalid.
             TypeError: If the environment is not a mapping of string keys and values.
         """
         if self.environment is not None:
             self.environment = copy_environment(self.environment)
+        utils.validate_timeout(self.default_timeout)
         for name, budget in (
             ("image_stream_buffer_bytes", self.image_stream_buffer_bytes),
             ("stream_buffer_bytes", self.stream_buffer_bytes),

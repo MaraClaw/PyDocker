@@ -37,6 +37,11 @@ class ExecutionPolicySource(Protocol):
         """Return the optional sanitized execution observer for new launches."""
         ...
 
+    @property
+    def default_timeout(self) -> float | None:
+        """Return the default local CLI deadline in seconds."""
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class ExecutionPolicy:
@@ -51,6 +56,7 @@ class ExecutionPolicy:
         telemetry_observer: Optional payload-free observer snapshotted by reference.
         environment: Immutable client overlay captured at policy selection.
         frozen_environment: Optional preselected full environment for this launch.
+        default_timeout: Default local CLI deadline in seconds, or None.
     """
 
     stream_buffer_bytes: int | None = None
@@ -60,6 +66,7 @@ class ExecutionPolicy:
         default_factory=lambda: MappingProxyType({}), repr=False
     )
     frozen_environment: Mapping[str, str] | None = field(default=None, repr=False)
+    default_timeout: float | None = None
 
 
 class BufferDefault(Enum):
@@ -135,5 +142,6 @@ def get_execution_policy(command: Sequence[object]) -> ExecutionPolicy:
             if environment is not None
             else MappingProxyType({}),
             frozen,
+            source.default_timeout,
         )
     return ExecutionPolicy()

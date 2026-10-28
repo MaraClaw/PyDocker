@@ -156,6 +156,7 @@ class DockerClient(DockerCLICaller):
         raw_diagnostics: bool = False,
         telemetry_observer: TelemetryObserver | None = None,
         environment: Mapping[str, str] | None = None,
+        default_timeout: float | None = None,
     ) -> None:
         """Configure command groups and aliases without invoking the CLI.
 
@@ -212,10 +213,12 @@ class DockerClient(DockerCLICaller):
                 are contained. Raw diagnostics never enable payload telemetry.
             environment: Child environment overlay copied into a newly created
                 config. It does not affect executable lookup or the parent process.
+            default_timeout: Positive finite seconds per local CLI launch, or None
+                for no default deadline. Explicit per-call timeouts replace it.
 
         Raises:
-            ValueError: If a newly created config has a budget that is not a
-                positive integer or ``None``, or an invalid environment entry.
+            ValueError: If a newly created config has an invalid budget, default
+                timeout, or environment entry.
             TypeError: If a newly created config's environment is not a mapping
                 of string keys to string values.
         """
@@ -247,6 +250,7 @@ class DockerClient(DockerCLICaller):
                 raw_diagnostics=raw_diagnostics,
                 telemetry_observer=telemetry_observer,
                 environment=environment,
+                default_timeout=default_timeout,
             )
         super().__init__(client_config)
 

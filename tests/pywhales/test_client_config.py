@@ -17,6 +17,20 @@ from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.utils import PROJECT_ROOT
 
 
+@pytest.mark.parametrize("timeout", [True, False, 0, -1, float("inf"), float("nan")])
+def test_default_timeout_rejects_invalid_values_before_lookup(timeout: float) -> None:
+    with patch("shutil.which") as lookup, pytest.raises(ValueError):
+        ClientConfig(default_timeout=timeout)
+    lookup.assert_not_called()
+
+
+def test_default_timeout_respects_supplied_config() -> None:
+    config = ClientConfig(default_timeout=3)
+    client = DockerClient(client_config=config, default_timeout=0)
+    assert client.client_config is config
+    assert client.client_config.default_timeout == 3
+
+
 @pytest.mark.parametrize("budget", [True, False, 0, -1, 1.5, "8", b"8"])
 def test_general_stream_budget_rejects_invalid_config_before_lookup(
     budget: int | None,

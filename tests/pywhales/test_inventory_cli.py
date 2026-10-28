@@ -1,11 +1,15 @@
 import json
+import os
+import struct
 import subprocess
 import sys
+import traceback
 from collections.abc import Mapping, Sequence
 from datetime import UTC
 from pathlib import Path
 from threading import Event
 from time import monotonic
+from typing import override
 from unittest.mock import patch
 
 import pytest
@@ -21,8 +25,10 @@ from pywhales import (
     capture_inventory,
     observation,
 )
+from pywhales._inventory_staging import stage_resources
 from pywhales.client_config import ClientConfig, ParsingError, bulk_reload
 from pywhales.components.network.models import NetworkInspectResult
+from pywhales.inventory import InventoryResource
 
 
 @pytest.fixture
@@ -30,6 +36,7 @@ def fake_cli(tmp_path: Path) -> ClientConfig:
     script = tmp_path / "docker.py"
     script.write_text(
         """import json
+import os
 import pathlib
 import sys
 import threading
@@ -38,6 +45,8 @@ root = pathlib.Path(__file__).parent
 log = root / 'launches.jsonl'
 with log.open('a') as stream:
     stream.write(json.dumps(sys.argv[1:]) + '\\n')
+with (root / 'sentinels.jsonl').open('a') as stream:
+    stream.write(json.dumps([os.environ.get('PYWHALES_TEST_INHERITED'), os.environ.get('PYWHALES_TEST_CLIENT')]) + '\\n')
 if (root / 'oversize').exists():
     sys.stdout.write('X' * 40)
     sys.stdout.flush()
@@ -220,6 +229,185 @@ def test_equal_distinct_configs_launch_separate_groups(
         ["network", "inspect", "alpha-id"],
         ["network", "inspect", "beta-id"],
     ]
+
+
+@pytest.mark.parametrize(
+    "later_value", ["invalid\0value", "x" * 4194304], ids=["invalid", "oversized"]
+)
+def test_inventory_reuses_upfront_full_environment_after_mutation(
+    fake_cli: ClientConfig,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    later_value: str,
+) -> None:
+    monkeypatch.setenv("PYWHALES_TEST_INHERITED", "inherited-before")
+    supplied = {"PYWHALES_TEST_CLIENT": "client-before"}
+    first = ClientConfig(client_call=list(fake_cli.client_call), environment=supplied)
+    second = ClientConfig(client_call=list(fake_cli.client_call), environment=supplied)
+    supplied["PYWHALES_TEST_CLIENT"] = "caller-after"
+    assert first == second and first is not second
+    assert isinstance(second.environment, dict)
+    later_environment = second.environment
+    from pywhales import _inventory_staging
+
+    real_inspect = _inventory_staging.inspect_group
+    calls = 0
+
+    def mutate_after_first(
+        resources: Sequence[InventoryResource],
+    ) -> Sequence[InventoryResource]:
+        nonlocal calls
+        result = real_inspect(resources)
+        calls += 1
+        if calls == 1:
+            monkeypatch.setenv("PYWHALES_TEST_INHERITED", "inherited-after")
+            later_environment["PYWHALES_TEST_CLIENT"] = later_value
+        return result
+
+    monkeypatch.setattr(_inventory_staging, "inspect_group", mutate_after_first)
+    handles = [
+        Network(first, "alpha-id", is_immutable_id=True),
+        Network(second, "beta-id", is_immutable_id=True),
+    ]
+
+    staged = stage_resources(handles, policy)
+
+    assert [
+        handle.client_config is config
+        for handle, config in zip(staged, (first, second), strict=True)
+    ] == [True, True]
+    assert [
+        json.loads(line)
+        for line in (tmp_path / "sentinels.jsonl").read_text().splitlines()
+    ] == [
+        ["inherited-before", "client-before"],
+        ["inherited-before", "client-before"],
+    ]
+
+
+def test_inventory_snapshots_environment_before_argument_conversion(
+    fake_cli: ClientConfig, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    config = ClientConfig(
+        client_call=list(fake_cli.client_call),
+        environment={"PYWHALES_TEST_CLIENT": "before"},
+    )
+    assert isinstance(config.environment, dict)
+    environment = config.environment
+
+    class MutatingPath(str):
+        @override
+        def __str__(self) -> str:
+            environment["PYWHALES_TEST_CLIENT"] = "after"
+            return super().__str__()
+
+    config.client_call[1] = MutatingPath(config.client_call[1])
+    request = InventoryRequest(
+        kind="network", references=("alpha-id",), client_config=config
+    )
+
+    capture_inventory([request], policy=policy)
+
+    sentinels = [
+        json.loads(line)
+        for line in (tmp_path / "sentinels.jsonl").read_text().splitlines()
+    ]
+    assert sentinels[0][1] == "before"
+
+
+@pytest.mark.parametrize("entry", [("BAD=KEY", "value"), ("VALID", "bad\0value")])
+@pytest.mark.parametrize("capture", [False, True])
+def test_inventory_rejects_invalid_later_environment_before_any_inspection(
+    fake_cli: ClientConfig,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    entry: tuple[str, str],
+    capture: bool,
+) -> None:
+    first = ClientConfig(client_call=list(fake_cli.client_call), environment={})
+    second = ClientConfig(client_call=list(fake_cli.client_call), environment={})
+    assert isinstance(second.environment, dict)
+    second.environment[entry[0]] = entry[1]
+    handles = [
+        Network(first, "alpha-id", is_immutable_id=True),
+        Network(second, "beta-id", is_immutable_id=True),
+    ]
+    for handle in handles:
+        handle._set_inspect_result(
+            NetworkInspectResult.model_validate({"Id": handle.id, "Name": "old"})
+        )
+    before = [
+        (handle._inspect_result, handle._last_refreshed_time) for handle in handles
+    ]
+
+    with pytest.raises(ObservationLimitError) as failure:
+        if capture:
+            capture_inventory(
+                [
+                    InventoryRequest(
+                        kind="network",
+                        references=(handle.id,),
+                        client_config=handle.client_config,
+                    )
+                    for handle in handles
+                ],
+                policy=policy,
+            )
+        else:
+            bulk_reload(handles, policy=policy)
+
+    assert failure.value.reason == "environment"
+    rendered = "".join(traceback.format_exception(failure.value))
+    assert entry[0] not in rendered
+    assert entry[1] not in rendered
+    assert not (tmp_path / "launches.jsonl").exists()
+    for handle, (model, timestamp) in zip(handles, before, strict=True):
+        assert handle._inspect_result is model
+        assert handle._last_refreshed_time == timestamp
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX native argv and environment budget")
+def test_inventory_rejects_oversized_later_environment_before_any_inspection(
+    fake_cli: ClientConfig,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = ClientConfig(client_call=list(fake_cli.client_call), environment={})
+    second = ClientConfig(
+        client_call=list(fake_cli.client_call),
+        environment={"PYWHALES_TEST_CLIENT": "x" * 16384},
+    )
+    handles = [
+        Network(first, "alpha-id", is_immutable_id=True),
+        Network(second, "beta-id", is_immutable_id=True),
+    ]
+    for handle in handles:
+        handle._set_inspect_result(
+            NetworkInspectResult.model_validate({"Id": handle.id, "Name": "old"})
+        )
+    before = [
+        (handle._inspect_result, handle._last_refreshed_time) for handle in handles
+    ]
+    native_limit = sum(
+        len(os.fsencode(f"{key}={value}")) + 1 for key, value in os.environ.items()
+    )
+    native_limit += (len(os.environ) + 16) * struct.calcsize("P") + 4096
+    real_sysconf = os.sysconf
+    monkeypatch.setattr(
+        os,
+        "sysconf",
+        lambda name: native_limit if name == "SC_ARG_MAX" else real_sysconf(name),
+    )
+
+    with pytest.raises(ObservationLimitError):
+        bulk_reload(handles, policy=policy)
+
+    assert not (tmp_path / "launches.jsonl").exists()
+    for handle, (model, timestamp) in zip(handles, before, strict=True):
+        assert handle._inspect_result is model
+        assert handle._last_refreshed_time == timestamp
 
 
 def test_observation_applies_to_list_and_inspect(

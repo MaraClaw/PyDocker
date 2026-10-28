@@ -155,16 +155,8 @@ def validate_timeout(timeout: float | None) -> None:
 
 
 def _debug_enabled() -> bool:
-    """Return whether the selected debug environment variable is exactly 1.
-
-    PYDOCKER_DEBUG takes precedence whenever set, including an empty value or
-    ``0``. PYTHON_ON_WHALES_DEBUG is only a fallback when it is unset.
-    """
-    # PYDOCKER_DEBUG wins whenever it is set, even to "0"; the legacy variable is a fallback.
-    debug_value = os.environ.get("PYDOCKER_DEBUG")
-    if debug_value is None:
-        debug_value = os.environ.get("PYTHON_ON_WHALES_DEBUG", "0")
-    return debug_value == "1"
+    """Return whether PYWHALES_DEBUG is exactly 1."""
+    return os.environ.get("PYWHALES_DEBUG") == "1"
 
 
 def _log_command(

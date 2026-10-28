@@ -290,7 +290,7 @@ def test_rollback_failure_is_once_and_diagnostics_follow_config(
 ) -> None:
     client, log = fake_cli
     client.client_config.raw_diagnostics = raw
-    monkeypatch.setenv("PYDOCKER_DEBUG", debug)
+    monkeypatch.setenv("PYWHALES_DEBUG", debug)
     with pytest.raises(error) as failure:
         client.service.rollback(target)
     assert failure.value.return_code == 17

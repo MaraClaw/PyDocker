@@ -249,7 +249,7 @@ def test_safe_diagnostics_hide_client_overlay(
     caplog: pytest.LogCaptureFixture,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setenv("PYDOCKER_DEBUG", "1")
+    monkeypatch.setenv("PYWHALES_DEBUG", "1")
     caplog.set_level(logging.DEBUG)
     client = DockerClient(
         client_call=[sys.executable], environment={"TEST_ENV_CLIENT": "secret-sentinel"}

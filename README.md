@@ -179,11 +179,10 @@ attributes are updated in real-time!
 context, the Docker object is removed automatically, even if an exception occurs.
 * A fully typed API (ty and IDE-friendly) compatible with `pathlib` and `os.path`
 * All Docker objects and the Docker client are safe to use with multithreading and multiprocessing.
-* Enable execution diagnostics by setting `PYDOCKER_DEBUG=1`. Diagnostics omit command arguments,
+* Enable execution diagnostics by setting `PYWHALES_DEBUG=1`. Diagnostics omit command arguments,
   environment values, and captured output by default. Use `DockerClient(raw_diagnostics=True)`
   only when detailed diagnostics are appropriate for that client's logs.
-  The legacy `PYTHON_ON_WHALES_DEBUG` variable is a fallback only when `PYDOCKER_DEBUG` is unset.
-  Setting `PYDOCKER_DEBUG=0` or leaving its value explicitly empty disables debug output even if the legacy variable is set.
+  Only the exact value `1` enables debug output.
 
 ## What about the license?
 

@@ -14,7 +14,8 @@ from pathlib import Path
 from queue import Queue
 from subprocess import CompletedProcess
 from threading import Barrier, Event, Thread, current_thread
-from typing import Literal, assert_never
+from types import GeneratorType
+from typing import Literal, assert_never, override
 from unittest.mock import ANY, MagicMock, Mock, patch
 
 import pytest
@@ -394,6 +395,152 @@ def test_path_image_load_uses_general_budget_instead_of_image_override(
             client.image.load("unused-archive.tar", quiet=True)
     else:
         assert client.image.load("unused-archive.tar", quiet=True) == ["sample"]
+
+
+@pytest.mark.parametrize("chunked", [False, True], ids=["bytes", "iterator"])
+def test_archive_direct_load_uses_each_client_environment(
+    chunked: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PYWHALES_ARCHIVE_SENTINEL", "ambient")
+    code = (
+        "import os, sys; "
+        "assert sys.stdin.buffer.read() == b'archive-input'; "
+        "print('Loaded image: ' + os.environ.get('PYWHALES_ARCHIVE_SENTINEL', 'missing'))"
+    )
+    supplied = {"PYWHALES_ARCHIVE_SENTINEL": "first"}
+    first = DockerClient(client_call=[sys.executable, "-c", code], environment=supplied)
+    second = DockerClient(
+        client_call=[sys.executable, "-c", code],
+        environment={"PYWHALES_ARCHIVE_SENTINEL": "second"},
+    )
+    supplied["PYWHALES_ARCHIVE_SENTINEL"] = "caller-mutated"
+    environment = first.client_config.environment
+    assert isinstance(environment, dict)
+
+    def chunks() -> Generator[bytes]:
+        environment["PYWHALES_ARCHIVE_SENTINEL"] = "after-launch"
+        yield b"archive-"
+        yield b"input"
+
+    assert first.image.load(chunks() if chunked else b"archive-input") == ["first"]
+    assert second.image.load(iter([b"archive-input"])) == ["second"]
+
+
+def test_archive_path_load_uses_each_client_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PYWHALES_ARCHIVE_SENTINEL", "ambient")
+    code = (
+        "import os; "
+        "print('Loaded image: ' + os.environ.get('PYWHALES_ARCHIVE_SENTINEL', 'missing'))"
+    )
+    clients = [
+        DockerClient(
+            client_call=[sys.executable, "-c", code],
+            environment={"PYWHALES_ARCHIVE_SENTINEL": value},
+        )
+        for value in ("first", "second")
+    ]
+
+    assert [client.image.load("unused.tar", quiet=True) for client in clients] == [
+        ["first"],
+        ["second"],
+    ]
+
+
+def test_archive_path_save_uses_each_client_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PYWHALES_ARCHIVE_SENTINEL", "ambient")
+    code = (
+        "import os, pathlib, sys; "
+        "pathlib.Path(sys.argv[sys.argv.index('--output') + 1]).write_text("
+        "os.environ.get('PYWHALES_ARCHIVE_SENTINEL', 'missing'))"
+    )
+    clients = [
+        DockerClient(
+            client_call=[sys.executable, "-c", code],
+            environment={"PYWHALES_ARCHIVE_SENTINEL": value},
+        )
+        for value in ("first", "second")
+    ]
+    outputs = [tmp_path / "first.tar", tmp_path / "second.tar"]
+
+    for client, output in zip(clients, outputs, strict=True):
+        with patch.object(client.image, "inspect", return_value=[]):
+            assert client.image.save("sample", output=output) is None
+    assert [output.read_text() for output in outputs] == ["first", "second"]
+
+
+def test_archive_lazy_save_snapshots_environment_at_launch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PYWHALES_ARCHIVE_SENTINEL", "ambient")
+    code = (
+        "import os; "
+        "print(os.environ.get('PYWHALES_ARCHIVE_SENTINEL', 'missing'), flush=True); "
+        "print(os.environ.get('PYWHALES_ARCHIVE_SENTINEL', 'missing'), flush=True)"
+    )
+    clients = [
+        DockerClient(
+            client_call=[sys.executable, "-c", code],
+            environment={"PYWHALES_ARCHIVE_SENTINEL": value},
+        )
+        for value in ("initial-first", "initial-second")
+    ]
+    with (
+        patch.object(clients[0].image, "inspect", return_value=[]),
+        patch.object(clients[1].image, "inspect", return_value=[]),
+    ):
+        first = clients[0].image.save("sample")
+        second = clients[1].image.save("sample")
+    assert isinstance(first, GeneratorType)
+    assert isinstance(second, GeneratorType)
+    first_environment = clients[0].client_config.environment
+    second_environment = clients[1].client_config.environment
+    assert isinstance(first_environment, dict)
+    assert isinstance(second_environment, dict)
+    with contextlib.closing(first), contextlib.closing(second):
+        first_environment["PYWHALES_ARCHIVE_SENTINEL"] = "first"
+        second_environment["PYWHALES_ARCHIVE_SENTINEL"] = "second"
+        assert next(first) == b"first\n"
+        first_environment["PYWHALES_ARCHIVE_SENTINEL"] = "changed"
+        assert list(second) == [b"second\n", b"second\n"]
+        assert list(first) == [b"first\n"]
+    assert first.gi_frame is None
+    assert second.gi_frame is None
+
+
+@pytest.mark.parametrize("save", [False, True], ids=["load", "lazy-save"])
+def test_archive_environment_snapshot_precedes_argv_stringification(save: bool) -> None:
+    code = (
+        "import os; "
+        "print('Loaded image: ' + os.environ.get('PYWHALES_ARCHIVE_SENTINEL', 'missing'))"
+    )
+    client = DockerClient(
+        client_call=[sys.executable, "-c", code],
+        environment={"PYWHALES_ARCHIVE_SENTINEL": "before-argv"},
+    )
+    environment = client.client_config.environment
+    assert isinstance(environment, dict)
+
+    class MutatingArgument(str):
+        @override
+        def __str__(self) -> str:
+            environment["PYWHALES_ARCHIVE_SENTINEL"] = "after-argv"
+            return "test-host"
+
+    client.client_config.host = MutatingArgument("test-host")
+    with patch.object(client.image, "inspect", return_value=[]):
+        if save:
+            archive = client.image.save("sample")
+            assert isinstance(archive, GeneratorType)
+            with contextlib.closing(archive):
+                assert list(archive) == [b"Loaded image: before-argv\n"]
+            assert archive.gi_frame is None
+        else:
+            assert client.image.load(b"archive-input") == ["before-argv"]
+    assert environment["PYWHALES_ARCHIVE_SENTINEL"] == "after-argv"
 
 
 @pytest.mark.parametrize("operation", ["load", "save", "missing"])

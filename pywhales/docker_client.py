@@ -33,6 +33,7 @@ from pywhales.components.task.cli_wrapper import TaskCLI
 from pywhales.components.trust.cli_wrapper import TrustCLI
 from pywhales.components.volume.cli_wrapper import VolumeCLI
 from pywhales.enums import ClientTypeInput, ComposeProgressInput
+from pywhales.telemetry import TelemetryObserver
 
 from .utils import DockerCamelModel, ValidPath, run
 
@@ -156,6 +157,7 @@ class DockerClient(DockerCLICaller):
         image_stream_buffer_bytes: int | None = None,
         stream_buffer_bytes: int | None = None,
         raw_diagnostics: bool = False,
+        telemetry_observer: TelemetryObserver | None = None,
     ) -> None:
         """Configure command groups and aliases without invoking the CLI.
 
@@ -213,6 +215,9 @@ class DockerClient(DockerCLICaller):
                 Defaults to safe summaries. Returned data, raw exception
                 attributes, uncaptured output, and caller logging are not
                 redacted by this policy.
+            telemetry_observer: Optional sanitized launch/completion observer.
+                Snapshotted by reference at each launch; ordinary callback errors
+                are contained. Raw diagnostics never enable payload telemetry.
 
         Raises:
             ValueError: If a newly created config has a budget that is not a
@@ -253,6 +258,7 @@ class DockerClient(DockerCLICaller):
                 image_stream_buffer_bytes=image_stream_buffer_bytes,
                 stream_buffer_bytes=stream_buffer_bytes,
                 raw_diagnostics=raw_diagnostics,
+                telemetry_observer=telemetry_observer,
             )
         super().__init__(client_config)
 

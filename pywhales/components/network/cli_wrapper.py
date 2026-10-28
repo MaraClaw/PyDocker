@@ -27,10 +27,12 @@ from pywhales.client_config import (
     ReloadableObjectFromJson,
 )
 from pywhales.components._cleanup import resource_cleanup
+from pywhales.components.network._create_options import create_options
 from pywhales.components.network.models import (
     NetworkContainer,
     NetworkInspectResult,
     NetworkIPAM,
+    NetworkIPAMPool,
 )
 from pywhales.enums import ResourceScope, ResourceScopeInput
 from pywhales.exceptions import NoSuchNetwork
@@ -208,6 +210,12 @@ class NetworkCLI(DockerCLICaller):
         subnet: str | None = None,
         labels: Mapping[str, str] = MappingProxyType({}),
         options: Sequence[str] = (),
+        *,
+        internal: bool | None = None,
+        enable_ipv6: bool | None = None,
+        ipam_driver: str | None = None,
+        ipam_options: Mapping[str, str | int] | None = None,
+        ipam_pools: Sequence[NetworkIPAMPool] | None = None,
     ) -> Network:
         """Create a Docker network.
 
@@ -219,10 +227,29 @@ class NetworkCLI(DockerCLICaller):
             subnet: Subnet in CIDR notation, or None to let Docker choose.
             labels: Metadata labels; the default adds none.
             options: Driver-specific key=value options; the default adds none.
+            internal: Set internal mode explicitly, or omit when None.
+            enable_ipv6: Set IPv6 explicitly, or omit when None.
+            ipam_driver: IPAM driver, or None for Docker's default.
+            ipam_options: IPAM driver options; None adds none.
+            ipam_pools: Ordered pools; cannot be combined with gateway or subnet.
 
         Returns:
             A handle to the created network without an initial inspect call.
+
+        Raises:
+            ValueError: For conflicting or ambiguous pool settings, invalid
+                mapping keys, or pool address values that expand as CSV.
+            TypeError: For malformed option structures or boolean values.
         """
+        extra_options = create_options(
+            gateway=gateway,
+            subnet=subnet,
+            internal=internal,
+            enable_ipv6=enable_ipv6,
+            ipam_driver=ipam_driver,
+            ipam_options=ipam_options,
+            ipam_pools=ipam_pools,
+        )
         full_cmd = Command([*self.docker_cmd, "network", "create"])
         full_cmd.add_flag("--attachable", attachable)
         full_cmd.add_simple_arg("--driver", driver)
@@ -230,6 +257,7 @@ class NetworkCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--subnet", subnet)
         full_cmd.add_args_iterable_or_single("--label", format_mapping_for_cli(labels))
         full_cmd.add_args_iterable_or_single("--opt", options)
+        full_cmd.extend(extra_options)
         full_cmd.append(name)
         return Network(self.client_config, run(full_cmd), is_immutable_id=True)
 

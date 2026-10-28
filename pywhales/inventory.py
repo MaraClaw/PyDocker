@@ -1,0 +1,154 @@
+"""Inventory request and snapshot value types.
+
+Capture is loaded only when requested; constructing these values does not locate
+the Docker executable or inspect resources.
+"""
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Literal, get_args
+
+from pywhales.client_config import ClientConfig
+from pywhales.components.config.cli_wrapper import Config
+from pywhales.components.config.models import ConfigInspectResult
+from pywhales.components.container.cli_wrapper import Container
+from pywhales.components.container.models import ContainerInspectResult
+from pywhales.components.context.cli_wrapper import Context
+from pywhales.components.context.models import ContextInspectResult
+from pywhales.components.image.cli_wrapper import Image
+from pywhales.components.image.models import ImageInspectResult
+from pywhales.components.network.cli_wrapper import Network
+from pywhales.components.network.models import NetworkInspectResult
+from pywhales.components.node.cli_wrapper import Node
+from pywhales.components.node.models import NodeInspectResult
+from pywhales.components.plugin.cli_wrapper import Plugin
+from pywhales.components.plugin.models import PluginInspectResult
+from pywhales.components.secret.cli_wrapper import Secret
+from pywhales.components.secret.models import SecretInspectResult
+from pywhales.components.service.cli_wrapper import Service
+from pywhales.components.service.models import ServiceInspectResult
+from pywhales.components.task.cli_wrapper import Task
+from pywhales.components.task.models import TaskInspectResult
+from pywhales.components.volume.cli_wrapper import Volume
+from pywhales.components.volume.models import VolumeInspectResult
+
+type InventoryKind = Literal[
+    "container",
+    "image",
+    "network",
+    "volume",
+    "node",
+    "service",
+    "config",
+    "secret",
+    "task",
+    "plugin",
+    "context",
+]
+type InventoryResource = (
+    Container
+    | Image
+    | Network
+    | Volume
+    | Node
+    | Service
+    | Config
+    | Secret
+    | Task
+    | Plugin
+    | Context
+)
+type InventoryPayload = (
+    ContainerInspectResult
+    | ImageInspectResult
+    | NetworkInspectResult
+    | VolumeInspectResult
+    | NodeInspectResult
+    | ServiceInspectResult
+    | ConfigInspectResult
+    | SecretInspectResult
+    | TaskInspectResult
+    | PluginInspectResult
+    | ContextInspectResult
+)
+
+
+def _valid_references(references: object) -> bool:
+    return (
+        isinstance(references, tuple)
+        and bool(references)
+        and all(
+            isinstance(reference, str) and bool(reference) for reference in references
+        )
+    )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InspectionPolicy:
+    """Positive caller-supplied limits for an observation."""
+
+    max_references: int
+    max_argv_bytes: int
+    max_response_bytes: int
+
+    def __post_init__(self) -> None:
+        """Reject non-integer, boolean, and nonpositive limits."""
+        for value in (
+            self.max_references,
+            self.max_argv_bytes,
+            self.max_response_bytes,
+        ):
+            if type(value) is not int or value <= 0:
+                raise ValueError("Inspection limits must be positive integers")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InventoryRequest:
+    """References of one kind using the exact originating client configuration."""
+
+    kind: InventoryKind
+    references: tuple[str, ...]
+    client_config: ClientConfig
+
+    def __post_init__(self) -> None:
+        """Validate request shape without resolving the executable."""
+        if self.kind not in get_args(InventoryKind.__value__):
+            raise ValueError("Unsupported inventory kind")
+        if not _valid_references(self.references):
+            raise ValueError("Inventory references must be nonempty strings")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InventoryRecord:
+    """An inspected resource identity and its concrete inspect model."""
+
+    kind: InventoryKind
+    id: str
+    payload: InventoryPayload
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InventorySnapshot:
+    """Ordered inventory records and their observation interval."""
+
+    records: tuple[InventoryRecord, ...]
+    started_at: datetime
+    finished_at: datetime
+
+
+def capture_inventory(
+    items: Sequence[InventoryRequest | InventoryResource], *, policy: InspectionPolicy
+) -> InventorySnapshot:
+    """Capture an inventory using the separately supplied capture engine.
+
+    Args:
+        items: Requests or existing resource handles to inspect.
+        policy: Explicit bounds for the capture.
+
+    Returns:
+        The capture engine's ordered snapshot.
+    """
+    from pywhales._inventory_capture import capture_inventory as capture
+
+    return capture(items, policy=policy)

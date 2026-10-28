@@ -273,6 +273,11 @@ type HealthStatusInput = (
 type IsolationInput = Isolation | Literal["default", "process", "hyperv"]
 type ResourceScopeInput = ResourceScope | Literal["swarm", "global", "local"]
 type RestartConditionInput = RestartCondition | Literal["none", "on-failure", "any"]
+type UpdateOrderInput = UpdateOrder | Literal["stop-first", "start-first"]
+type UpdateFailureActionInput = FailureAction | Literal["pause", "continue", "rollback"]
+type RollbackFailureActionInput = Literal[
+    "pause", "continue", FailureAction.PAUSE, FailureAction.CONTINUE
+]
 type ClientTypeInput = ClientType | Literal["docker", "nerdctl", "unknown"]
 type ComposeProgressInput = (
     ComposeProgress | Literal["auto", "tty", "plain", "json", "quiet"]

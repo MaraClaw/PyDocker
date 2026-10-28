@@ -15,7 +15,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import override
+from typing import TYPE_CHECKING, override
 
 import pydantic
 
@@ -23,7 +23,11 @@ from . import utils
 from ._execution_policy import PolicyExecutable
 from ._types import JsonObject
 from .enums import ClientTypeInput, ComposeProgressInput
+from .telemetry import TelemetryObserver
 from .utils import ValidPath, to_list
+
+if TYPE_CHECKING:
+    from .inventory import InspectionPolicy
 
 CACHE_VALIDITY_PERIOD: float = 0.01
 
@@ -156,6 +160,8 @@ class ClientConfig:
         raw_diagnostics: Per-client opt-in to confidential automatic diagnostic
             values. Safe defaults do not redact returned data or raw exception
             attributes, uncaptured terminal output, or caller-owned logging.
+        telemetry_observer: Optional sanitized launch/completion callback, frozen
+            by reference for each launch. Raw diagnostics never relax its schema.
     """
 
     config: ValidPath | None = None
@@ -185,6 +191,7 @@ class ClientConfig:
     image_stream_buffer_bytes: int | None = None
     stream_buffer_bytes: int | None = None
     raw_diagnostics: bool = False
+    telemetry_observer: TelemetryObserver | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Validate configured output budgets without probing the CLI.
@@ -630,7 +637,9 @@ class ReloadableObjectFromJson[InspectResultT, ReferenceT: str | None = str](
             ) from err
 
 
-def bulk_reload(docker_objects: Sequence[object]) -> None:
+def bulk_reload(
+    docker_objects: Sequence[object], *, policy: InspectionPolicy | None = None
+) -> None:
     """Stage every resource group's snapshots before publishing cache updates.
 
     Supported resources are containers, images, networks, volumes, nodes,
@@ -642,6 +651,7 @@ def bulk_reload(docker_objects: Sequence[object]) -> None:
 
     Args:
         docker_objects: Resource handles to inspect; empty input is a no-op.
+        policy: Optional inspection limits, intersected with an active observation.
 
     Raises:
         TypeError: If a kind is unsupported or staged resource kinds differ.
@@ -652,4 +662,4 @@ def bulk_reload(docker_objects: Sequence[object]) -> None:
     """
     from ._bulk_reload import bulk_reload as reload_snapshots
 
-    reload_snapshots(docker_objects)
+    reload_snapshots(docker_objects, policy=policy)

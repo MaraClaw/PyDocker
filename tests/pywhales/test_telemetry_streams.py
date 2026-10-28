@@ -1,0 +1,247 @@
+import json
+import sys
+from dataclasses import asdict
+from threading import Event, Thread
+from unittest.mock import patch
+
+import pytest
+
+from pywhales.client_config import ClientConfig
+from pywhales.exceptions import DockerException, DockerTimeout
+from pywhales.telemetry import CompletionRecord, LaunchRecord, TelemetryRecord
+from pywhales.utils import MappedProcessStream, stream_stdout_and_stderr
+
+
+def command(records: list[TelemetryRecord], code: str) -> list[object]:
+    config = ClientConfig(
+        client_call=[sys.executable], telemetry_observer=records.append
+    )
+    return [*config.docker_cmd, "-c", code]
+
+
+def completion(records: list[TelemetryRecord]) -> CompletionRecord:
+    assert records[0] == LaunchRecord("stream")
+    assert len(records) == 2
+    completed = records[1]
+    assert isinstance(completed, CompletionRecord)
+    return completed
+
+
+def test_stream_completes_on_exhaustion_not_when_child_exits() -> None:
+    records: list[TelemetryRecord] = []
+    stream = stream_stdout_and_stderr(
+        command(records, "import os; os.write(1,b'\\xff\\n'); os.write(2,b'err')")
+    )
+    try:
+        assert stream._released.wait(timeout=3)
+        assert records == [LaunchRecord("stream")]
+
+        output = list(stream)
+
+        assert sorted(output) == [("stderr", b"err"), ("stdout", b"\xff\n")]
+        completed = completion(records)
+        assert (completed.outcome, completed.stdout_bytes, completed.stderr_bytes) == (
+            "success",
+            2,
+            3,
+        )
+    finally:
+        stream.close()
+    assert completion(records) is completed
+
+
+@pytest.mark.parametrize("consume", [False, True])
+def test_explicit_close_completes_idle_stream_once(consume: bool) -> None:
+    records: list[TelemetryRecord] = []
+    stream = stream_stdout_and_stderr(
+        command(records, "print('ready',flush=True); input()"), pipe_stdin=True
+    )
+    try:
+        if consume:
+            assert next(stream) == ("stdout", b"ready\n")
+
+        stream.close()
+        stream.close()
+
+        assert list(stream) == []
+        assert completion(records).outcome == "closed"
+        assert stream._process.poll() is not None
+        assert not stream._watchdog.is_alive()
+        assert all(not thread.is_alive() for thread in stream._threads)
+    finally:
+        stream.close()
+
+
+def test_natural_nonzero_exit_reports_failure_after_drain() -> None:
+    records: list[TelemetryRecord] = []
+    stream = stream_stdout_and_stderr(
+        command(records, "print('output'); raise SystemExit(7)")
+    )
+
+    with pytest.raises(DockerException) as raised:
+        list(stream)
+    stream.close()
+
+    assert raised.value.return_code == 7
+    assert completion(records).outcome == "failure"
+
+
+def test_close_keeps_recorded_timeout_outcome_and_exception() -> None:
+    records: list[TelemetryRecord] = []
+    stream = stream_stdout_and_stderr(
+        command(records, "input()"), pipe_stdin=True, timeout=0.1
+    )
+    assert stream._released.wait(timeout=3)
+
+    stream.close()
+
+    with pytest.raises(DockerTimeout):
+        next(stream)
+    assert completion(records).outcome == "timeout"
+    assert list(stream) == []
+
+
+def test_close_keeps_recorded_buffer_failure_and_measured_read_count() -> None:
+    records: list[TelemetryRecord] = []
+    stream = stream_stdout_and_stderr(
+        command(records, "print('oversized',flush=True); input()"),
+        pipe_stdin=True,
+        buffer_bytes=3,
+    )
+    assert stream._released.wait(timeout=3)
+
+    stream.close()
+
+    with pytest.raises(BufferError):
+        next(stream)
+    completed = completion(records)
+    assert (completed.outcome, completed.stdout_bytes) == ("failure", 10)
+
+
+def test_throwing_observer_never_changes_original_stream_failure_or_confidentiality() -> (
+    None
+):
+    records: list[TelemetryRecord] = []
+    secret = "private-stream-sentinel"
+
+    def throwing(record: TelemetryRecord) -> None:
+        records.append(record)
+        raise RuntimeError(secret)
+
+    config = ClientConfig(
+        client_call=[sys.executable], telemetry_observer=throwing, raw_diagnostics=True
+    )
+    stream = stream_stdout_and_stderr(
+        [*config.docker_cmd, "-c", f"print({secret!r}); raise SystemExit(7)"],
+        env={"PRIVATE": secret},
+    )
+
+    with pytest.raises(DockerException) as raised, stream:
+        assert next(stream) == ("stdout", (secret + "\n").encode())
+        next(stream)
+
+    assert raised.value.return_code == 7
+    assert completion(records).outcome == "failure"
+    assert secret not in json.dumps([asdict(record) for record in records])
+
+
+def test_mapper_failure_and_body_failure_are_preserved_when_stream_closes() -> None:
+    records: list[TelemetryRecord] = []
+    child = stream_stdout_and_stderr(
+        command(records, "print('ready',flush=True); input()"), pipe_stdin=True
+    )
+    original = ValueError("consumer-private")
+
+    def fail(record: tuple[str, bytes]) -> bytes:
+        raise original
+
+    mapped = MappedProcessStream(child, map(fail, child))
+
+    with pytest.raises(ValueError) as raised, mapped:
+        next(mapped)
+
+    assert raised.value is original
+    assert completion(records).outcome == "closed"
+
+
+def test_concurrent_close_emits_one_completion() -> None:
+    records: list[TelemetryRecord] = []
+    stream = stream_stdout_and_stderr(command(records, "input()"), pipe_stdin=True)
+    closers = [Thread(target=stream.close) for _ in range(4)]
+
+    for closer in closers:
+        closer.start()
+    for closer in closers:
+        closer.join(timeout=3)
+        assert not closer.is_alive()
+
+    assert completion(records).outcome == "closed"
+
+
+def test_close_wins_pending_nonzero_completion(monkeypatch: pytest.MonkeyPatch) -> None:
+    records: list[TelemetryRecord] = []
+    stream = stream_stdout_and_stderr(command(records, "raise SystemExit(7)"))
+    reaped, resume = Event(), Event()
+    original_raise = stream._raise_error
+    errors: list[DockerException] = []
+
+    def paused() -> None:
+        original_raise()
+        reaped.set()
+        assert resume.wait(timeout=3)
+
+    def consume() -> None:
+        try:
+            list(stream)
+        except DockerException as error:
+            errors.append(error)
+
+    monkeypatch.setattr(stream, "_raise_error", paused)
+    consumer = Thread(target=consume)
+    consumer.start()
+    try:
+        assert reaped.wait(timeout=3)
+        stream.close()
+        resume.set()
+        consumer.join(timeout=3)
+        assert not consumer.is_alive()
+        assert errors == []
+        assert completion(records).outcome == "closed"
+    finally:
+        resume.set()
+        consumer.join(timeout=3)
+        stream.close()
+
+
+def test_stream_spawn_failure_preserves_original_error() -> None:
+    records: list[TelemetryRecord] = []
+    original = OSError("private-executable")
+    with (
+        patch("pywhales.utils.Popen", side_effect=original),
+        pytest.raises(OSError) as raised,
+    ):
+        stream_stdout_and_stderr(command(records, "pass"))
+
+    assert raised.value is original
+    completed = completion(records)
+    assert (completed.outcome, completed.stdout_bytes, completed.stderr_bytes) == (
+        "failure",
+        None,
+        None,
+    )
+
+
+def test_policy_snapshot_survives_mutation_during_stream_lifetime() -> None:
+    original: list[TelemetryRecord] = []
+    fresh: list[TelemetryRecord] = []
+    config = ClientConfig(
+        client_call=[sys.executable], telemetry_observer=original.append
+    )
+    stream = stream_stdout_and_stderr([*config.docker_cmd, "-c", "pass"])
+    config.telemetry_observer = fresh.append
+
+    with stream:
+        assert list(stream) == []
+
+    assert completion(original).outcome == "success"
+    assert fresh == []

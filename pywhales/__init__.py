@@ -5,7 +5,9 @@ the executable or contacting a daemon. Operations resolve their CLI prerequisite
 when needed.
 """
 
+from . import docker_client as docker_client
 from . import enums
+from ._observation import observation
 from .client_config import ClientNotFoundError
 from .components.buildx.cli_wrapper import Builder
 from .components.config.cli_wrapper import Config
@@ -26,7 +28,22 @@ from .components.system.cli_wrapper import SystemInfo
 from .components.task.cli_wrapper import Task
 from .components.volume.cli_wrapper import Volume
 from .docker_client import DockerClient, Version
-from .exceptions import DockerException
+from .exceptions import (
+    DockerException,
+    ObservationCancelled,
+    ObservationLimitError,
+    ObservationTimeout,
+)
+from .inventory import (
+    InspectionPolicy,
+    InventoryKind,
+    InventoryPayload,
+    InventoryRecord,
+    InventoryRequest,
+    InventoryResource,
+    InventorySnapshot,
+    capture_inventory,
+)
 
 # alias
 docker = DockerClient(client_type="docker")
@@ -42,9 +59,19 @@ __all__ = [
     "DockerContextConfig",
     "DockerException",
     "Image",
+    "InspectionPolicy",
+    "InventoryKind",
+    "InventoryPayload",
+    "InventoryRecord",
+    "InventoryRequest",
+    "InventoryResource",
+    "InventorySnapshot",
     "KubernetesContextConfig",
     "Network",
     "Node",
+    "ObservationCancelled",
+    "ObservationLimitError",
+    "ObservationTimeout",
     "Plugin",
     "Secret",
     "Service",
@@ -53,5 +80,7 @@ __all__ = [
     "Task",
     "Version",
     "Volume",
+    "capture_inventory",
     "enums",
+    "observation",
 ]

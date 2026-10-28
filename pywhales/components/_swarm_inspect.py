@@ -56,6 +56,18 @@ def parse_swarm_inspect_results[InspectResultT: SwarmInspectResult](
     results = parser._parse_inspect_results(
         json_str, [str(index) for index in range(len(references))]
     )
+    return associate_swarm_inspect_results(
+        results, references, raw_diagnostics=parser.client_config.raw_diagnostics
+    )
+
+
+def associate_swarm_inspect_results[InspectResultT: SwarmInspectResult](
+    results: Sequence[InspectResultT],
+    references: Sequence[str],
+    *,
+    raw_diagnostics: bool = False,
+) -> list[tuple[str, InspectResultT]]:
+    """Associate parsed Swarm models with references using whole-batch rules."""
     snapshots: dict[str, InspectResultT] = {}
     identities: list[str] = []
     for result in results:
@@ -65,7 +77,7 @@ def parse_swarm_inspect_results[InspectResultT: SwarmInspectResult](
         if identity in snapshots and snapshots[identity] != result:
             raise ParsingError(
                 f"Inconsistent inspect snapshot for {identity!r}"
-                if parser.client_config.raw_diagnostics
+                if raw_diagnostics
                 else "Inconsistent inspect snapshot"
             )
         snapshots[identity] = result
@@ -90,7 +102,7 @@ def parse_swarm_inspect_results[InspectResultT: SwarmInspectResult](
         if len(matches) != 1:
             raise ParsingError(
                 f"Expected one inspect identity for {reference!r}, received {len(matches)}"
-                if parser.client_config.raw_diagnostics
+                if raw_diagnostics
                 else f"Expected one inspect identity for the requested reference, received {len(matches)}"
             )
         resolved.append(matches[0])

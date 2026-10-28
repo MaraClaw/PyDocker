@@ -29,6 +29,7 @@ from pywhales.client_config import (
 from pywhales.components._cleanup import resource_cleanup
 from pywhales.components._swarm_inspect import parse_swarm_inspect_results
 from pywhales.components.container.cli_wrapper import to_seconds
+from pywhales.components.service._update_options import update_options
 from pywhales.components.service.models import (
     ServiceEndpoint,
     ServiceInspectResult,
@@ -36,7 +37,12 @@ from pywhales.components.service.models import (
     ServiceUpdateStatus,
     ServiceVersion,
 )
-from pywhales.enums import RestartConditionInput
+from pywhales.enums import (
+    RestartConditionInput,
+    RollbackFailureActionInput,
+    UpdateFailureActionInput,
+    UpdateOrderInput,
+)
 from pywhales.exceptions import NoSuchService
 from pywhales.utils import (
     ValidPath,
@@ -150,6 +156,19 @@ class Service(ReloadableObjectFromJson[ServiceInspectResult]):
         with_registry_authentication: bool = False,
         quiet: bool = False,
         replicas: int | None = None,
+        *,
+        update_parallelism: int | None = None,
+        update_delay: int | timedelta | None = None,
+        update_failure_action: UpdateFailureActionInput | None = None,
+        update_monitor: int | timedelta | None = None,
+        update_max_failure_ratio: float | None = None,
+        update_order: UpdateOrderInput | None = None,
+        rollback_parallelism: int | None = None,
+        rollback_delay: int | timedelta | None = None,
+        rollback_failure_action: RollbackFailureActionInput | None = None,
+        rollback_monitor: int | timedelta | None = None,
+        rollback_max_failure_ratio: float | None = None,
+        rollback_order: UpdateOrderInput | None = None,
     ) -> None:
         """Update this service.
 
@@ -157,7 +176,25 @@ class Service(ReloadableObjectFromJson[ServiceInspectResult]):
         information about the arguments.
         """
         ServiceCLI(self.client_config).update(
-            self, detach, force, image, with_registry_authentication, quiet, replicas
+            self,
+            detach,
+            force,
+            image,
+            with_registry_authentication,
+            quiet,
+            replicas,
+            update_parallelism=update_parallelism,
+            update_delay=update_delay,
+            update_failure_action=update_failure_action,
+            update_monitor=update_monitor,
+            update_max_failure_ratio=update_max_failure_ratio,
+            update_order=update_order,
+            rollback_parallelism=rollback_parallelism,
+            rollback_delay=rollback_delay,
+            rollback_failure_action=rollback_failure_action,
+            rollback_monitor=rollback_monitor,
+            rollback_max_failure_ratio=rollback_max_failure_ratio,
+            rollback_order=rollback_order,
         )
 
     def exists(self) -> bool:
@@ -604,13 +641,27 @@ class ServiceCLI(DockerCLICaller):
 
         run(full_cmd)
 
-    def rollback(self) -> None:
-        """Reject service rollback because this operation is not implemented.
+    def rollback(
+        self, service: ValidService, *, detach: bool = False, quiet: bool = False
+    ) -> None:
+        """Roll back one service without inspecting or retrying the mutation.
+
+        Success indicates CLI completion, not application health. An interrupted
+        command can leave the remote outcome unknown; resources remain operator-owned.
+
+        Args:
+            service: Service name, ID, or immutable handle.
+            detach: Return after submission rather than waiting for convergence.
+            quiet: Request only the service ID from Docker.
 
         Raises:
-            NotImplementedError: Always.
+            NoSuchService: If Docker reports that the service is absent.
         """
-        raise NotImplementedError
+        full_cmd = Command([*self.docker_cmd, "service", "rollback"])
+        full_cmd.add_flag("--detach", detach)
+        full_cmd.add_flag("--quiet", quiet)
+        full_cmd.append(service)
+        run(full_cmd, capture_stdout=False)
 
     def scale(self, new_scales: dict[ValidService, int], detach: bool = False) -> None:
         """Scale one or more services.
@@ -641,8 +692,25 @@ class ServiceCLI(DockerCLICaller):
         with_registry_authentication: bool = False,
         quiet: bool = False,
         replicas: int | None = None,
+        *,
+        update_parallelism: int | None = None,
+        update_delay: int | timedelta | None = None,
+        update_failure_action: UpdateFailureActionInput | None = None,
+        update_monitor: int | timedelta | None = None,
+        update_max_failure_ratio: float | None = None,
+        update_order: UpdateOrderInput | None = None,
+        rollback_parallelism: int | None = None,
+        rollback_delay: int | timedelta | None = None,
+        rollback_failure_action: RollbackFailureActionInput | None = None,
+        rollback_monitor: int | timedelta | None = None,
+        rollback_max_failure_ratio: float | None = None,
+        rollback_order: UpdateOrderInput | None = None,
     ) -> None:
         """Update a Swarm service.
+
+        Success means the selected CLI invocation completed, not application
+        health. Interruption can leave the remote outcome unknown. This method
+        does not probe, retry, or assume ownership of the service.
 
         Args:
             service: The service to update
@@ -653,10 +721,41 @@ class ServiceCLI(DockerCLICaller):
                 to Swarm agents.
             quiet: Request only the service ID from Docker.
             replicas: Desired replica count, or None to leave it unchanged.
+            update_parallelism: Update batch size, zero for all tasks, or None.
+            update_delay: Delay between updates in integer seconds or timedelta, or None.
+            update_failure_action: pause, continue, or rollback, or None.
+            update_monitor: Update monitoring duration in seconds or timedelta, or None.
+            update_max_failure_ratio: Update failure ratio in [0, 1], or None.
+            update_order: stop-first or start-first, or None.
+            rollback_parallelism: Rollback batch size, zero for all tasks, or None.
+            rollback_delay: Delay between rollbacks in seconds or timedelta, or None.
+            rollback_failure_action: pause or continue, or None.
+            rollback_monitor: Rollback monitoring duration in seconds or timedelta, or None.
+            rollback_max_failure_ratio: Rollback failure ratio in [0, 1], or None.
+            rollback_order: stop-first or start-first, or None.
 
         Raises:
             NoSuchService: If Docker reports that the service is absent.
+            TypeError: If a policy value has an invalid type.
+            ValueError: If a policy value is out of range or unsupported.
         """
+        policy_args = update_options(
+            "update",
+            update_parallelism,
+            update_delay,
+            update_failure_action,
+            update_monitor,
+            update_max_failure_ratio,
+            update_order,
+        ) + update_options(
+            "rollback",
+            rollback_parallelism,
+            rollback_delay,
+            rollback_failure_action,
+            rollback_monitor,
+            rollback_max_failure_ratio,
+            rollback_order,
+        )
         full_cmd = Command([*self.docker_cmd, "service", "update"])
         full_cmd.add_flag("--force", force)
         full_cmd.add_simple_arg("--image", image)
@@ -664,5 +763,6 @@ class ServiceCLI(DockerCLICaller):
         full_cmd.add_flag("--detach", detach)
         full_cmd.add_flag("--quiet", quiet)
         full_cmd.add_simple_arg("--replicas", replicas)
+        full_cmd.extend(policy_args)
         full_cmd.append(service)
         run(full_cmd, capture_stdout=False)

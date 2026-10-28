@@ -622,6 +622,8 @@ class ImageCLI(DockerCLICaller):
         quiet: bool = False,
         stream_logs: Literal[False] = False,
         platform: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> Image: ...
 
     @overload
@@ -631,6 +633,8 @@ class ImageCLI(DockerCLICaller):
         quiet: bool = False,
         stream_logs: Literal[False] = False,
         platform: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> builtins.list[Image]: ...
 
     @overload
@@ -641,6 +645,7 @@ class ImageCLI(DockerCLICaller):
         *,
         stream_logs: Literal[True],
         platform: str | None = None,
+        timeout: float | None = None,
     ) -> ImageStream: ...
 
     @overload
@@ -650,6 +655,8 @@ class ImageCLI(DockerCLICaller):
         quiet: bool,
         stream_logs: Literal[True],
         platform: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> ImageStream: ...
 
     @overload
@@ -660,6 +667,7 @@ class ImageCLI(DockerCLICaller):
         *,
         stream_logs: Literal[True],
         platform: str | None = None,
+        timeout: float | None = None,
     ) -> ImageStream | EmptyImageStream: ...
 
     @overload
@@ -669,6 +677,8 @@ class ImageCLI(DockerCLICaller):
         quiet: bool,
         stream_logs: Literal[True],
         platform: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> ImageStream | EmptyImageStream: ...
 
     @overload
@@ -678,6 +688,8 @@ class ImageCLI(DockerCLICaller):
         quiet: bool = False,
         stream_logs: bool = False,
         platform: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> Image | ImageStream: ...
 
     @overload
@@ -687,6 +699,8 @@ class ImageCLI(DockerCLICaller):
         quiet: bool = False,
         stream_logs: bool = False,
         platform: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> builtins.list[Image] | ImageStream | EmptyImageStream: ...
 
     def pull(
@@ -695,6 +709,8 @@ class ImageCLI(DockerCLICaller):
         quiet: bool = False,
         stream_logs: bool = False,
         platform: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> Image | builtins.list[Image] | ImageStream | EmptyImageStream:
         """Pull one or more image references into the selected Docker daemon.
 
@@ -718,6 +734,10 @@ class ImageCLI(DockerCLICaller):
             stream_logs: Return owned `(image_reference, bytes)` progress records
                 instead of waiting for transfers and returning image handles.
             platform: If you want to enforce a platform.
+            timeout: Positive finite seconds from each transfer subprocess's own
+                launch, replacing the client default; `None` inherits it. Image
+                inspection and executor queueing do not consume this budget, and
+                each concurrent transfer gets its own deadline.
 
         Returns:
             One image for a string, or an ordered list for iterable input when
@@ -727,11 +747,17 @@ class ImageCLI(DockerCLICaller):
             iterable input returns `[]`, or an empty generator when streaming.
 
         Raises:
-            ValueError: `quiet=True` is combined with `stream_logs=True`.
+            ValueError: `quiet=True` is combined with `stream_logs=True`, or
+                `timeout` is not positive and finite. Booleans are rejected
+                before consuming references, even for an empty request.
             DockerException: A transfer or subsequent image inspection fails.
+            DockerTimeout: A transfer subprocess exceeds its own deadline; it is
+                killed and reaped without undoing the pull or guaranteeing that
+                daemon-side work stops.
             BufferError: A streamed record or retained stderr exceeds the selected
                 byte budget. Multi-image failure also cancels sibling transfers.
         """
+        validate_timeout(timeout)
         if quiet and stream_logs:
             raise ValueError(
                 "It's not possible to have stream_logs=True and quiet=True at the same time. "
@@ -749,6 +775,7 @@ class ImageCLI(DockerCLICaller):
                 stream_logs=stream_logs,
                 platform=platform,
                 buffer_bytes=buffer_bytes,
+                timeout=timeout,
             )
             if stream_logs:
                 assert result is not None
@@ -766,6 +793,7 @@ class ImageCLI(DockerCLICaller):
                 stream_logs=stream_logs,
                 platform=platform,
                 buffer_bytes=buffer_bytes,
+                timeout=timeout,
             )
             if stream_logs:
                 assert result is not None
@@ -777,6 +805,7 @@ class ImageCLI(DockerCLICaller):
                 quiet=quiet,
                 stream_logs=stream_logs,
                 platform=platform,
+                timeout=timeout,
                 buffer_bytes=buffer_bytes,
             )
 
@@ -788,6 +817,7 @@ class ImageCLI(DockerCLICaller):
         platform: str | None = None,
         *,
         buffer_bytes: int | None,
+        timeout: float | None = None,
     ) -> builtins.list[Image] | ImageStream:
         if stream_logs:
             return self._pull_multiple_tags_stream(
@@ -796,11 +826,25 @@ class ImageCLI(DockerCLICaller):
                 stream_logs=stream_logs,
                 platform=platform,
                 buffer_bytes=buffer_bytes,
+                timeout=timeout,
             )
         else:
+
+            def pull_one(
+                image_name: str, quiet: bool, stream_logs: bool, platform: str | None
+            ) -> None:
+                self._pull_single_tag(
+                    image_name,
+                    quiet,
+                    stream_logs,
+                    platform,
+                    buffer_bytes=buffer_bytes,
+                    timeout=timeout,
+                )
+
             pool = ThreadPool(4)
             pool.starmap(
-                func=self._pull_single_tag,
+                func=pull_one,
                 iterable=(
                     (image_name, quiet, stream_logs, platform)
                     for image_name in image_names
@@ -818,10 +862,16 @@ class ImageCLI(DockerCLICaller):
         platform: str | None = None,
         *,
         buffer_bytes: int | None,
+        timeout: float | None = None,
     ) -> MultiImageStream:
         def start(image_name: str) -> MappedProcessStream[tuple[str, bytes]]:
             child = self._pull_single_tag(
-                image_name, quiet, True, platform, buffer_bytes=buffer_bytes
+                image_name,
+                quiet,
+                True,
+                platform,
+                buffer_bytes=buffer_bytes,
+                timeout=timeout,
             )
             assert child is not None
             return child
@@ -840,6 +890,7 @@ class ImageCLI(DockerCLICaller):
         platform: str | None = None,
         *,
         buffer_bytes: int | None = None,
+        timeout: float | None = None,
     ) -> MappedProcessStream[tuple[str, bytes]] | None:
         full_cmd = Command([*self.docker_cmd, "image", "pull"])
 
@@ -852,12 +903,14 @@ class ImageCLI(DockerCLICaller):
         full_cmd.append(image_name)
 
         if stream_logs:
-            stream = stream_stdout_and_stderr(full_cmd, buffer_bytes=buffer_bytes)
+            stream = stream_stdout_and_stderr(
+                full_cmd, buffer_bytes=buffer_bytes, timeout=timeout
+            )
             return MappedProcessStream(
                 stream, ((image_name, line) for _, line in stream)
             )
         else:
-            run(full_cmd, capture_stdout=quiet, capture_stderr=quiet)
+            run(full_cmd, capture_stdout=quiet, capture_stderr=quiet, timeout=timeout)
             return None
 
     @overload

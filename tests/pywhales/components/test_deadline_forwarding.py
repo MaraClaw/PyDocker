@@ -12,6 +12,10 @@ from pywhales import Container, DockerClient, Image
 from pywhales.components.buildx import cli_wrapper as buildx
 from pywhales.components.compose import cli_wrapper as compose
 from pywhales.components.container import cli_wrapper as container
+from pywhales.components.image import cli_wrapper as image
+from pywhales.components.manifest import cli_wrapper as manifest
+from pywhales.components.plugin import cli_wrapper as plugin
+from pywhales.components.plugin.cli_wrapper import Plugin
 from pywhales.components.service import cli_wrapper as service
 from pywhales.components.system import cli_wrapper as system
 from pywhales.exceptions import DockerTimeout
@@ -364,3 +368,113 @@ def test_subscription_deadlines_are_keyword_only_in_every_overload(
             parameter = signature(variant).parameters["timeout"]
             assert parameter.kind is Parameter.KEYWORD_ONLY
             assert parameter.default is None
+
+
+def test_registry_transfer_deadlines_are_keyword_only_in_every_overload(
+    client: DockerClient,
+) -> None:
+    plugin_handle = Plugin(client.client_config, "plugin", is_immutable_id=True)
+    for method in (
+        image.ImageCLI.pull,
+        client.image.pull,
+        client.pull,
+        compose.ComposeCLI.pull,
+        client.compose.pull,
+        manifest.ManifestCLI.push,
+        client.manifest.push,
+        plugin.PluginCLI.push,
+        client.plugin.push,
+        plugin.Plugin.push,
+        plugin_handle.push,
+    ):
+        for variant in (method, *get_overloads(method)):
+            parameter = signature(variant).parameters["timeout"]
+            assert parameter.kind is Parameter.KEYWORD_ONLY
+            if variant is method:
+                assert parameter.default is None
+            else:
+                assert parameter.default in (None, Ellipsis)
+
+
+def test_image_pull_each_threadpool_worker_receives_the_selected_budget(
+    client: DockerClient, mocker: MockerFixture
+) -> None:
+    def execute(args: Sequence[object], **kwargs: object) -> str:
+        command = [str(arg) for arg in args]
+        if command[1:3] == ["image", "inspect"]:
+            return json.dumps([{"Id": "sha256:" + command[-1]}])
+        assert command[1:3] == ["image", "pull"]
+        assert kwargs["timeout"] == 2.5
+        return ""
+
+    commands = mocker.patch.object(image, "run", side_effect=execute)
+
+    client.image.pull(["one", "two", "three"], quiet=True, timeout=2.5)
+
+    pull_calls = [
+        launched
+        for launched in commands.call_args_list
+        if [str(arg) for arg in launched.args[0]][1:3] == ["image", "pull"]
+    ]
+    assert len(pull_calls) == 3
+    assert all(launched.kwargs["timeout"] == 2.5 for launched in pull_calls)
+
+
+def test_manifest_push_preflight_is_outside_selected_budget(
+    client: DockerClient, mocker: MockerFixture
+) -> None:
+    def execute(args: Sequence[object], **kwargs: object) -> str:
+        command = [str(arg) for arg in args]
+        if command[1:3] == ["manifest", "inspect"]:
+            assert "timeout" not in kwargs
+            return "{}"
+        assert command[1:3] == ["manifest", "push"]
+        assert kwargs["timeout"] == 2.5
+        return ""
+
+    commands = mocker.patch.object(manifest, "run", side_effect=execute)
+
+    client.manifest.push("manifest-list", timeout=2.5)
+
+    assert commands.call_count == 2
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_compose_pull_forwards_selected_budget_to_both_modes(
+    client: DockerClient, mocker: MockerFixture, stream: bool
+) -> None:
+    execute = mocker.patch.object(
+        compose, "stream_stdout_and_stderr" if stream else "run", return_value="done"
+    )
+
+    client.compose.pull("app", quiet=not stream, stream_logs=stream, timeout=2.5)
+
+    execute.assert_called_once()
+    assert execute.call_args.kwargs["timeout"] == 2.5
+
+
+def test_compose_pull_empty_services_skips_launch_regardless_of_timeout(
+    client: DockerClient, mocker: MockerFixture
+) -> None:
+    commands = mocker.patch.object(compose, "run")
+
+    assert client.compose.pull([], timeout=2.5) is None
+
+    commands.assert_not_called()
+
+
+@pytest.mark.parametrize("handle", [False, True])
+def test_plugin_push_forwards_selected_budget(
+    client: DockerClient, mocker: MockerFixture, handle: bool
+) -> None:
+    commands = mocker.patch.object(plugin, "run", return_value="")
+
+    if handle:
+        Plugin(client.client_config, "my-plugin", is_immutable_id=True).push(
+            timeout=2.5
+        )
+    else:
+        client.plugin.push("my-plugin", timeout=2.5)
+
+    commands.assert_called_once()
+    assert commands.call_args.kwargs["timeout"] == 2.5

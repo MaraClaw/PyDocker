@@ -66,6 +66,16 @@ def validate_queue_timeout(timeout: float | None) -> None:
         raise ValueError("queue_timeout must be positive finite seconds or None")
 
 
+def validate_drain_timeout(timeout: float) -> None:
+    """Reject nonpositive, boolean, or nonfinite drain timeouts."""
+    if (
+        type(timeout) not in (int, float)
+        or timeout <= 0
+        or (type(timeout) is float and not math.isfinite(timeout))
+    ):
+        raise ValueError("timeout must be positive finite seconds")
+
+
 @dataclass(frozen=True, slots=True)
 class OutcomeCounts:
     """Fixed uint64-saturating outcome counts; saturated marks a reached ceiling."""
@@ -77,6 +87,7 @@ class OutcomeCounts:
     rejected_full: int
     cancelled: int
     queue_timed_out: int
+    rejected_closed: int
     saturated: bool
 
 
@@ -95,7 +106,8 @@ class ClassSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class AdmissionSnapshot:
-    """Safe endpoint alias and a bounded tuple of configured class snapshots."""
+    """Safe endpoint alias, terminal closure state, and bounded class snapshots."""
 
     endpoint: EndpointIdentity
     classes: tuple[ClassSnapshot, ...]
+    closed: bool

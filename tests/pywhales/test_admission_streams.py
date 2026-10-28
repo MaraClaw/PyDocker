@@ -158,20 +158,28 @@ def test_clean_close_propagates_terminal_error_from_source_exit() -> None:
 
 
 @pytest.mark.parametrize("stage", ["factory", "entry", "iteration", "cleanup"])
-def test_stream_callbacks_guard_same_owner_reentry(stage: str) -> None:
+@pytest.mark.parametrize("drain", [False, True])
+def test_stream_callbacks_guard_same_owner_reentry(stage: str, drain: bool) -> None:
     owner, pressure = _owner()
+
+    def reenter() -> None:
+        if drain:
+            owner.close()
+            owner.wait_drained(timeout=1)
+        else:
+            owner.request(pressure).call(lambda: 0)
 
     class ReentrantSource(Source):
         @override
         def __enter__(self) -> Iterator[int]:
             if stage == "entry":
-                owner.request(pressure).call(lambda: 0)
+                reenter()
             return super().__enter__()
 
         @override
         def __next__(self) -> int:
             if stage == "iteration":
-                owner.request(pressure).call(lambda: 0)
+                reenter()
             return super().__next__()
 
         @override
@@ -182,12 +190,12 @@ def test_stream_callbacks_guard_same_owner_reentry(stage: str) -> None:
             traceback: TracebackType | None,
         ) -> bool:
             if stage == "cleanup":
-                owner.request(pressure).call(lambda: 0)
+                reenter()
             return super().__exit__(exc_type, exc_value, traceback)
 
     def factory() -> ReentrantSource:
         if stage == "factory":
-            owner.request(pressure).call(lambda: 0)
+            reenter()
         return ReentrantSource()
 
     with pytest.raises(AdmissionReentryError):

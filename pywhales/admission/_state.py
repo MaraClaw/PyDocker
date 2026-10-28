@@ -20,6 +20,7 @@ class Outcome(IntEnum):
     REJECTED_FULL = 4
     CANCELLED = 5
     QUEUE_TIMED_OUT = 6
+    REJECTED_CLOSED = 7
 
 
 @dataclass(eq=False, slots=True)
@@ -64,6 +65,7 @@ class Bucket:
                 self.counts[Outcome.REJECTED_FULL],
                 self.counts[Outcome.CANCELLED],
                 self.counts[Outcome.QUEUE_TIMED_OUT],
+                self.counts[Outcome.REJECTED_CLOSED],
                 self.saturated,
             ),
         )

@@ -12,10 +12,11 @@ class RejectionReason(Enum):
 
     BUSY = "busy"
     QUEUE_FULL = "queue_full"
+    CLOSED = "closed"
 
 
 class AdmissionRejected(AdmissionError):
-    """Admission rejected because immediate or pending capacity is exhausted."""
+    """Admission rejected because capacity is exhausted or the owner is closed."""
 
     def __init__(self, reason: RejectionReason) -> None:
         """Retain only the bounded rejection reason."""

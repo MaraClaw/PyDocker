@@ -1,9 +1,22 @@
-from dataclasses import replace
+import json
+from dataclasses import asdict, replace
+from pathlib import Path
+from typing import override
 
 import pytest
 
+from pywhales import DockerClient
 from pywhales.admission import EndpointIdentity
-from pywhales.convergence import Cancelled, Deadline, Failure, Outcome, Success
+from pywhales.convergence import (
+    Cancelled,
+    Deadline,
+    DeadlineDetail,
+    Failure,
+    Outcome,
+    Success,
+    wait,
+)
+from pywhales.inventory import InspectionPolicy
 from pywhales.reconciliation import (
     ActionContext,
     AmbiguousMutation,
@@ -20,6 +33,20 @@ from pywhales.reconciliation import (
     OperationSpec,
     ReconciliationAdapters,
     ResourceIdentity,
+)
+from tests.pywhales.test_convergence import (
+    capture,
+    service,
+    task,
+)
+from tests.pywhales.test_convergence import (
+    fake_cli as fake_cli,
+)
+from tests.pywhales.test_convergence import (
+    policy as policy,
+)
+from tests.pywhales.test_convergence import (
+    store as store_cli,
 )
 
 
@@ -232,3 +259,117 @@ def test_preexisting_applied_resources_do_not_enable_later_mutation() -> None:
     result = owner.reconcile(owner.claim(uncertain, LeaseRequest("worker-c", 30)))
     assert result.progress.state is AttemptState.UNKNOWN
     assert endpoint.trace == ["inventory"]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        Success(),
+        Cancelled(),
+        Failure(reason="superseded", cause=RuntimeError("credential-payload")),
+        Deadline(),
+        Deadline(DeadlineDetail(2, ongoing_updates=2)),
+    ],
+)
+def test_later_outcome_replaces_obsolete_deadline_detail_without_replay(
+    outcome: Outcome,
+) -> None:
+    store, endpoint = MemoryJournalStore(), Endpoint()
+    endpoint.outcome = Deadline(
+        DeadlineDetail(2, missing_ready_slots=1, stale_templates=1)
+    )
+    owner = controller(store, endpoint)
+    pending = owner.reconcile(
+        owner.claim(owner.submit(spec()), LeaseRequest("worker-a", 30))
+    )
+    assert pending.progress.deadline_detail == endpoint.outcome.detail
+    endpoint.trace.clear()
+    endpoint.outcome = outcome
+    result = owner.reconcile(owner.claim(pending, LeaseRequest("worker-b", 30)))
+    assert result.progress.deadline_detail == (
+        outcome.detail if isinstance(outcome, Deadline) else None
+    )
+    assert result.progress.attempts == 1
+    assert endpoint.trace == ["inventory", "observe"]
+    assert "credential-payload" not in repr(result)
+
+
+@pytest.mark.parametrize(
+    "disposition", [InventoryDisposition.ABSENT, InventoryDisposition.INDETERMINATE]
+)
+def test_uncertain_inventory_clears_deadline_detail_without_replay(
+    disposition: InventoryDisposition,
+) -> None:
+    store, endpoint = MemoryJournalStore(), Endpoint()
+    endpoint.outcome = Deadline(DeadlineDetail(1, missing_ready_slots=1))
+    owner = controller(store, endpoint)
+    pending = owner.reconcile(
+        owner.claim(owner.submit(spec()), LeaseRequest("worker-a", 30))
+    )
+    endpoint.resources = ()
+    endpoint.disposition = disposition
+    endpoint.trace.clear()
+    result = owner.reconcile(owner.claim(pending, LeaseRequest("worker-b", 30)))
+    assert result.progress.state is AttemptState.UNKNOWN
+    assert (
+        result.progress.convergence is None and result.progress.deadline_detail is None
+    )
+    assert endpoint.trace == ["inventory"]
+
+
+def test_real_cli_deadline_is_journaled_and_repeated_passes_only_observe(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    snapshot = service("service-id")
+    snapshot["Spec"]["TaskTemplate"]["ContainerSpec"]["Env"] = [
+        "PASSWORD=credential-payload"
+    ]
+    store_cli(tmp_path, [snapshot], [])
+    target = capture(fake_cli, policy, "service-id")
+
+    class CLIEndpoint(Endpoint):
+        @override
+        def observe(
+            self, context: ActionContext, resources: tuple[ResourceIdentity, ...]
+        ) -> Outcome:
+            super().observe(context, resources)
+            return wait(target, policy=policy, timeout=2, poll_interval=10)
+
+    store, endpoint = MemoryJournalStore(), CLIEndpoint()
+    owner = controller(store, endpoint)
+    pending = owner.reconcile(
+        owner.claim(owner.submit(spec()), LeaseRequest("worker-a", 30))
+    )
+    expected = DeadlineDetail(1, missing_ready_slots=1)
+    assert pending.progress.state is AttemptState.OBSERVING
+    assert pending.progress.deadline_detail == expected
+    restarted = controller(store, endpoint)
+    repeated = restarted.reconcile(
+        restarted.claim(pending, LeaseRequest("worker-b", 30))
+    )
+    assert repeated.progress.deadline_detail == expected
+    assert repeated.progress.attempts == 1
+    rendered = json.dumps(asdict(repeated.progress))
+    assert "credential-payload" not in rendered and "ContainerSpec" not in rendered
+    assert "client_config" not in rendered and "cause" not in rendered
+    assert asdict(expected) == json.loads(rendered)["deadline_detail"]
+    current = task(service_id="service-id")
+    current["Spec"] = snapshot["Spec"]["TaskTemplate"]
+    store_cli(tmp_path, [snapshot], [current])
+    succeeded = restarted.reconcile(
+        restarted.claim(repeated, LeaseRequest("worker-c", 30))
+    )
+    assert succeeded.progress.state is AttemptState.SUCCEEDED
+    assert succeeded.progress.deadline_detail is None
+    assert endpoint.trace == [
+        "inventory",
+        "mutate",
+        "inventory",
+        "observe",
+        "inventory",
+        "observe",
+        "inventory",
+        "observe",
+    ]
+    calls = [json.loads(line) for line in (tmp_path / "calls").read_text().splitlines()]
+    assert sum(call[:2] == ["service", "ps"] for call in calls) == 3

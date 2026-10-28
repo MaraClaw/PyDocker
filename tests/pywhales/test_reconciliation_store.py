@@ -1,11 +1,13 @@
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 
 import pytest
 
 from pywhales.admission import EndpointIdentity
+from pywhales.convergence import DeadlineDetail
 from pywhales.reconciliation import (
     AttemptState,
+    ConvergenceSummary,
     IdentityConflict,
     InputReference,
     InvalidDescription,
@@ -165,3 +167,75 @@ def test_read_missing_entry_does_not_create_it() -> None:
     assert store.create_if_absent(spec()) == JournalEntry(
         spec(), spec().desired.desired_hash
     )
+
+
+def test_deadline_summary_round_trips_and_is_generation_fenced() -> None:
+    clock = Clock()
+    store = MemoryJournalStore(clock)
+    detail = DeadlineDetail(
+        2,
+        missing_ready_slots=1,
+        duplicate_slots=2,
+        stale_templates=1,
+        non_running_tasks=2,
+        invalid_task_shape=1,
+        ongoing_updates=2,
+    )
+    claimed = store.claim(store.create_if_absent(spec()), LeaseRequest("worker-a", 5))
+    progress = Progress(
+        AttemptState.OBSERVING, 1, convergence="deadline", deadline_detail=detail
+    )
+    published = store.compare_and_swap(claimed, Transition(progress, release=True))
+    assert store.read(spec().key) == published
+    assert asdict(published.progress)["deadline_detail"] == {
+        "captured_services": 2,
+        "missing_ready_slots": 1,
+        "duplicate_slots": 2,
+        "stale_templates": 1,
+        "non_running_tasks": 2,
+        "invalid_task_shape": 1,
+        "ongoing_updates": 2,
+    }
+    stale = store.claim(published, LeaseRequest("worker-a", 5))
+    clock.now += 5
+    current = store.claim(stale, LeaseRequest("worker-b", 5))
+    replacement = replace(
+        progress, deadline_detail=DeadlineDetail(2, ongoing_updates=1)
+    )
+    updated = store.compare_and_swap(current, Transition(replacement, release=True))
+    with pytest.raises(StoreConflict):
+        store.compare_and_swap(stale, Transition(progress))
+    assert store.read(spec().key) == updated
+
+
+@pytest.mark.parametrize(
+    "state,convergence",
+    [(AttemptState.FAILED, "deadline"), (AttemptState.OBSERVING, None)],
+)
+def test_progress_rejects_obsolete_deadline_detail(
+    state: AttemptState, convergence: ConvergenceSummary | None
+) -> None:
+    with pytest.raises(InvalidDescription):
+        replace(
+            Progress(),
+            state=state,
+            convergence=convergence,
+            deadline_detail=DeadlineDetail(1),
+        )
+
+
+@pytest.mark.parametrize("subclass", [False, True])
+def test_progress_rejects_payload_bearing_deadline_detail(subclass: bool) -> None:
+    @dataclass(frozen=True, slots=True)
+    class PayloadDetail(DeadlineDetail):
+        wire: dict[str, str] = field(default_factory=dict)
+
+    payload = {"secret": "credential-payload"}
+    detail = PayloadDetail(1, wire=payload) if subclass else payload
+    with pytest.raises(InvalidDescription):
+        replace(
+            Progress(),
+            state=AttemptState.OBSERVING,
+            convergence="deadline",
+            deadline_detail=detail,
+        )

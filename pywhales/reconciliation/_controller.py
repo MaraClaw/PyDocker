@@ -32,17 +32,31 @@ def _outcome(progress: Progress, outcome: Outcome) -> Progress:
     match outcome:
         case Success():
             return replace(
-                progress, state=AttemptState.SUCCEEDED, convergence="success"
+                progress,
+                state=AttemptState.SUCCEEDED,
+                convergence="success",
+                deadline_detail=None,
             )
         case Failure(reason=reason):
-            return replace(progress, state=AttemptState.FAILED, convergence=reason)
-        case Deadline():
             return replace(
-                progress, state=AttemptState.OBSERVING, convergence="deadline"
+                progress,
+                state=AttemptState.FAILED,
+                convergence=reason,
+                deadline_detail=None,
+            )
+        case Deadline(detail=detail):
+            return replace(
+                progress,
+                state=AttemptState.OBSERVING,
+                convergence="deadline",
+                deadline_detail=detail,
             )
         case Cancelled():
             return replace(
-                progress, state=AttemptState.OBSERVING, convergence="cancelled"
+                progress,
+                state=AttemptState.OBSERVING,
+                convergence="cancelled",
+                deadline_detail=None,
             )
         case unreachable:
             assert_never(unreachable)
@@ -141,7 +155,13 @@ class Controller:
                     else AttemptState.SUBMITTED
                 )
                 return self._commit(
-                    entry, replace(entry.progress, state=state, convergence=None)
+                    entry,
+                    replace(
+                        entry.progress,
+                        state=state,
+                        convergence=None,
+                        deadline_detail=None,
+                    ),
                 )
             case InventoryDisposition.APPLIED:
                 return self._observe(entry, evidence)
@@ -155,7 +175,10 @@ class Controller:
                     return self._commit(
                         entry,
                         replace(
-                            entry.progress, state=AttemptState.UNKNOWN, convergence=None
+                            entry.progress,
+                            state=AttemptState.UNKNOWN,
+                            convergence=None,
+                            deadline_detail=None,
                         ),
                     )
                 intent = self._commit(
@@ -193,6 +216,7 @@ class Controller:
                 state=AttemptState.OBSERVING,
                 resources=evidence.resources,
                 convergence=None,
+                deadline_detail=None,
             ),
             release=False,
         )

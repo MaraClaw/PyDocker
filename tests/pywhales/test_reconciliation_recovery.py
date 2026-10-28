@@ -14,6 +14,7 @@ from pywhales.admission import (
     EndpointIdentity,
     PressureClass,
 )
+from pywhales.convergence import Deadline, DeadlineDetail, Outcome
 from pywhales.reconciliation import (
     ActionContext,
     AdapterUnavailable,
@@ -25,6 +26,7 @@ from pywhales.reconciliation import (
     JournalEntry,
     LeaseRequest,
     MemoryJournalStore,
+    ResourceIdentity,
     StoreConflict,
     StoreUnavailable,
     Transition,
@@ -218,3 +220,115 @@ def test_endpoint_mismatch_fails_before_claim_or_admission() -> None:
     with pytest.raises(IdentityConflict):
         owner.submit(other)
     assert endpoint.trace == []
+
+
+def test_superseded_generation_cannot_publish_old_deadline_detail() -> None:
+    clock = Clock()
+    store = MemoryJournalStore(clock)
+    newer = DeadlineDetail(2, ongoing_updates=2)
+
+    class SupersedingEndpoint(Endpoint):
+        @override
+        def observe(
+            self, context: ActionContext, resources: tuple[ResourceIdentity, ...]
+        ) -> Outcome:
+            super().observe(context, resources)
+            clock.now += 10
+            current = store.read(context.spec.key)
+            assert current is not None
+            claimed = store.claim(current, LeaseRequest("worker-b", 5))
+            store.compare_and_swap(
+                claimed,
+                Transition(
+                    replace(
+                        claimed.progress, convergence="deadline", deadline_detail=newer
+                    ),
+                    release=True,
+                ),
+            )
+            return Deadline(DeadlineDetail(1, missing_ready_slots=1))
+
+    endpoint = SupersedingEndpoint()
+    owner = controller(store, endpoint)
+    with pytest.raises(StoreConflict):
+        owner.reconcile(owner.claim(owner.submit(spec()), LeaseRequest("worker-a", 5)))
+    current = store.read(spec().key)
+    assert current is not None
+    assert current.generation == 2 and current.progress.deadline_detail == newer
+    assert endpoint.trace == ["inventory", "mutate", "inventory", "observe"]
+
+
+@pytest.mark.parametrize("commit_then_fail", [False, True])
+def test_deadline_write_outage_stops_pass_and_recovers_without_replay(
+    commit_then_fail: bool,
+) -> None:
+    clock = Clock()
+    store = FaultStore(clock)
+    detail = DeadlineDetail(1, missing_ready_slots=1)
+
+    class OutageEndpoint(Endpoint):
+        fail = False
+
+        @override
+        def observe(
+            self, context: ActionContext, resources: tuple[ResourceIdentity, ...]
+        ) -> Outcome:
+            super().observe(context, resources)
+            current = store.read(context.spec.key)
+            assert current is not None and current.progress.deadline_detail is None
+            if self.fail:
+                store.fail_write = not commit_then_fail
+                store.commit_then_fail = commit_then_fail
+            return self.outcome
+
+    endpoint = OutageEndpoint()
+    endpoint.outcome = Deadline(detail)
+    owner = controller(store, endpoint)
+    pending = owner.reconcile(
+        owner.claim(owner.submit(spec()), LeaseRequest("worker-a", 30))
+    )
+    endpoint.fail = True
+    endpoint.trace.clear()
+    with pytest.raises(StoreUnavailable):
+        owner.reconcile(owner.claim(pending, LeaseRequest("worker-b", 30)))
+    current = store.read(spec().key)
+    assert current is not None
+    assert current.progress.deadline_detail == (detail if commit_then_fail else None)
+    assert endpoint.trace == ["inventory", "observe"]
+    endpoint.fail = store.fail_write = store.commit_then_fail = False
+    clock.now += 30
+    endpoint.trace.clear()
+    recovered = owner.reconcile(owner.claim(current, LeaseRequest("worker-c", 30)))
+    assert recovered.progress.deadline_detail == detail
+    assert recovered.progress.attempts == 1
+    assert endpoint.trace == ["inventory", "observe"]
+
+
+@pytest.mark.parametrize("fault", [StoreConflict, StoreUnavailable])
+def test_failed_clearing_write_stops_before_further_observation(
+    fault: type[Exception],
+) -> None:
+    class ClearingStore(MemoryJournalStore):
+        fail = False
+
+        @override
+        def compare_and_swap(
+            self, expected: JournalEntry, change: Transition
+        ) -> JournalEntry:
+            if self.fail:
+                raise fault()
+            return super().compare_and_swap(expected, change)
+
+    store, endpoint = ClearingStore(), Endpoint()
+    endpoint.outcome = Deadline(DeadlineDetail(1, ongoing_updates=1))
+    owner = controller(store, endpoint)
+    pending = owner.reconcile(
+        owner.claim(owner.submit(spec()), LeaseRequest("worker-a", 30))
+    )
+    claimed = owner.claim(pending, LeaseRequest("worker-b", 30))
+    store.fail = True
+    endpoint.trace.clear()
+    with pytest.raises(fault):
+        owner.reconcile(claimed)
+    assert endpoint.trace == ["inventory"]
+    assert store.read(spec().key) == claimed

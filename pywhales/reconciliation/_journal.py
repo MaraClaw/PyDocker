@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal
 
+from pywhales.convergence import DeadlineDetail
 from pywhales.inventory import InventoryKind
 from pywhales.reconciliation._errors import InvalidDescription
 from pywhales.reconciliation._intent import OperationSpec, ResourceClass, token
@@ -55,12 +56,26 @@ type ConvergenceSummary = Literal[
 
 @dataclass(frozen=True, slots=True)
 class Progress:
-    """Payload-free decision state; convergence causes and raw states are omitted."""
+    """Closed decision state with optional past complete-cycle deadline counts.
+
+    The integer-only detail excludes convergence causes, raw states and payloads.
+    It is present only for a nonterminal deadline, never a current-state guarantee.
+    """
 
     state: AttemptState = AttemptState.SUBMITTED
     attempts: int = 0
     resources: tuple[ResourceIdentity, ...] = ()
     convergence: ConvergenceSummary | None = None
+    deadline_detail: DeadlineDetail | None = None
+
+    def __post_init__(self) -> None:
+        """Reject extended aggregates or detail on a different progress outcome."""
+        if self.deadline_detail is not None and (
+            type(self.deadline_detail) is not DeadlineDetail
+            or self.convergence != "deadline"
+            or self.state is not AttemptState.OBSERVING
+        ):
+            raise InvalidDescription()
 
 
 @dataclass(frozen=True, slots=True)

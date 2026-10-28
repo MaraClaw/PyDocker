@@ -190,7 +190,7 @@ def test_top_preserves_custom_command_when_inspecting_live_container(
     docker_client: DockerClient, ps_args: list[str]
 ) -> None:
     container = docker_client.run(
-        "python:3.14.8-slim-trixie", ["sleep", "300"], detach=True
+        "python:3.14.10-slim-trixie", ["sleep", "300"], detach=True
     )
     try:
         result = docker_client.container.top(container, ps_args)

@@ -12,7 +12,7 @@ from collections.abc import Callable, Generator
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from queue import Queue
-from subprocess import CompletedProcess
+from subprocess import CompletedProcess, Popen
 from threading import Barrier, Event, Thread, current_thread
 from types import GeneratorType
 from typing import Literal, assert_never, override
@@ -21,11 +21,13 @@ from unittest.mock import ANY, MagicMock, Mock, patch
 import pytest
 
 from pywhales import DockerClient, Image, docker
+from pywhales._archive_deadline import ArchiveDeadline
 from pywhales.client_config import Command, ParsingError
 from pywhales.components.image.models import ImageInspectResult
 from pywhales.components.image.streams import MultiImageStream
 from pywhales.exceptions import (
     DockerException,
+    DockerTimeout,
     NoSuchContainer,
     NoSuchImage,
     NoSuchNetwork,
@@ -424,6 +426,177 @@ def test_archive_direct_load_uses_each_client_environment(
 
     assert first.image.load(chunks() if chunked else b"archive-input") == ["first"]
     assert second.image.load(iter([b"archive-input"])) == ["second"]
+
+
+def test_archive_load_reaps_child_before_blocked_producer_resumes() -> None:
+    owners: Queue[ArchiveDeadline] = Queue()
+    entered = Event()
+    resume = Event()
+    client = DockerClient(
+        client_call=[sys.executable, "-c", "import time; time.sleep(60)"],
+        default_timeout=0.2,
+    )
+
+    def make_owner(
+        process: Popen[bytes], command: list[str], deadline: float, *, raw: bool
+    ) -> ArchiveDeadline:
+        owner = ArchiveDeadline(process, command, deadline, raw=raw)
+        owners.put(owner)
+        return owner
+
+    def chunks() -> Generator[bytes]:
+        client.client_config.default_timeout = None
+        entered.set()
+        assert resume.wait(3)
+        yield b""
+        raise AssertionError("producer was advanced after deadline")
+
+    with (
+        patch("pywhales.components.image.cli_wrapper.ArchiveDeadline", make_owner),
+        ThreadPoolExecutor(max_workers=1) as executor,
+    ):
+        result = executor.submit(client.image.load, chunks())
+        try:
+            owner = owners.get(timeout=3)
+            assert entered.wait(3)
+            assert owner.released.wait(3)
+            assert owner.process.returncode is not None
+            assert owner.process.stdin is not None and owner.process.stdin.closed
+            assert not result.done()
+        finally:
+            resume.set()
+        with pytest.raises(DockerTimeout):
+            result.result(timeout=3)
+
+
+def test_archive_save_deadline_reaps_paused_consumer_and_preserves_bytes() -> None:
+    owners: Queue[ArchiveDeadline] = Queue()
+    client = DockerClient(
+        client_call=[
+            sys.executable,
+            "-c",
+            "import os,time; os.write(1,b'\\x00\\xffdata'); time.sleep(60)",
+        ],
+    )
+
+    def make_owner(
+        process: Popen[bytes], command: list[str], deadline: float, *, raw: bool
+    ) -> ArchiveDeadline:
+        owner = ArchiveDeadline(process, command, deadline, raw=raw)
+        owners.put(owner)
+        return owner
+
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        patch("pywhales.components.image.cli_wrapper.ArchiveDeadline", make_owner),
+    ):
+        archive = client.image.save("sample")
+        client.client_config.default_timeout = 0.3
+        assert next(archive) == b"\x00\xffdata"
+        client.client_config.default_timeout = None
+        owner = owners.get(timeout=3)
+        assert owner.released.wait(3)
+        assert owner.process.returncode is not None
+        assert owner.process.stdout is not None and owner.process.stdout.closed
+        with pytest.raises(DockerTimeout):
+            next(archive)
+        assert list(archive) == []
+
+
+def test_archive_load_deadline_interrupts_saturated_stdin_pipe() -> None:
+    client = DockerClient(
+        client_call=[sys.executable, "-c", "import time; time.sleep(60)"],
+        default_timeout=0.2,
+    )
+    with pytest.raises(DockerTimeout):
+        client.image.load(b"x" * (2 * 1024 * 1024))
+
+
+def test_archive_deadline_preserves_binary_payload_on_success() -> None:
+    payload = b"\x00\xff\n" * 10000
+    client = DockerClient(
+        client_call=[
+            sys.executable,
+            "-c",
+            "import os; os.write(1, b'\\x00\\xff\\n' * 10000)",
+        ],
+        default_timeout=3,
+    )
+    with patch.object(client.image, "inspect", return_value=[]):
+        assert b"".join(client.image.save("sample")) == payload
+
+
+def test_archive_deadline_preserves_natural_failure_classification() -> None:
+    client = DockerClient(
+        client_call=[
+            sys.executable,
+            "-c",
+            "import os; os.write(2, b'No such image: sample'); os._exit(7)",
+        ],
+        default_timeout=3,
+    )
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        pytest.raises(NoSuchImage) as failure,
+    ):
+        list(client.image.save("sample"))
+    assert failure.value.return_code == 7
+    assert failure.value.stderr == "No such image: sample"
+
+
+@pytest.mark.parametrize("raw", [False, True])
+def test_archive_save_timeout_retains_stderr(raw: bool) -> None:
+    client = DockerClient(
+        client_call=[
+            sys.executable,
+            "-c",
+            "import os,time; os.write(2,b'private-error'); "
+            "os.write(1,b'ready'); time.sleep(60)",
+        ],
+        default_timeout=0.3,
+        raw_diagnostics=raw,
+    )
+    with patch.object(client.image, "inspect", return_value=[]):
+        archive = client.image.save("sample")
+        assert next(archive) == b"ready"
+        with pytest.raises(DockerTimeout) as failure:
+            next(archive)
+    assert failure.value.stderr == "private-error"
+    assert ("private-error" in str(failure.value)) is raw
+
+
+@pytest.mark.parametrize("save", [False, True])
+def test_archive_path_uses_default_deadline(save: bool, tmp_path: Path) -> None:
+    client = DockerClient(
+        client_call=[sys.executable, "-c", "import time; time.sleep(60)"],
+        default_timeout=0.2,
+    )
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        pytest.raises(DockerTimeout),
+    ):
+        if save:
+            client.image.save("sample", output=tmp_path / "archive.tar")
+        else:
+            client.image.load(tmp_path / "archive.tar", quiet=True)
+
+
+@pytest.mark.parametrize("save", [False, True])
+def test_direct_archive_rejects_invalid_selected_default_before_launch(
+    save: bool,
+) -> None:
+    client = DockerClient(client_call=[sys.executable])
+    client.client_config.default_timeout = 0
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        patch("pywhales.components.image.cli_wrapper.Popen") as launch,
+        pytest.raises(ValueError),
+    ):
+        if save:
+            next(client.image.save("sample"))
+        else:
+            client.image.load(b"input")
+    launch.assert_not_called()
 
 
 def test_archive_path_load_uses_each_client_environment(

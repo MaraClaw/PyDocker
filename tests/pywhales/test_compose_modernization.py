@@ -208,7 +208,7 @@ def test_constructor_accepts_current_positional_slots() -> None:
         ".",
         "--compatibility",
     ]
-    assert [field.name for field in fields(ClientConfig)][-9:] == [
+    assert [field.name for field in fields(ClientConfig)][-10:] == [
         "_client_call_with_path",
         "compose_dry_run",
         "compose_parallel",
@@ -218,6 +218,7 @@ def test_constructor_accepts_current_positional_slots() -> None:
         "raw_diagnostics",
         "telemetry_observer",
         "environment",
+        "default_timeout",
     ]
 
 

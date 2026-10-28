@@ -44,6 +44,7 @@ class TaskWire(BaseModel):
     id: str = Field(alias="ID", min_length=1)
     service_id: str = Field(alias="ServiceID", min_length=1)
     slot: int | None = Field(default=None, alias="Slot")
+    node_id: str = Field(default="", alias="NodeID")
     desired: str = Field(alias="DesiredState", min_length=1)
     status: TaskStatus = Field(alias="Status")
     spec: dict[str, JsonValue] | None = Field(default=None, alias="Spec")
@@ -91,15 +92,31 @@ def inspect_task(config: ClientConfig, task_id: str) -> TaskWire:
 
 
 def target_from_wire(
-    config: ClientConfig, service: ServiceWire
+    config: ClientConfig,
+    service: ServiceWire,
+    approved_node_ids: tuple[str, ...] | None = None,
 ) -> ServiceTarget | Failure:
     """Capture a supported generation, or reject an unsupported mode."""
     mode = service.spec.mode
-    if set(mode) != {"Replicated"} or not isinstance(mode["Replicated"], dict):
-        return Failure(reason="unsupported", service_id=service.id)
-    replicated = mode["Replicated"]
-    replicas = replicated.get("Replicas")
-    if set(replicated) != {"Replicas"} or type(replicas) is not int or replicas < 0:
+    if set(mode) == {"Replicated"} and isinstance(mode["Replicated"], dict):
+        replicated = mode["Replicated"]
+        replicas = replicated.get("Replicas")
+        if (
+            set(replicated) != {"Replicas"}
+            or type(replicas) is not int
+            or replicas < 0
+            or approved_node_ids is not None
+        ):
+            return Failure(reason="unsupported", service_id=service.id)
+        captured_mode = "replicated"
+    elif (
+        set(mode) == {"Global"}
+        and isinstance(mode["Global"], dict)
+        and approved_node_ids is not None
+    ):
+        replicas = 0
+        captured_mode = "global"
+    else:
         return Failure(reason="unsupported", service_id=service.id)
     template = service.spec.template
     container = template.get("ContainerSpec")
@@ -116,4 +133,6 @@ def target_from_wire(
         fingerprint=fingerprint(service),
         template=template_json,
         replicas=replicas,
+        mode=captured_mode,
+        approved_node_ids=approved_node_ids,
     )

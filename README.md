@@ -11,7 +11,7 @@
 ------------------------------------------------------------------------
 The Docker and its composer client for Python, designed to be fun and intuitive!
 
-Works on Linux, macOS and Windows, for Python 3.14.8 and above.
+Works on Linux, macOS and Windows, for Python 3.14.10 and above.
 
 * [Documentation](https://github.com/MaraClaw/PyWhales/tree/HEAD/docs)
 * [GitHub repository](https://github.com/MaraClaw/PyWhales)

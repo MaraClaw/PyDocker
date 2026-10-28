@@ -106,6 +106,23 @@ polling bounds. Do not recapture a newer generation as the desired one or
 reimplement readiness inside inventory. The journal stores only the outcome
 category or bounded `Failure.reason`, not raw state, target templates or causes.
 
+## Aggregate Observation Budgets
+
+`InspectionPolicy` optionally accepts `max_total_references` and
+`max_total_response_bytes`, positive integers that default to `None`. The reference
+limit applies independently to each inventory call and counts every occurrence,
+including duplicates, before executable lookup. Bulk reload still deduplicates
+repeated handles before inspection.
+
+The response limit counts raw stdout and stderr bytes read across commands in an
+observation scope, including failed commands and successive convergence wait
+cycles. Nested scopes charge each enclosing budget; exiting a child does not refund
+bytes, and an unrestricted child cannot relax its parent. Reusing a policy in a new
+root scope starts fresh. Existing per-command bounds still apply. Exhaustion raises
+`ObservationLimitError` and stops the local CLI; it does not cancel daemon-side
+work. The byte limit is not a process-memory cap. Observation contexts do not
+automatically propagate into arbitrary threads.
+
 ## Driving Recovery
 
 ```python

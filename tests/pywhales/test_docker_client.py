@@ -145,7 +145,7 @@ def test_top_leaves_running_then_stop_stops_when_inspecting_live_container(
     docker_client: DockerClient, component_stop: bool
 ) -> None:
     container = docker_client.run(
-        "python:3.14.8-slim-trixie", ["sleep", "300"], detach=True
+        "python:3.14.10-slim-trixie", ["sleep", "300"], detach=True
     )
     try:
         result = docker_client.top(container)

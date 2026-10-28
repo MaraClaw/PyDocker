@@ -3,7 +3,7 @@
   "provenance": "synthetic",
   "manifest_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "support_row": "synthetic-example",
-  "observed_versions": {"python": "3.14.8", "os": "synthetic-linux-0", "kernel": "0.0.0-synthetic", "docker_cli": "0.0.0-synthetic", "docker_engine": "0.0.0-synthetic", "compose": null, "buildx": null},
+  "observed_versions": {"python": "3.14.10", "os": "synthetic-linux-0", "kernel": "0.0.0-synthetic", "docker_cli": "0.0.0-synthetic", "docker_engine": "0.0.0-synthetic", "compose": null, "buildx": null},
   "authorization_record": "synthetic-not-authority",
   "run_namespace": "synthetic-offline-run",
   "endpoint_aliases": ["example-local", "example-context"],

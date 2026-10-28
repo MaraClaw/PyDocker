@@ -91,6 +91,8 @@ class InspectionPolicy:
     max_references: int
     max_argv_bytes: int
     max_response_bytes: int
+    max_total_references: int | None = None
+    max_total_response_bytes: int | None = None
 
     def __post_init__(self) -> None:
         """Reject non-integer, boolean, and nonpositive limits."""
@@ -100,6 +102,9 @@ class InspectionPolicy:
             self.max_response_bytes,
         ):
             if type(value) is not int or value <= 0:
+                raise ValueError("Inspection limits must be positive integers")
+        for value in (self.max_total_references, self.max_total_response_bytes):
+            if value is not None and (type(value) is not int or value <= 0):
                 raise ValueError("Inspection limits must be positive integers")
 
 

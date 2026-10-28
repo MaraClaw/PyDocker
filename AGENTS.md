@@ -3,7 +3,7 @@
 ## Overview
 
 PyWhales is a typed Python wrapper around the external Docker CLI, not a Docker HTTP SDK.
-Python >=3.14.8 and Pydantic 2 are required; `.python-version` pins 3.14.8.
+Python >=3.14.10 and Pydantic 2 are required; `.python-version` pins 3.14.10.
 The public API exports `DockerClient`, resource classes, and a shared `docker` client from `pywhales/__init__.py`.
 `DockerClient` wires 18 command groups to one `ClientConfig` and exposes convenience aliases such as `run`, `ps`, and `build`.
 Importing the package or constructing a client doesn't check CLI, daemon, or plugin availability.

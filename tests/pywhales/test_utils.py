@@ -16,9 +16,11 @@ from time import monotonic
 import pytest
 
 import pywhales.utils
+from pywhales._observation import observation
 from pywhales.client_config import ClientConfig
 from pywhales.components.buildx.cli_wrapper import stream_buildx_logs
 from pywhales.exceptions import DockerException, DockerTimeout, NoSuchContainer
+from pywhales.inventory import InspectionPolicy
 from pywhales.utils import (
     MappedProcessStream,
     ProcessStream,
@@ -511,6 +513,83 @@ def test_run_timeout_preserves_captured_output() -> None:
     assert raised.value.docker_command == command
     assert raised.value.stdout == "ready\n"
     assert raised.value.stderr == "error\n"
+
+
+def test_default_timeout_is_selected_at_each_launch_and_explicit_replaces_it() -> None:
+    config = ClientConfig(client_call=[sys.executable], default_timeout=0.1)
+    command = [*config.docker_cmd, "-c", "import time; time.sleep(0.3); print('ok')"]
+    with pytest.raises(DockerTimeout):
+        pywhales.utils.run(command)
+    assert pywhales.utils.run(command, timeout=2) == "ok"
+    config.default_timeout = 0
+    assert pywhales.utils.run(command, timeout=2) == "ok"
+    with pytest.raises(ValueError):
+        pywhales.utils.run(command)
+
+
+def test_default_timeout_applies_to_idle_owned_stream() -> None:
+    config = ClientConfig(client_call=[sys.executable], default_timeout=0.1)
+    stream = stream_stdout_and_stderr(
+        [*config.docker_cmd, "-c", "input()"], pipe_stdin=True
+    )
+    assert stream._released.wait(timeout=3)
+    with pytest.raises(DockerTimeout):
+        next(stream)
+    assert list(stream) == []
+
+
+def test_default_timeout_applies_to_captured_stdin() -> None:
+    config = ClientConfig(client_call=[sys.executable], default_timeout=0.1)
+    command = [
+        *config.docker_cmd,
+        "-c",
+        "import sys,time; sys.stdin.read(); time.sleep(3)",
+    ]
+    with pytest.raises(DockerTimeout):
+        pywhales.utils.run(command, input=b"payload")
+
+
+def test_default_timeout_applies_to_tty_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = ClientConfig(client_call=[sys.executable], default_timeout=0.1)
+    command = [*config.docker_cmd, "-c", "import time; time.sleep(3)"]
+    with (
+        (tmp_path / "terminal.txt").open("w") as terminal,
+        monkeypatch.context() as patch,
+    ):
+        patch.setattr(sys, "stdout", terminal)
+        patch.setattr(sys, "stderr", terminal)
+        with pytest.raises(DockerTimeout):
+            pywhales.utils.run(command, tty=True)
+
+
+def test_stream_explicit_timeout_replaces_invalid_default() -> None:
+    config = ClientConfig(client_call=[sys.executable])
+    config.default_timeout = 0
+    command = [*config.docker_cmd, "-c", "print('ok')"]
+    assert list(stream_stdout_and_stderr(command, timeout=3)) == [("stdout", b"ok\n")]
+    with pytest.raises(ValueError):
+        stream_stdout_and_stderr(command)
+
+
+def test_default_timeout_is_used_inside_observation() -> None:
+    config = ClientConfig(client_call=[sys.executable], default_timeout=0.1)
+    policy = InspectionPolicy(
+        max_references=1, max_argv_bytes=65536, max_response_bytes=1024
+    )
+    with observation(policy), pytest.raises(DockerTimeout):
+        pywhales.utils.run([*config.docker_cmd, "-c", "import time; time.sleep(3)"])
+
+
+def test_invalid_selected_default_is_not_an_observation_environment_error() -> None:
+    config = ClientConfig(client_call=[sys.executable])
+    config.default_timeout = 0
+    policy = InspectionPolicy(
+        max_references=1, max_argv_bytes=65536, max_response_bytes=1024
+    )
+    with observation(policy), pytest.raises(ValueError):
+        pywhales.utils.run([*config.docker_cmd, "-c", "pass"])
 
 
 def test_process_stream_times_out_without_consumption() -> None:

@@ -25,6 +25,10 @@ class ServiceObservation:
     non_running_tasks: bool
     invalid_task_shape: bool
     ongoing_updates: bool
+    missing_ready_nodes: bool = False
+    duplicate_node_assignments: bool = False
+    missing_node_assignments: bool = False
+    outside_approved_nodes: bool = False
 
     @property
     def ready(self) -> bool:
@@ -37,6 +41,10 @@ class ServiceObservation:
                 self.non_running_tasks,
                 self.invalid_task_shape,
                 self.ongoing_updates,
+                self.missing_ready_nodes,
+                self.duplicate_node_assignments,
+                self.missing_node_assignments,
+                self.outside_approved_nodes,
             )
         )
 
@@ -76,6 +84,10 @@ def check_service(target: ServiceTarget) -> ServiceObservation | Failure:
         raise ParsingError("Invalid task listing")
     slots: set[int] = set()
     seen_slots: set[int] = set()
+    approved = set(target.approved_node_ids or ())
+    ready_nodes: set[str] = set()
+    seen_nodes: set[str] = set()
+    duplicate_nodes = missing_assignment = outside_nodes = False
     duplicate = stale = non_running = invalid = False
     for task_id in ids:
         check_observation()
@@ -87,7 +99,7 @@ def check_service(target: ServiceTarget) -> ServiceObservation | Failure:
         if task.desired != "running":
             continue
         non_running |= task.status.state != "running"
-        if task.slot is not None:
+        if target.mode == "replicated" and task.slot is not None:
             duplicate |= task.slot in seen_slots
             seen_slots.add(task.slot)
         matching = (
@@ -95,6 +107,17 @@ def check_service(target: ServiceTarget) -> ServiceObservation | Failure:
             and canonical(task.spec, template=True) == target.template
         )
         stale |= task.spec is not None and not matching
+        if target.mode == "global":
+            missing_assignment |= not task.node_id
+            if task.node_id:
+                duplicate_nodes |= task.node_id in seen_nodes
+                seen_nodes.add(task.node_id)
+                outside_nodes |= task.node_id not in approved
+            if task.spec is None:
+                invalid = True
+            if task.node_id in approved and task.status.state == "running" and matching:
+                ready_nodes.add(task.node_id)
+            continue
         if (
             task.slot is None
             or task.slot < 1
@@ -106,10 +129,15 @@ def check_service(target: ServiceTarget) -> ServiceObservation | Failure:
         if task.status.state == "running" and matching:
             slots.add(task.slot)
     return ServiceObservation(
-        missing_ready_slots=len(slots) < target.replicas,
+        missing_ready_slots=target.mode == "replicated"
+        and len(slots) < target.replicas,
         duplicate_slots=duplicate,
         stale_templates=stale,
         non_running_tasks=non_running,
         invalid_task_shape=invalid,
         ongoing_updates=state == "updating",
+        missing_ready_nodes=target.mode == "global" and ready_nodes != approved,
+        duplicate_node_assignments=duplicate_nodes,
+        missing_node_assignments=missing_assignment,
+        outside_approved_nodes=outside_nodes,
     )

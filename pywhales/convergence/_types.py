@@ -16,6 +16,22 @@ class ServiceTarget:
     fingerprint: str
     template: str = field(repr=False)
     replicas: int
+    mode: Literal["replicated", "global"] = "replicated"
+    approved_node_ids: tuple[str, ...] | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        """Reject invalid or mode-inconsistent node membership."""
+        nodes = self.approved_node_ids
+        if self.mode == "replicated" and nodes is None:
+            return
+        if (
+            self.mode != "global"
+            or type(nodes) is not tuple
+            or not nodes
+            or any(type(node) is not str or not node for node in nodes)
+            or len(set(nodes)) != len(nodes)
+        ):
+            raise ValueError("Global targets require distinct nonempty node IDs")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -26,9 +42,12 @@ class StackTarget:
 
     def __post_init__(self) -> None:
         """Reject empty or duplicate membership."""
-        if not self.services or len(
-            {target.service_id for target in self.services}
-        ) != len(self.services):
+        if (
+            type(self.services) is not tuple
+            or not self.services
+            or len({target.service_id for target in self.services})
+            != len(self.services)
+        ):
             raise ValueError("Stack target must contain distinct services")
 
 
@@ -65,6 +84,10 @@ class DeadlineDetail:
     non_running_tasks: int = 0
     invalid_task_shape: int = 0
     ongoing_updates: int = 0
+    missing_ready_nodes: int = 0
+    duplicate_node_assignments: int = 0
+    missing_node_assignments: int = 0
+    outside_approved_nodes: int = 0
 
     def __post_init__(self) -> None:
         """Reject non-integer counts or counts outside captured membership."""
@@ -77,6 +100,10 @@ class DeadlineDetail:
             self.non_running_tasks,
             self.invalid_task_shape,
             self.ongoing_updates,
+            self.missing_ready_nodes,
+            self.duplicate_node_assignments,
+            self.missing_node_assignments,
+            self.outside_approved_nodes,
         )
         if any(
             type(count) is not int or not 0 <= count <= self.captured_services

@@ -234,7 +234,7 @@ def run(
     strings. A timeout uses a monotonic deadline established immediately before
     launch, kills and reaps a still-running local CLI on expiry, and retains
     captured details on DockerTimeout. It does not guarantee cancellation of
-    daemon-side work. Without a timeout, wait for completion without a deadline.
+    daemon-side work. Without a selected timeout, wait without a deadline.
 
     Args:
         args: Executable and arguments, optionally retaining a policy carrier as
@@ -251,8 +251,8 @@ def run(
             capturing it. This option does not allocate a pseudo-terminal.
         pass_fds: Additional descriptors to keep open in the child, subject to
             the platform's subprocess support.
-        timeout: Positive finite seconds from launch, or ``None`` for no
-            deadline. Booleans are rejected before launching.
+        timeout: Positive finite seconds from launch, replacing the client default;
+            ``None`` inherits it. Booleans are rejected before launching.
 
     Returns:
         Captured stdout, or ``(stdout, stderr)`` when return_stderr is true.
@@ -281,6 +281,8 @@ def run(
         if observation is not None:
             raise ObservationLimitError("environment", None, None) from None
         raise
+    timeout = policy.default_timeout if timeout is None else timeout
+    validate_timeout(timeout)
     args = [str(x) for x in args]
     subprocess_env = finalize_environment(subprocess_env, args)
     if tty:
@@ -561,7 +563,8 @@ def _start_process(
             ``None`` adds no operation overrides.
         pass_fds: Additional descriptors to preserve in the child.
         pipe_stdin: Open a writable stdin pipe when true; otherwise inherit stdin.
-        timeout: Positive finite seconds from launch, or ``None`` for no deadline.
+        timeout: Positive finite seconds from launch, replacing the client default;
+            ``None`` inherits it.
         buffer_bytes: Positive byte budget. Omission inherits the current client
             budget; explicit ``None`` is unbounded even if the client has a limit.
 
@@ -577,6 +580,8 @@ def _start_process(
     """
     validate_timeout(timeout)
     policy = get_execution_policy(full_cmd)
+    timeout = policy.default_timeout if timeout is None else timeout
+    validate_timeout(timeout)
     if buffer_bytes is DEFAULT_BUFFER:
         buffer_bytes = policy.stream_buffer_bytes
     if buffer_bytes is not None and (
@@ -644,7 +649,8 @@ def stream_stdout_and_stderr(
             platform support.
         pipe_stdin: Make result.stdin writable when true; otherwise it is None
             and the child inherits stdin.
-        timeout: Positive finite seconds from launch, or ``None`` for no deadline.
+        timeout: Positive finite seconds from launch, replacing the client default;
+            ``None`` inherits it.
         buffer_bytes: Positive byte budget; omitted means inherit the client's
             budget, while explicit ``None`` means unbounded. Queue payload,
             unfinished records, and stderr history have separate limits rather

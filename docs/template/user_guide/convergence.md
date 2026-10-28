@@ -36,10 +36,25 @@ client configuration; do not change its endpoint while using them.
 Each target records the service version and a fingerprint of its complete desired
 task template and mode. Task specs are compared exactly, including unknown wire
 fields, except that omitted `Runtime` and `Runtime: "container"` are equivalent.
-The task object's own version is not a service-template generation. Only replicated
-long-running container services with an explicit nonnegative replica count are
-supported. Global, job, unknown and malformed modes fail closed. A zero-replica
-service succeeds only with no desired-running tasks and a stable generation.
+The task object's own version is not a service-template generation. Replicated
+long-running container services require an explicit nonnegative replica count.
+Global long-running container services require `approved_node_ids` at capture: a
+nonempty tuple of distinct, nonempty immutable node ID strings. For example:
+
+```python
+agent = capture_service(
+    client,
+    "full-service-id",
+    policy=policy,
+    timeout=10,
+    approved_node_ids=("full-node-id-1", "full-node-id-2"),
+)
+```
+
+The tuple is the fixed caller-approved membership, not a discovery of eligible
+nodes. It is rejected for Replicated services. Job, unknown and malformed modes
+fail closed. A zero-replica service succeeds only with no desired-running tasks
+and a stable generation. A stack may contain both modes.
 
 Only current desired-running tasks count; historical shutdown tasks do not. Each
 required slot must contain exactly one matching running task. Missing, stale,
@@ -51,6 +66,15 @@ template fingerprints return `superseded`. Inspection and transport errors retur
 `observation` failures with their original cause. Snapshot collection is not an
 atomic Swarm transaction: the final generation recheck reduces, but cannot remove,
 concurrent-change races.
+
+For Global services every approved node must have exactly one desired-running,
+matching, actually running task. Missing or unassigned nodes, duplicate assignments,
+and tasks assigned outside the approved set remain pending. Deadline detail counts
+affected services, not nodes or tasks: `missing_ready_nodes`,
+`duplicate_node_assignments`, `missing_node_assignments`, and
+`outside_approved_nodes` apply only to Global services; slot counts apply only to
+Replicated services. The detail contains no node IDs or templates and describes
+the latest complete observation cycle, not necessarily the state at expiry.
 
 The policy limits each CLI invocation; task inspections use one reference at a time.
 Capture and wait each start their own positive finite monotonic timeout. Cancellation

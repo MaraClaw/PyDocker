@@ -18,12 +18,14 @@ class LaunchRecord:
 
     Attributes:
         family: Fixed execution family, never inferred from command arguments.
-        schema_version: Record schema version, currently 1.
+        attempt_id: Opaque identifier shared with the completion record.
+        schema_version: Record schema version, currently 2.
         phase: Fixed launch discriminator. Measurements are not yet available.
     """
 
     family: OperationFamily
-    schema_version: Literal[1] = field(default=1, init=False)
+    attempt_id: str = field(kw_only=True)
+    schema_version: Literal[2] = field(default=2, init=False)
     phase: Literal["launch"] = field(default="launch", init=False)
 
 
@@ -38,7 +40,9 @@ class CompletionRecord:
             or stream closure/exhaustion, including paused stream consumption.
         stdout_bytes: Bytes actually captured/read, or None when unavailable.
         stderr_bytes: Bytes actually captured/read, or None when unavailable.
-        schema_version: Record schema version, currently 1.
+        attempt_id: Opaque identifier shared with the launch record.
+        return_code: Reaped local process status, or None if unavailable.
+        schema_version: Record schema version, currently 2.
         phase: Fixed completion discriminator.
     """
 
@@ -47,7 +51,9 @@ class CompletionRecord:
     duration_seconds: float
     stdout_bytes: int | None = None
     stderr_bytes: int | None = None
-    schema_version: Literal[1] = field(default=1, init=False)
+    attempt_id: str = field(kw_only=True)
+    return_code: int | None = field(default=None, kw_only=True)
+    schema_version: Literal[2] = field(default=2, init=False)
     phase: Literal["completion"] = field(default="completion", init=False)
 
 

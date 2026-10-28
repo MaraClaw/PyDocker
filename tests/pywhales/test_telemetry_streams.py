@@ -20,10 +20,12 @@ def command(records: list[TelemetryRecord], code: str) -> list[object]:
 
 
 def completion(records: list[TelemetryRecord]) -> CompletionRecord:
-    assert records[0] == LaunchRecord("stream")
+    assert isinstance(records[0], LaunchRecord)
+    assert records[0].family == "stream"
     assert len(records) == 2
     completed = records[1]
     assert isinstance(completed, CompletionRecord)
+    assert completed.attempt_id == records[0].attempt_id
     return completed
 
 
@@ -34,12 +36,13 @@ def test_stream_completes_on_exhaustion_not_when_child_exits() -> None:
     )
     try:
         assert stream._released.wait(timeout=3)
-        assert records == [LaunchRecord("stream")]
+        assert len(records) == 1 and isinstance(records[0], LaunchRecord)
 
         output = list(stream)
 
         assert sorted(output) == [("stderr", b"err"), ("stdout", b"\xff\n")]
         completed = completion(records)
+        assert completed.return_code == stream._process.returncode == 0
         assert (completed.outcome, completed.stdout_bytes, completed.stderr_bytes) == (
             "success",
             2,
@@ -65,6 +68,7 @@ def test_explicit_close_completes_idle_stream_once(consume: bool) -> None:
 
         assert list(stream) == []
         assert completion(records).outcome == "closed"
+        assert completion(records).return_code == stream._process.returncode
         assert stream._process.poll() is not None
         assert not stream._watchdog.is_alive()
         assert all(not thread.is_alive() for thread in stream._threads)
@@ -84,6 +88,7 @@ def test_natural_nonzero_exit_reports_failure_after_drain() -> None:
 
     assert raised.value.return_code == 7
     assert completion(records).outcome == "failure"
+    assert completion(records).return_code == stream._process.returncode == 7
 
 
 def test_close_keeps_recorded_timeout_outcome_and_exception() -> None:
@@ -98,6 +103,7 @@ def test_close_keeps_recorded_timeout_outcome_and_exception() -> None:
     with pytest.raises(DockerTimeout):
         next(stream)
     assert completion(records).outcome == "timeout"
+    assert completion(records).return_code == stream._process.returncode
     assert list(stream) == []
 
 
@@ -116,6 +122,7 @@ def test_close_keeps_recorded_buffer_failure_and_measured_read_count() -> None:
         next(stream)
     completed = completion(records)
     assert (completed.outcome, completed.stdout_bytes) == ("failure", 10)
+    assert completed.return_code == stream._process.returncode
 
 
 def test_throwing_observer_never_changes_original_stream_failure_or_confidentiality() -> (
@@ -142,6 +149,7 @@ def test_throwing_observer_never_changes_original_stream_failure_or_confidential
 
     assert raised.value.return_code == 7
     assert completion(records).outcome == "failure"
+    assert completion(records).return_code == stream._process.returncode == 7
     assert secret not in json.dumps([asdict(record) for record in records])
 
 
@@ -176,6 +184,82 @@ def test_concurrent_close_emits_one_completion() -> None:
         assert not closer.is_alive()
 
     assert completion(records).outcome == "closed"
+    assert completion(records).return_code == stream._process.returncode
+    assert stream._process.returncode is not None
+
+
+def test_close_and_read_race_after_watchdog_timeout_delivers_error_once() -> None:
+    records: list[TelemetryRecord] = []
+    stream = stream_stdout_and_stderr(
+        command(records, "input()"), pipe_stdin=True, timeout=0.1
+    )
+    assert stream._released.wait(timeout=3)
+    ready = Event()
+    errors: list[DockerTimeout] = []
+
+    def consume() -> None:
+        ready.wait()
+        try:
+            next(stream)
+        except DockerTimeout as error:
+            errors.append(error)
+
+    def close() -> None:
+        ready.wait()
+        stream.close()
+
+    workers = [Thread(target=consume), Thread(target=close)]
+    for worker in workers:
+        worker.start()
+    ready.set()
+    for worker in workers:
+        worker.join(timeout=3)
+        assert not worker.is_alive()
+    assert len(errors) == 1
+    assert list(stream) == []
+    assert completion(records).outcome == "timeout"
+    assert completion(records).return_code == stream._process.returncode
+
+
+def test_overlapping_streams_correlate_reverse_completion_with_reaped_status() -> None:
+    records: list[TelemetryRecord] = []
+    first = stream_stdout_and_stderr(
+        command(records, "input(); raise SystemExit(7)"), pipe_stdin=True
+    )
+    second = stream_stdout_and_stderr(
+        command(records, "input(); raise SystemExit(3)"), pipe_stdin=True
+    )
+    try:
+        assert first.stdin is not None and second.stdin is not None
+        second.stdin.write(b"go\n")
+        second.stdin.flush()
+        with pytest.raises(DockerException):
+            list(second)
+        first.stdin.write(b"go\n")
+        first.stdin.flush()
+        with pytest.raises(DockerException):
+            list(first)
+        launches = [record for record in records if isinstance(record, LaunchRecord)]
+        completed = [
+            record for record in records if isinstance(record, CompletionRecord)
+        ]
+        assert len(launches) == len(completed) == 2
+        assert launches[0].attempt_id != launches[1].attempt_id
+        assert [record.attempt_id for record in completed] == [
+            launches[1].attempt_id,
+            launches[0].attempt_id,
+        ]
+        assert (
+            [record.return_code for record in completed]
+            == [
+                second._process.returncode,
+                first._process.returncode,
+            ]
+            == [3, 7]
+        )
+    finally:
+        first.close()
+        second.close()
 
 
 def test_close_wins_pending_nonzero_completion(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -207,6 +291,7 @@ def test_close_wins_pending_nonzero_completion(monkeypatch: pytest.MonkeyPatch) 
         assert not consumer.is_alive()
         assert errors == []
         assert completion(records).outcome == "closed"
+        assert completion(records).return_code == stream._process.returncode == 7
     finally:
         resume.set()
         consumer.join(timeout=3)
@@ -224,6 +309,7 @@ def test_stream_spawn_failure_preserves_original_error() -> None:
 
     assert raised.value is original
     completed = completion(records)
+    assert completed.return_code is None
     assert (completed.outcome, completed.stdout_bytes, completed.stderr_bytes) == (
         "failure",
         None,

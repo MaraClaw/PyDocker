@@ -343,6 +343,7 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         if self._telemetry is not None and self._telemetry_outcome is not None:
             self._telemetry.stdout_bytes = self._read_bytes["stdout"]
             self._telemetry.stderr_bytes = self._read_bytes["stderr"]
+            self._telemetry.return_code = self._process.returncode
             self._telemetry.finish(self._telemetry_outcome)
 
     @override

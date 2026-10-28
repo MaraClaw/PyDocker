@@ -334,48 +334,53 @@ def run(
         else:
             telemetry.start()
             deadline = monotonic() + timeout
-            with Popen(
+            process = Popen(
                 args,
                 stdin=PIPE if input is not None else None,
                 stdout=stdout_dest,
                 stderr=stderr_dest,
                 env=subprocess_env,
                 pass_fds=pass_fds,
-            ) as process:
-                communicate_input = input
-                while True:
-                    try:
-                        # Bound OS waits without shortening the invocation's deadline.
-                        stdout, stderr = process.communicate(
-                            communicate_input,
-                            timeout=min(86400, max(0, deadline - monotonic())),
-                        )
-                    except subprocess.TimeoutExpired:
-                        communicate_input = None
-                        if monotonic() < deadline:
-                            continue
-                        timed_out = process.poll() is None
-                        if timed_out:
-                            process.kill()
+            )
+            try:
+                with process:
+                    communicate_input = input
+                    while True:
                         try:
-                            stdout, stderr = process.communicate(timeout=1)
-                        except subprocess.TimeoutExpired as captured:
-                            stdout, stderr = captured.output, captured.stderr
-                        process.wait()
-                        if timed_out:
-                            telemetry.captured(stdout, stderr)
-                            raise DockerTimeout(
-                                args,
-                                process.returncode,
-                                stdout,
-                                stderr,
-                                raw_diagnostics=policy.raw_diagnostics,
-                            ) from None
-                    break
-                completed_process = subprocess.CompletedProcess(
-                    args, process.returncode, stdout, stderr
-                )
+                            # Bound OS waits without shortening the invocation's deadline.
+                            stdout, stderr = process.communicate(
+                                communicate_input,
+                                timeout=min(86400, max(0, deadline - monotonic())),
+                            )
+                        except subprocess.TimeoutExpired:
+                            communicate_input = None
+                            if monotonic() < deadline:
+                                continue
+                            timed_out = process.poll() is None
+                            if timed_out:
+                                process.kill()
+                            try:
+                                stdout, stderr = process.communicate(timeout=1)
+                            except subprocess.TimeoutExpired as captured:
+                                stdout, stderr = captured.output, captured.stderr
+                            process.wait()
+                            if timed_out:
+                                telemetry.captured(stdout, stderr)
+                                raise DockerTimeout(
+                                    args,
+                                    process.returncode,
+                                    stdout,
+                                    stderr,
+                                    raw_diagnostics=policy.raw_diagnostics,
+                                ) from None
+                        break
+                    completed_process = subprocess.CompletedProcess(
+                        args, process.returncode, stdout, stderr
+                    )
+            finally:
+                telemetry.return_code = process.returncode
 
+        telemetry.return_code = completed_process.returncode
         telemetry.captured(completed_process.stdout, completed_process.stderr)
         if completed_process.returncode != 0:
             exception_type = get_docker_exception_type(completed_process.stderr)

@@ -350,6 +350,44 @@ def test_push_empty_list_of_services() -> None:
     docker.compose.push([])
 
 
+@patch("pywhales.components.compose.cli_wrapper.run")
+@pytest.mark.parametrize("timeout", [None, 2.5])
+def test_pull_forwards_timeout_to_both_modes(
+    run_mock: Mock, timeout: float | None
+) -> None:
+    client = DockerClient(client_call=[sys.executable])
+    run_mock.return_value = ""
+
+    client.compose.pull("web", quiet=True, timeout=timeout)
+
+    run_mock.assert_called_once()
+    assert run_mock.call_args.kwargs["timeout"] == timeout
+
+
+@patch("pywhales.components.compose.cli_wrapper.run")
+def test_pull_empty_services_skips_launch_regardless_of_timeout(
+    run_mock: Mock,
+) -> None:
+    client = DockerClient(client_call=[sys.executable])
+
+    assert client.compose.pull([], timeout=2.5) is None
+
+    run_mock.assert_not_called()
+
+
+@patch("pywhales.components.compose.cli_wrapper.run")
+@pytest.mark.parametrize("timeout", [0.0, -1.0, float("nan"), True])
+def test_pull_invalid_timeout_precedes_service_selection(
+    run_mock: Mock, timeout: float
+) -> None:
+    client = DockerClient(client_call=[sys.executable])
+
+    with pytest.raises(ValueError):
+        client.compose.pull([], timeout=timeout)
+
+    run_mock.assert_not_called()
+
+
 def test_compose_project_name() -> None:
     docker = DockerClient(
         compose_files=[PROJECT_ROOT / "tests/pywhales/components/dummy_compose.yml"],

@@ -23,8 +23,7 @@
   before stringifying argv. Each launch snapshots the current policy; later mutations affect new launches only.
 - Compose globals belong after `compose` and before the subcommand. Use `get_compose_command()`;
   its explicit `progress` argument overrides configured progress for that call only.
-- Nonempty `compose_env_files` wins over deprecated `compose_env_file`, warning if both are set.
-  Preserve file order and repeated `--env-file` arguments; later files override earlier values.
+- Preserve `compose_env_files` order and repeated `--env-file` arguments; later files override earlier values.
 
 ## Resource Identity And Models
 
@@ -92,7 +91,7 @@
 
 ## Related Tests
 
-- `tests/pywhales/test_client_config.py`: env-file precedence, originating config, and safe/raw inspect parsing.
+- `tests/pywhales/test_client_config.py`: env-file ordering, originating config, and safe/raw inspect parsing.
 - `tests/pywhales/test_bulk_reload.py`: all supported kinds, grouping, validation, and deferred publication.
 - `tests/pywhales/test_inspect_diagnostics.py` and `tests/pywhales/test_logging.py`: safe/raw boundaries and command-copy isolation.
 - `tests/pywhales/test_compose_modernization.py`: `test_globals_precede_subcommand_when_explicit`.

@@ -150,7 +150,7 @@ def test_constructor_forwards_globals_when_given(command: Mock) -> None:
     ]
 
 
-def test_constructor_retains_existing_positional_slots() -> None:
+def test_constructor_accepts_current_positional_slots() -> None:
     project = DockerClient(
         "config",
         "context",
@@ -165,12 +165,10 @@ def test_constructor_retains_existing_positional_slots() -> None:
         None,
         ["compose.yml"],
         ["dev"],
-        None,
         ["dev.env"],
         "project",
         ".",
         True,
-        "docker",
         ["docker-test", "--custom-wrapper"],
         "docker",
     )

@@ -7,7 +7,6 @@ operations require their corresponding external CLI support when invoked.
 
 import base64
 import json
-import warnings
 from collections.abc import Mapping, Sequence
 from typing import Annotated
 
@@ -142,12 +141,10 @@ class DockerClient(DockerCLICaller):
         client_config: ClientConfig | None = None,
         compose_files: Sequence[ValidPath] = (),
         compose_profiles: Sequence[str] = (),
-        compose_env_file: ValidPath | None = None,
         compose_env_files: Sequence[ValidPath] = (),
         compose_project_name: str | None = None,
         compose_project_directory: ValidPath | None = None,
         compose_compatibility: bool | None = None,
-        client_binary: str = "docker",
         client_call: Sequence[str] = ("docker",),
         client_type: ClientTypeInput = "unknown",
         *,
@@ -164,8 +161,7 @@ class DockerClient(DockerCLICaller):
 
         When client_config is supplied, retain it unchanged rather than applying
         the other configuration arguments. Otherwise construct a shared config
-        from these arguments. A nondefault client_binary still emits its
-        deprecation warning before this choice.
+        from these arguments.
 
         Args:
             config: Client configuration directory; ``None`` leaves CLI defaults.
@@ -183,16 +179,11 @@ class DockerClient(DockerCLICaller):
             compose_files: Ordered Compose files; empty input leaves selection
                 to the CLI.
             compose_profiles: Profiles enabled through repeated Compose options.
-            compose_env_file: Deprecated single environment file; ignored with
-                a warning when compose_env_files is nonempty.
-            compose_env_files: Ordered environment files. Nonempty input takes
-                precedence over compose_env_file; later files override earlier
-                values according to Compose semantics.
+            compose_env_files: Ordered environment files; later files override
+                earlier values according to Compose semantics.
             compose_project_name: Project-name override for Compose resources.
             compose_project_directory: Compose project-directory override.
             compose_compatibility: Emit Compose compatibility mode only when true.
-            client_binary: Deprecated executable selection. A value other than
-                ``docker`` warns and replaces client_call with that executable.
             client_call: Nonempty executable prefix, optionally including fixed
                 arguments. Defaults to ``docker`` and is resolved lazily.
                 Alternate clients must support the commands and output consumed.
@@ -228,14 +219,6 @@ class DockerClient(DockerCLICaller):
             TypeError: If a newly created config's environment is not a mapping
                 of string keys to string values.
         """
-        if client_binary != "docker":
-            warnings.warn(
-                "The usage of client_binary is deprecated, use `client_call` instead. For "
-                "example if you used `client_binary='docker'`, now you should use `client_call=['docker']`.",
-                stacklevel=2,
-            )
-            client_call = [client_binary]
-
         if client_config is None:
             client_config = ClientConfig(
                 config=config,
@@ -250,7 +233,6 @@ class DockerClient(DockerCLICaller):
                 tlsverify=tlsverify,
                 compose_files=list(compose_files),
                 compose_profiles=list(compose_profiles),
-                compose_env_file=compose_env_file,
                 compose_env_files=list(compose_env_files),
                 compose_project_name=compose_project_name,
                 compose_project_directory=compose_project_directory,

@@ -2,12 +2,16 @@
 
 import json
 import os
+import selectors
 import subprocess
+import tempfile
+import time
 from dataclasses import dataclass
 from typing import Protocol, override
 
 from pydantic import BaseModel, JsonValue, TypeAdapter
 
+from . import limits
 from .models import Repository
 
 
@@ -79,19 +83,71 @@ class Curl:
                 "--data-binary",
                 "@-",
             ]
-        try:
-            result = subprocess.run(
-                [*command, url],
-                input=body,
-                capture_output=True,
-                check=False,
-                timeout=130,
-            )
-        except subprocess.TimeoutExpired:
-            raise Rejected("HTTP transport timed out") from None
-        require(result.returncode == 0, "HTTP transport failed")
-        content, status = result.stdout.rsplit(b"\n", 1)
-        return Response(int(status), content)
+        return self.receive([*command, url], body)
+
+    def receive(self, command: list[str], body: bytes | None) -> Response:
+        """Drain stdout incrementally; discard stderr without buffering it.
+
+        The four-byte curl status suffix has a separate framing allowance.
+        Aborted receipt always kills and reaps the owned process, including on
+        deadline expiry or exceptions. No command or stderr enters errors.
+        """
+        deadline = time.monotonic() + 130
+        output = bytearray()
+        # A file avoids blocking on a child that stops reading request stdin.
+        with tempfile.TemporaryFile() as incoming:
+            if body is not None:
+                incoming.write(body)
+                incoming.seek(0)
+            try:
+                with subprocess.Popen(
+                    command,
+                    stdin=incoming,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                ) as process:
+                    try:
+                        assert process.stdout is not None
+                        with selectors.DefaultSelector() as selector:
+                            selector.register(process.stdout, selectors.EVENT_READ)
+                            while selector.get_map():
+                                remaining = deadline - time.monotonic()
+                                require(remaining > 0, "HTTP transport timed out")
+                                require(
+                                    bool(selector.select(remaining)),
+                                    "HTTP transport timed out",
+                                )
+                                capacity = limits.RESPONSE_BYTES + 4 - len(output)
+                                data = os.read(
+                                    process.stdout.fileno(),
+                                    min(limits.CHUNK_BYTES, capacity + 1),
+                                )
+                                require(
+                                    len(data) <= capacity,
+                                    "HTTP response byte budget exceeded",
+                                )
+                                if data:
+                                    output.extend(data)
+                                else:
+                                    selector.unregister(process.stdout)
+                        require(
+                            process.wait(timeout=max(0, deadline - time.monotonic()))
+                            == 0,
+                            "HTTP transport failed",
+                        )
+                    finally:
+                        if process.returncode is None:
+                            process.kill()
+                            process.wait()
+            except subprocess.TimeoutExpired:
+                raise Rejected("HTTP transport timed out") from None
+            except OSError:
+                raise Rejected("HTTP transport failed") from None
+        require(
+            len(output) >= 4 and output[-4] == 10 and output[-3:].isdigit(),
+            "HTTP transport invalid status",
+        )
+        return Response(int(output[-3:]), bytes(output[:-4]))
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,9 +162,10 @@ class GitHub:
         self, path: str, body: bytes | None = None, *, method: str | None = None
     ) -> Response:
         """Request one repository endpoint."""
+        suffix = f"/{path}" if path else ""
         return self.transport.request(
             method or ("GET" if body is None else "POST"),
-            f"https://api.github.com/repos/{self.repository}/{path}",
+            f"https://api.github.com/repos/{self.repository}{suffix}",
             body,
         )
 

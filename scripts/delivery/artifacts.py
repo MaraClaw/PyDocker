@@ -1,12 +1,12 @@
 """Verify archive digests before safe data-only ZIP inspection and extraction."""
 
 import hashlib
-import io
-import stat
-import zipfile
-from pathlib import Path, PurePosixPath
+import tempfile
+from pathlib import Path
 
+from . import limits
 from .api import GitHub, require
+from .archives import safe_path, zip_files
 from .models import Artifact, Artifacts, Bundle, Job, Run
 
 
@@ -63,27 +63,13 @@ def download(api: GitHub, artifact: Artifact) -> dict[str, bytes]:
     response = api.response(f"actions/artifacts/{artifact.id}/zip")
     require(response.status == 200, "artifact download failed")
     require(
+        len(response.body) <= limits.RESPONSE_BYTES,
+        "artifact input byte budget exceeded",
+    )
+    require(
         f"sha256:{sha256(response.body)}" == artifact.digest, "archive digest mismatch"
     )
-    files: dict[str, bytes] = {}
-    with zipfile.ZipFile(io.BytesIO(response.body)) as archive:
-        for entry in archive.infolist():
-            path = PurePosixPath(entry.filename)
-            require(
-                bool(path.parts)
-                and not path.is_absolute()
-                and all(part not in {"..", ".git", ".github"} for part in path.parts)
-                and "\\" not in entry.filename
-                and ":" not in entry.filename
-                and str(path) == entry.filename.rstrip("/"),
-                "unsafe archive path",
-            )
-            mode = stat.S_IFMT(entry.external_attr >> 16)
-            require(mode in {0, stat.S_IFREG, stat.S_IFDIR}, "archive special file")
-            if entry.is_dir():
-                continue
-            require(entry.filename not in files, "duplicate archive path")
-            files[entry.filename] = archive.read(entry)
+    files = zip_files(response.body, limits.ARTIFACT)
     require(bool(files), "empty artifact")
     return files
 
@@ -108,9 +94,26 @@ def verified(api: GitHub, artifact: Artifact, expected: Bundle) -> dict[str, byt
 
 
 def extract(files: dict[str, bytes], destination: Path) -> None:
-    """Write previously validated regular files into a fresh owned directory."""
-    destination.mkdir(parents=True, exist_ok=False)
+    """Stage validated regular files; a rejected extraction publishes nothing."""
+    require(not destination.exists(), "extraction destination exists")
+    require(len(files) <= limits.ARTIFACT.entries, "archive entry budget exceeded")
+    require(
+        sum(map(len, files.values())) <= limits.ARTIFACT.expanded_bytes,
+        "archive byte budget exceeded",
+    )
     for name, content in files.items():
-        target = destination / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content)
+        safe_path(name)
+        require(
+            len(content) <= limits.ARTIFACT.member_bytes, "archive byte budget exceeded"
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=".delivery-", dir=destination.parent
+    ) as temporary:
+        staged = Path(temporary) / "files"
+        staged.mkdir()
+        for name, content in files.items():
+            target = staged / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+        staged.rename(destination)

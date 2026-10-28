@@ -195,6 +195,10 @@ def test_deadline_summary_round_trips_and_is_generation_fenced() -> None:
         "non_running_tasks": 2,
         "invalid_task_shape": 1,
         "ongoing_updates": 2,
+        "missing_ready_nodes": 0,
+        "duplicate_node_assignments": 0,
+        "missing_node_assignments": 0,
+        "outside_approved_nodes": 0,
     }
     stale = store.claim(published, LeaseRequest("worker-a", 5))
     clock.now += 5

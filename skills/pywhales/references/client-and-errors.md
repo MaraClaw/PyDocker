@@ -18,7 +18,8 @@ CLI lookup is deferred until a command needs it.
 from pywhales import docker
 
 version = docker.version()
-print(version.client.version)
+if version.client is not None:
+    print(version.client.version)
 ```
 
 `docker` is a ready-made `DockerClient(client_type="docker")`. For a separate
@@ -39,6 +40,36 @@ Keep Compose globals on its client: `compose_files`, `compose_profiles`,
 `compose_project_name`, `compose_project_directory`, and `compose_env_files`.
 Environment files are applied in order, with later files overriding earlier ones.
 
+`environment={"KEY": "value"}` overlays entries on top of the inherited process
+environment for every launch from that client; omitting it (`None`) inherits
+the process environment unchanged. This does not affect executable lookup or
+the parent Python process's own environment.
+
+If passing an existing `client_config=...`, configure that object directly:
+the constructor retains it unchanged and ignores the other constructor options.
+
+## Default CLI Deadlines
+
+`DockerClient(default_timeout=30)` applies a 30-second deadline to each local
+CLI launch from that client. The default is `None`, which leaves launches
+unbounded. Where a method accepts its own `timeout`, `None` inherits the
+client default and a positive finite explicit value replaces it for the selected
+launch(es) only. Booleans, zero, negatives, and nonfinite values are invalid;
+`None` doesn't disable a configured default. This isn't a whole-operation budget:
+preflight inspection, implicit image pulls, and postflight inspection are separate
+launches governed by their own settings. Inherited defaults are snapshotted at
+each launch, including lazy archive generators and queued transfers.
+
+Expiry kills and reaps the local CLI and raises `DockerTimeout`, a subclass of
+`DockerException` with the same `docker_command`/`return_code`/`stdout`/`stderr`
+attributes. This happens even while archive consumption is paused or a producer
+is blocked; arbitrary Python iterator code itself cannot be interrupted, so the
+timeout is only reported when the caller's code resumes. It does not guarantee
+daemon-side cancellation or rollback. See
+[Containers, output, and lifecycle](containers-and-output.md) and
+[Registry transfers and archives](registry-and-archives.md) for which methods
+accept a per-call `timeout`.
+
 ## Handle the Right Failure
 
 ```python
@@ -52,14 +83,17 @@ except DockerException as error:
     print(f"Docker command failed with exit code {error.return_code}")
     raise
 else:
-    print(version.client.version)
+    if version.client is not None:
+        print(version.client.version)
 ```
 
 `ClientNotFoundError` is separate from `DockerException`. The latter represents
-a nonzero CLI exit and exposes `docker_command: list[str]`, `return_code: int`,
+a CLI failure (including local deadline expiry) and exposes
+`docker_command: list[str]`, `return_code: int`,
 and `stdout`/`stderr` as `str | None`. Output can be `None` when it wasn't
-captured. More specific errors, such as `NoSuchContainer` and `NoSuchImage`,
-are imported from `pywhales.exceptions`.
+captured. More specific errors, such as `NoSuchContainer`, `NoSuchImage`, and
+`DockerTimeout` (a local CLI deadline expiry, not a daemon-side timeout), are
+imported from `pywhales.exceptions`.
 
 Use the exit code and relevant, redacted output to distinguish daemon access,
 missing resources, registry authentication, and unsupported plugin flags.
@@ -67,7 +101,10 @@ Don't retry a mutating command just because it failed. Invalid Python arguments
 may raise `TypeError` or `ValueError` before a subprocess is started.
 
 For registry login, `docker.login(server=..., username=..., password=...)`
-passes the password through stdin. Obtain credentials from the application's
+passes the password through stdin, always requesting `--password-stdin`.
+Omitting `password` (`None`) still requests `--password-stdin` but inherits
+the caller's own stdin instead of writing a value; pass an explicit password
+when running non-interactively. Obtain credentials from the application's
 existing secret mechanism; don't embed them in generated examples or reports.
 
 ## Troubleshooting Without Credential Leaks
@@ -84,3 +121,9 @@ policy.
 If an argument is rejected, inspect that method in the installed package before
 changing versions or guessing SDK-style names. New Compose flags are forwarded
 to the plugin without a compatibility probe or automatic fallback.
+
+For opt-in sanitized execution telemetry or application-owned concurrency
+limits around specific calls, see
+[Telemetry and admission](telemetry-and-admission.md). For bounding batch
+inspection or waiting for Swarm convergence, see
+[Observation budgets and convergence](observation-and-convergence.md).

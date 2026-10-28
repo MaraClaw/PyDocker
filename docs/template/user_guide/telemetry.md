@@ -26,12 +26,19 @@ from that client retain the policy through ordinary list composition, shallow
 copy, and deep copy. A supplied `client_config` takes precedence over constructor
 settings, including `telemetry_observer`.
 
-## Version 2 schema and confidentiality
+## Version 3 schema and confidentiality
 
-The vocabulary is closed. `schema_version` is `2`; `phase` is `launch` or
-`completion`; `family` is `captured` or `stream`. Family describes the shared
-execution path, not an operation inferred from argv. Completion `outcome` is
-exactly one of `success`, `failure`, `timeout`, or `closed`.
+The vocabulary is closed. `schema_version` is `3`; `phase` is `launch` or
+`completion`; `family` is `captured`, `stream`, `archive_load`, or
+`archive_save`. Family describes the shared execution path, not an operation
+inferred from argv. `archive_load`/`archive_save` cover only the filename-free
+binary transfer paths: `image.load()` given bytes or a byte iterable, and
+`image.save()` with no `output` path. Filename-based `--input`/`--output`
+transfers still use the existing `captured`/`stream` paths, not a separate
+family. `image.save()`'s archive path returns a lazy generator; if it's
+discarded unconsumed, its body never runs and no launch or completion record is
+emitted at all. Completion `outcome` is exactly one of `success`, `failure`,
+`timeout`, or `closed`.
 Each launch attempt has an opaque random `attempt_id`, shared with its completion;
 it carries no command, endpoint, credential, PID, or remote-operation meaning.
 
@@ -46,11 +53,13 @@ Launch is emitted immediately before an attempted local spawn, after shared
 preflight validation. It does not prove that spawn succeeded. A spawn failure has
 a failure completion with unavailable byte counts; rejection before the launch
 seam emits neither record. The shared `run()` and process-stream factories are
-covered. Separate direct subprocess paths, including image archive load/save,
-are not covered; this is not a complete audit of every Docker invocation.
+covered, as are the direct binary subprocesses behind `archive_load` and
+`archive_save`. Other direct subprocess paths may remain uncovered; this is not
+a complete audit of every Docker invocation.
 
-Completion adds `duration_seconds`, `stdout_bytes`, and `stderr_bytes`. Duration
-uses a monotonic clock, starting after the launch callback returns and ending
+Completion adds `duration_seconds`, `stdout_bytes`, `stderr_bytes`, and
+`stdin_bytes`. Duration uses a monotonic clock, starting after the launch
+callback returns and ending
 before completion delivery. It includes local spawn, execution and cleanup; for
 streams it also includes consumer pauses until exhaustion, failure delivery, or
 close. It is not admission queue wait, Docker daemon task duration, rollout
@@ -61,12 +70,20 @@ spawn). It does not describe daemon-side work.
 
 Counts measure raw bytes captured or read from each local pipe, before decoding,
 newline removal, or application transforms. They include read bytes discarded by
-a stream close or response/buffer limit. They can be partial on timeout, failure,
-or early closure and do not assert how much the child or remote workload wrote.
-A pipe that was read but produced no bytes reports `0`; inherited/uncaptured
-output or an unavailable capture reports `None`, never a fabricated zero. Launch
-records have no duration or byte-count fields because those measurements aren't
-available yet.
+a stream close or response/buffer limit, plus any bytes a background watchdog
+thread drains in a single final pass after killing an expired or closed child.
+They can be partial on timeout, failure, or early closure and do not assert how
+much the child or remote workload wrote. A pipe that was read but produced no
+bytes reports `0`; inherited/uncaptured output or an unavailable capture reports
+`None`, never a fabricated zero. Totals publish only after local process and
+accounting-thread cleanup finishes, not at the instant of timeout or closure.
+
+`stdin_bytes` measures bytes accepted by successful writes to the child's
+stdin, including partial progress retained before a failure or timeout. It is
+`None` when no input was supplied (stdin unused or unobserved) and `0` when
+input was supplied but nothing was written yet. It never measures bytes the
+child or the remote Docker daemon actually consumed. Launch records have no
+duration or byte-count fields because those measurements aren't available yet.
 
 ## Stream completion and observer behavior
 

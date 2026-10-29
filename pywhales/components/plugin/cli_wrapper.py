@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import builtins
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from types import MappingProxyType, TracebackType
 from typing import Self, overload, override
 
@@ -320,19 +320,20 @@ class PluginCLI(DockerCLICaller):
         run(full_cmd, timeout=timeout)
 
     def remove(
-        self, x: ValidPlugin | Sequence[ValidPlugin], force: bool = False
+        self, x: ValidPlugin | Iterable[ValidPlugin], force: bool = False
     ) -> None:
         """Remove one or more plugins.
 
         Args:
-            x: Plugin names, IDs, or handles. An empty list is a no-op.
+            x: Plugin names, IDs, or handles. An empty selection is a no-op.
             force: Force the removal of this plugin.
         """
+        plugins = to_list(x)
+        if not plugins:
+            return
         full_cmd = Command([*self.docker_cmd, "plugin", "remove"])
         full_cmd.add_flag("--force", force)
-        if x == []:
-            return
-        full_cmd += to_list(x)
+        full_cmd += plugins
         run(full_cmd)
 
     def set(self, plugin: ValidPlugin, configuration: dict[str, str]) -> None:

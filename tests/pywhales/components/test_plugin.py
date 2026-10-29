@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
@@ -163,3 +164,47 @@ def test_plugin_push_invalid_timeout_precedes_launch(timeout: float) -> None:
         client.plugin.push(test_plugin_name, timeout=timeout)
 
     mock_run.assert_not_called()
+
+
+EMPTY_SELECTIONS = [
+    pytest.param(list, id="list"),
+    pytest.param(tuple, id="tuple"),
+    pytest.param(lambda: (item for item in ()), id="generator"),
+]
+SINGLE_SELECTIONS = [
+    pytest.param(lambda: "alpha", id="str"),
+    pytest.param(lambda: ["alpha"], id="list"),
+    pytest.param(lambda: (item for item in ["alpha"]), id="generator"),
+]
+
+
+@pytest.mark.parametrize("make_empty", EMPTY_SELECTIONS)
+def test_plugin_remove_empty_selection_skips_cli(
+    make_empty: Callable[[], Iterable[str]],
+) -> None:
+    client = DockerClient(client_call=["not-installed"])
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch("subprocess.run", side_effect=AssertionError("subprocess")),
+    ):
+        client.plugin.remove(make_empty(), force=True)
+
+
+@pytest.mark.parametrize("make_selection", SINGLE_SELECTIONS)
+def test_plugin_remove_single_selection_builds_argv_once(
+    make_selection: Callable[[], str | Iterable[str]],
+) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    with patch(
+        "subprocess.run", return_value=CompletedProcess([], 0, b"", b"")
+    ) as command:
+        client.plugin.remove(make_selection(), force=True)
+    command.assert_called_once()
+    assert command.call_args.args[0] == [
+        "docker-test",
+        "plugin",
+        "remove",
+        "--force",
+        "alpha",
+    ]

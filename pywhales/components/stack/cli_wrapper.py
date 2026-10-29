@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import builtins
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
 from typing import override
@@ -145,15 +145,16 @@ class StackCLI(DockerCLICaller):
             for id_ in ids
         ]
 
-    def remove(self, x: ValidStack | Sequence[ValidStack]) -> None:
+    def remove(self, x: ValidStack | Iterable[ValidStack]) -> None:
         """Remove one or more stacks.
 
         Args:
-            x: One or more stacks, empty list means nothing will be done.
+            x: One or more stacks, an empty selection means nothing will be done.
         """
-        if x == []:
+        stacks = to_list(x)
+        if not stacks:
             return
-        full_cmd = Command([*self.docker_cmd, "stack", "remove", *to_list(x)])
+        full_cmd = Command([*self.docker_cmd, "stack", "remove", *stacks])
         run(full_cmd)
 
     def services(

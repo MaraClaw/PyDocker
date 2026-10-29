@@ -31,6 +31,10 @@ release or deployment operations locally against the production repository.
    skipped or concurrent upload can yield a receipt only if a fresh destination
    inventory confirms both exact distributions. Unexpected/conflicting files
    fail closed. A matching import or version string is not publication evidence.
+   If files are missing, `confirm` rechecks the full inventory up to 12 times,
+   five seconds apart, to allow for PyPI visibility delays. Conflicting,
+   invalid or malformed responses still fail immediately. Exhaustion reports
+   the filenames still missing and does not issue a receipt.
 5. The receipt embeds the complete seal, seal-artifact identity/content hashes,
    publisher identity and explicit destination confirmation. A successful
    publisher run with no receipt, or a skipped publishing job, cannot release.
@@ -71,9 +75,11 @@ when that proof is missing. Artifact retention is GitHub's repository default;
 expired artifacts require a new complete tested chain, not a rebuild downstream.
 
 The publisher serializes publication, and Pages serializes deployments, without
-cancelling an in-progress delivery. Retry an incomplete publication after PyPI's
-inventory exposes successfully uploaded files. No credentials are passed to
-downloaded artifacts, and privileged checkouts always use `github.workflow_sha`.
+cancelling an in-progress delivery. Confirmation allows up to 60 seconds of
+polling waits, in addition to request time. If visibility takes longer, retry
+after PyPI's inventory exposes successfully uploaded files. No credentials are
+passed to downloaded artifacts, and privileged checkouts always use
+`github.workflow_sha`.
 
 ## Executable Local Checks
 

@@ -7,6 +7,7 @@ import json
 import os
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType, TracebackType
@@ -22,6 +23,7 @@ from pydantic import JsonValue
 import pywhales.components.buildx.cli_wrapper
 import pywhales.components.container.cli_wrapper
 import pywhales.components.image.cli_wrapper
+from pywhales._execution_policy import execution_timeout
 from pywhales.client_config import (
     ClientConfig,
     Command,
@@ -32,9 +34,15 @@ from pywhales.client_config import (
 from pywhales.components._cleanup import resource_cleanup
 from pywhales.components.volume.models import VolumeInspectResult
 from pywhales.enums import ResourceScope, ResourceScopeInput
-from pywhales.exceptions import NoSuchVolume
+from pywhales.exceptions import NoSuchContainer, NoSuchImage, NoSuchVolume
 from pywhales.test_utils import random_name
-from pywhales.utils import ValidPath, custom_parse_object_as, run, to_list
+from pywhales.utils import (
+    ValidPath,
+    custom_parse_object_as,
+    run,
+    to_list,
+    validate_timeout,
+)
 
 type VolumeListFilter = (
     tuple[Literal["driver"], str]
@@ -133,6 +141,8 @@ class Volume(ReloadableObjectFromJson[VolumeInspectResult]):
         driver: str | None = None,
         labels: Mapping[str, str] = MappingProxyType({}),
         options: Mapping[str, str] = MappingProxyType({}),
+        *,
+        timeout: float | None = None,
     ) -> Volume:
         """Copy this volume's contents into a new or existing destination volume.
 
@@ -140,7 +150,7 @@ class Volume(ReloadableObjectFromJson[VolumeInspectResult]):
         information about the arguments.
         """
         return VolumeCLI(self.client_config).clone(
-            self, new_volume_name, driver, labels, options
+            self, new_volume_name, driver, labels, options, timeout=timeout
         )
 
     def exists(self) -> bool:
@@ -315,12 +325,14 @@ class VolumeCLI(DockerCLICaller):
         driver: str | None = None,
         labels: Mapping[str, str] = MappingProxyType({}),
         options: Mapping[str, str] = MappingProxyType({}),
+        *,
+        timeout: float | None = None,
     ) -> Volume:
         """Copy a volume's data into a newly created or existing named volume.
 
         Data passes through a temporary directory on the Python host using two
         copy operations. Buildx and the selected Docker daemon are required.
-        A copy failure does not remove the destination volume.
+        A failure does not remove the destination volume.
 
         Args:
             source: Source volume name or handle.
@@ -328,27 +340,39 @@ class VolumeCLI(DockerCLICaller):
             driver: Destination volume driver, or None to use Docker's default.
             labels: Destination metadata labels; the default adds none.
             options: Destination driver options; the default adds none.
+            timeout: Positive finite seconds per local CLI launch across the
+                destination creation and inspection and both copies, or `None`
+                to inherit the configured default. Validated before any launch.
 
         Returns:
             The destination volume handle after both copies complete.
+
+        Raises:
+            ValueError: `timeout` is not positive and finite.
+            DockerTimeout: A local CLI launch exceeds its deadline.
         """
-        new_volume = self.create(new_volume_name, driver, labels, options)
-        with tempfile.TemporaryDirectory() as temp_dir:
-            self.copy((source, "."), temp_dir)
-            self.copy(str(temp_dir) + "/.", (new_volume, ""))
+        validate_timeout(timeout)
+        with execution_timeout(self.client_config, timeout):
+            new_volume = self.create(new_volume_name, driver, labels, options)
+            with tempfile.TemporaryDirectory() as temp_dir:
+                self.copy((source, "."), temp_dir, timeout=timeout)
+                self.copy(str(temp_dir) + "/.", (new_volume, ""), timeout=timeout)
         return new_volume
 
     def copy(
         self,
         source: ValidPath | VolumePath,
         destination: ValidPath | VolumePath,
+        *,
+        timeout: float | None = None,
     ) -> None:
         """Copy files/folders between a volume and the local filesystem.
 
         This builds a temporary image with Buildx and creates a container mounting
-        the volume. The helper container and image are removed after a successful
-        copy; failures can leave them behind. Use one volume endpoint and one
-        local endpoint, with the local path resolved on the Python host.
+        the volume. The helper container and image are removed on success and on
+        failure; if removal also fails, both errors are kept in a
+        `BaseExceptionGroup`. Use one volume endpoint and one local endpoint,
+        with the local path resolved on the Python host.
 
         Args:
             source: If `source` is a directory/file inside a Docker volume,
@@ -358,57 +382,100 @@ class VolumeCLI(DockerCLICaller):
                 a `pathlib.Path` or `str` should be provided. End the source path with
                 `/.` if you want to copy the directory content in another directory.
             destination: Destination path, using the same endpoint notation.
+            timeout: Positive finite seconds per local CLI launch across the
+                image build, helper container creation, copy, and removals, or
+                `None` to inherit the configured default. Validated before any
+                launch.
 
         Raises:
-            ValueError: If neither endpoint is a volume/path tuple.
+            ValueError: If neither endpoint is a volume/path tuple, or `timeout`
+                is not positive and finite.
+            DockerTimeout: A local CLI launch exceeds its deadline.
         """
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_dir = Path(temp_dir)
-            content = "FROM scratch\nCOPY Dockerfile /\nCMD /Dockerfile"
-            (temp_dir / "Dockerfile").write_text(content)
-            buildx = pywhales.components.buildx.cli_wrapper.BuildxCLI(
-                self.client_config
-            )
-            image_name = random_name()
-            dummy_image = buildx.build(
-                temp_dir, tags=image_name, progress=False, load=True
-            )
-            assert isinstance(dummy_image, pywhales.components.image.cli_wrapper.Image)
-
-        container = pywhales.components.container.cli_wrapper.ContainerCLI(
-            self.client_config
-        )
-        volume_in_container = Path("/volume")
+        validate_timeout(timeout)
         if isinstance(source, tuple):
             volume_name = str(source[0])
-
-            dummy_container = container.create(
-                dummy_image, volumes=[(volume_name, volume_in_container)]
-            )
-            target = (
-                (str(destination[0]), destination[1])
-                if isinstance(destination, tuple)
-                else destination
-            )
-            container.copy(
-                (dummy_container, os.path.join(volume_in_container, source[1])),
-                target,
-            )
         elif isinstance(destination, tuple):
             volume_name = str(destination[0])
-            dummy_container = container.create(
-                dummy_image, volumes=[(volume_name, volume_in_container)]
-            )
-            container.copy(
-                source,
-                (dummy_container, os.path.join(volume_in_container, destination[1])),
-            )
         else:
             raise ValueError("source or destination should be a tuple.")
-        dummy_container.remove()
-        pywhales.components.image.cli_wrapper.ImageCLI(self.client_config).remove(
-            image_name
+
+        images = pywhales.components.image.cli_wrapper.ImageCLI(self.client_config)
+        containers = pywhales.components.container.cli_wrapper.ContainerCLI(
+            self.client_config
         )
+        buildx = pywhales.components.buildx.cli_wrapper.BuildxCLI(self.client_config)
+        image_name = random_name()
+        container_name = random_name()
+        volume_in_container = Path("/volume")
+        failure: BaseException | None = None
+        with execution_timeout(self.client_config, timeout):
+            try:
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    temp_dir = Path(temp_dir)
+                    content = "FROM scratch\nCOPY Dockerfile /\nCMD /Dockerfile"
+                    (temp_dir / "Dockerfile").write_text(content)
+                    dummy_image = buildx.build(
+                        temp_dir,
+                        tags=image_name,
+                        progress=False,
+                        load=True,
+                        timeout=timeout,
+                    )
+                assert isinstance(
+                    dummy_image, pywhales.components.image.cli_wrapper.Image
+                )
+                try:
+                    dummy_container = containers.create(
+                        dummy_image,
+                        name=container_name,
+                        volumes=[(volume_name, volume_in_container)],
+                    )
+                    if isinstance(source, tuple):
+                        target = (
+                            (str(destination[0]), destination[1])
+                            if isinstance(destination, tuple)
+                            else destination
+                        )
+                        containers.copy(
+                            (
+                                dummy_container,
+                                os.path.join(volume_in_container, source[1]),
+                            ),
+                            target,
+                            timeout=timeout,
+                        )
+                    elif isinstance(destination, tuple):
+                        containers.copy(
+                            source,
+                            (
+                                dummy_container,
+                                os.path.join(volume_in_container, destination[1]),
+                            ),
+                            timeout=timeout,
+                        )
+                except BaseException as error:
+                    failure = error
+                    raise
+                finally:
+                    with (
+                        resource_cleanup(
+                            failure, "Volume copy and helper container cleanup failed"
+                        ),
+                        suppress(NoSuchContainer),
+                    ):
+                        containers.remove(container_name)
+            except BaseException as error:
+                failure = error
+                raise
+            finally:
+                with (
+                    resource_cleanup(
+                        failure, "Volume copy and helper image cleanup failed"
+                    ),
+                    suppress(NoSuchImage),
+                ):
+                    images.remove(image_name)
 
 
 VolumeDefinition = (

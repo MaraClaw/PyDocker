@@ -1,4 +1,6 @@
 import json
+import sys
+import threading
 from collections.abc import Mapping, Sequence
 from inspect import Parameter, signature
 from pathlib import Path
@@ -9,6 +11,12 @@ import pytest
 from pytest_mock import MockerFixture
 
 from pywhales import Container, DockerClient, Image
+from pywhales._execution_policy import (
+    PolicyExecutable,
+    execution_timeout,
+    get_execution_policy,
+)
+from pywhales.client_config import ClientConfig
 from pywhales.components.buildx import cli_wrapper as buildx
 from pywhales.components.compose import cli_wrapper as compose
 from pywhales.components.container import cli_wrapper as container
@@ -19,6 +27,7 @@ from pywhales.components.plugin.cli_wrapper import Plugin
 from pywhales.components.service import cli_wrapper as service
 from pywhales.components.system import cli_wrapper as system
 from pywhales.exceptions import DockerTimeout
+from pywhales.utils import run
 
 
 @pytest.fixture
@@ -478,3 +487,102 @@ def test_plugin_push_forwards_selected_budget(
 
     commands.assert_called_once()
     assert commands.call_args.kwargs["timeout"] == 2.5
+
+
+def _scoped_default(config: ClientConfig) -> float | None:
+    return get_execution_policy([PolicyExecutable("docker", config)]).default_timeout
+
+
+def test_execution_timeout_overrides_default_without_mutating_config() -> None:
+    config = ClientConfig(default_timeout=9.0)
+
+    with execution_timeout(config, 2.5):
+        assert _scoped_default(config) == 2.5
+
+    assert _scoped_default(config) == 9.0
+    assert config.default_timeout == 9.0
+
+
+def test_execution_timeout_innermost_scope_wins_and_outer_returns() -> None:
+    config = ClientConfig()
+
+    with execution_timeout(config, 5.0):
+        with execution_timeout(config, 1.5):
+            assert _scoped_default(config) == 1.5
+        assert _scoped_default(config) == 5.0
+
+    assert _scoped_default(config) is None
+
+
+def test_execution_timeout_none_binds_nothing_and_keeps_outer_scope() -> None:
+    config = ClientConfig(default_timeout=9.0)
+
+    with execution_timeout(config, None):
+        assert _scoped_default(config) == 9.0
+        with execution_timeout(config, 4.0), execution_timeout(config, None):
+            assert _scoped_default(config) == 4.0
+
+
+def test_execution_timeout_matches_config_identity_not_equality() -> None:
+    scoped, equal_twin = ClientConfig(), ClientConfig()
+    assert scoped == equal_twin
+
+    with execution_timeout(scoped, 2.5):
+        assert _scoped_default(scoped) == 2.5
+        assert _scoped_default(equal_twin) is None
+
+
+def test_execution_timeout_scopes_for_different_configs_coexist() -> None:
+    first, second = ClientConfig(), ClientConfig()
+
+    with execution_timeout(first, 1.0), execution_timeout(second, 2.0):
+        assert _scoped_default(first) == 1.0
+        assert _scoped_default(second) == 2.0
+
+
+def test_execution_timeout_restores_scope_when_body_raises() -> None:
+    config = ClientConfig(default_timeout=9.0)
+
+    with pytest.raises(KeyboardInterrupt), execution_timeout(config, 2.5):
+        raise KeyboardInterrupt
+
+    assert _scoped_default(config) == 9.0
+
+
+def test_execution_timeout_bounds_implicit_launch_and_explicit_timeout_dominates() -> (
+    None
+):
+    config = ClientConfig()
+    child = [PolicyExecutable(sys.executable, config), "-c"]
+    sleeper = [*child, "import time; time.sleep(0.5); print('done')"]
+
+    with execution_timeout(config, 0.1):
+        with pytest.raises(DockerTimeout):
+            run(sleeper)
+        assert run(sleeper, timeout=10.0) == "done"
+
+
+def test_execution_timeout_is_isolated_between_concurrent_threads() -> None:
+    config = ClientConfig(default_timeout=9.0)
+    entered = threading.Barrier(2, timeout=10)
+    seen: dict[str, float | None] = {}
+
+    def worker(name: str, timeout: float) -> None:
+        with execution_timeout(config, timeout):
+            entered.wait()
+            seen[name] = _scoped_default(config)
+            entered.wait()
+
+    threads = [
+        threading.Thread(target=worker, args=("a", 1.0)),
+        threading.Thread(target=worker, args=("b", 2.0)),
+    ]
+    with execution_timeout(config, 5.0):
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        assert _scoped_default(config) == 5.0
+
+    assert seen == {"a": 1.0, "b": 2.0}
+    assert _scoped_default(config) == 9.0

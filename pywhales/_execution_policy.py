@@ -4,7 +4,9 @@ Resolve policy before converting command arguments to plain strings so later
 config mutations affect new launches without altering an existing snapshot.
 """
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Generator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from types import MappingProxyType
@@ -77,6 +79,42 @@ class BufferDefault(Enum):
 
 DEFAULT_BUFFER: Final = BufferDefault.CLIENT
 
+_timeout_scopes: ContextVar[tuple[tuple[ExecutionPolicySource, float], ...]] = (
+    ContextVar("pywhales_execution_timeouts", default=())
+)
+
+
+@contextmanager
+def execution_timeout(
+    source: ExecutionPolicySource, timeout: float | None
+) -> Generator[None]:
+    """Bound implicit launches of one config without mutating it.
+
+    Policy snapshots taken inside the scope use ``timeout`` as their default
+    deadline when ``source`` is the identical config; an explicit launch timeout
+    still wins. The innermost matching scope applies, and ``None`` binds nothing.
+    The caller validates ``timeout``.
+
+    Args:
+        source: Originating config, matched by identity rather than equality.
+        timeout: Positive finite seconds, or None to leave the policy untouched.
+    """
+    if timeout is None:
+        yield
+        return
+    token = _timeout_scopes.set((*_timeout_scopes.get(), (source, timeout)))
+    try:
+        yield
+    finally:
+        _timeout_scopes.reset(token)
+
+
+def _scoped_timeout(source: ExecutionPolicySource) -> float | None:
+    for scoped, timeout in reversed(_timeout_scopes.get()):
+        if scoped is source:
+            return timeout
+    return source.default_timeout
+
 
 class PolicyExecutable(str):
     """Executable text retaining its originating, mutable policy source.
@@ -142,6 +180,6 @@ def get_execution_policy(command: Sequence[object]) -> ExecutionPolicy:
             if environment is not None
             else MappingProxyType({}),
             frozen,
-            source.default_timeout,
+            _scoped_timeout(source),
         )
     return ExecutionPolicy()

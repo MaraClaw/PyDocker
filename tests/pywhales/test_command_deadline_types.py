@@ -1,13 +1,14 @@
-"""Static deadline-option contracts for launches, logs, and event subscriptions.
+"""Static deadline-option contracts for launches, subscriptions, and transfers.
 
 The ty check validates inferred shapes for clients, aliases, and container handles.
 Pytest does not collect or execute the _check_* functions or their Docker calls.
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from pathlib import Path
 from typing import assert_type
 
-from pywhales import Container, DockerClient, Image, docker
+from pywhales import Container, DockerClient, Image, Volume, docker
 from pywhales.components.buildx.cli_wrapper import (
     BakeResult,
     BuildxCall,
@@ -307,3 +308,58 @@ def _check_event_deadlines(client: DockerClient, timeout: float | None) -> None:
         client.system.events(None, None, {}, timeout=timeout),
         MappedProcessStream[DockerEvent],
     )
+
+
+def _check_container_transfer_deadlines(
+    client: DockerClient, container: Container, timeout: float | None
+) -> None:
+    assert_type(
+        client.container.copy((container, "/src"), "dst", timeout=timeout), None
+    )
+    assert_type(
+        client.container.export(container, "archive.tar", timeout=timeout), None
+    )
+    assert_type(container.copy_from("/src", "dst", timeout=timeout), None)
+    assert_type(container.copy_to("src", "/dst", timeout=timeout), None)
+    assert_type(container.export("archive.tar", timeout=timeout), None)
+    assert_type(client.copy("src", (container, "/dst"), timeout=timeout), None)
+    assert_type(client.export(container, "archive.tar", timeout=timeout), None)
+    assert_type(docker.copy("src", (container, "/dst"), timeout=timeout), None)
+    assert_type(docker.export(container, "archive.tar", timeout=timeout), None)
+
+
+def _check_image_transfer_deadlines(
+    client: DockerClient, image: Image, timeout: float | None
+) -> None:
+    output: Path | None = Path("archive.tar") if timeout is not None else None
+    assert_type(client.image.save(image, None, timeout=timeout), Iterator[bytes])
+    assert_type(client.image.save(image, Path("archive.tar"), timeout=timeout), None)
+    assert_type(
+        client.image.save(image, output, timeout=timeout), Iterator[bytes] | None
+    )
+    assert_type(client.image.load(b"archive", timeout=timeout), list[str])
+    assert_type(client.image.load(iter([b"archive"]), timeout=timeout), list[str])
+    assert_type(client.image.load(Path("archive.tar"), timeout=timeout), list[str])
+    assert_type(client.image.copy_from(image, "/src", "dst", timeout=timeout), None)
+    assert_type(client.image.copy_to(image, "src", "/dst", timeout=timeout), Image)
+    assert_type(image.save(None, timeout=timeout), Iterator[bytes])
+    assert_type(image.save(Path("archive.tar"), timeout=timeout), None)
+    assert_type(image.save(output, timeout=timeout), Iterator[bytes] | None)
+    assert_type(image.copy_from("/src", "dst", timeout=timeout), None)
+    assert_type(image.copy_to("src", "/dst", timeout=timeout), Image)
+    assert_type(client.save(image, None, timeout=timeout), Iterator[bytes])
+    assert_type(client.save(image, Path("archive.tar"), timeout=timeout), None)
+    assert_type(client.save(image, output, timeout=timeout), Iterator[bytes] | None)
+    assert_type(client.load(b"archive", timeout=timeout), list[str])
+    assert_type(docker.save(image, None, timeout=timeout), Iterator[bytes])
+    assert_type(docker.save(image, Path("archive.tar"), timeout=timeout), None)
+    assert_type(docker.save(image, output, timeout=timeout), Iterator[bytes] | None)
+    assert_type(docker.load(b"archive", timeout=timeout), list[str])
+
+
+def _check_volume_transfer_deadlines(
+    client: DockerClient, volume: Volume, timeout: float | None
+) -> None:
+    assert_type(client.volume.copy((volume, "/src"), "dst", timeout=timeout), None)
+    assert_type(client.volume.clone(volume, timeout=timeout), Volume)
+    assert_type(volume.clone(timeout=timeout), Volume)

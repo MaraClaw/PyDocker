@@ -31,7 +31,11 @@ from pydantic import JsonValue
 import pywhales.components.buildx.cli_wrapper
 from pywhales._archive_deadline import ArchiveDeadline
 from pywhales._environment import finalize_environment, resolve_environment
-from pywhales._execution_policy import get_execution_policy
+from pywhales._execution_policy import (
+    ExecutionPolicy,
+    execution_timeout,
+    get_execution_policy,
+)
 from pywhales.client_config import (
     ClientConfig,
     Command,
@@ -80,6 +84,27 @@ type ImageListFilter = (
     | tuple[Literal["manifest"], str]
     | tuple[Literal["readonly"], str]
 )
+
+
+def _select_archive_timeout(
+    policy: ExecutionPolicy, timeout: float | None
+) -> float | None:
+    """Return the validated seconds bounding one direct archive launch.
+
+    Args:
+        policy: Execution policy snapshotted for the launch.
+        timeout: Per-call seconds; `None` selects the policy default.
+
+    Returns:
+        The explicit `timeout` when given, otherwise `policy.default_timeout`;
+        `None` means no deadline.
+
+    Raises:
+        ValueError: The selected value is boolean, nonfinite, zero, or negative.
+    """
+    selected = policy.default_timeout if timeout is None else timeout
+    validate_timeout(selected)
+    return selected
 
 
 class Image(ReloadableObjectFromJson[ImageInspectResult]):
@@ -218,15 +243,21 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
         ImageCLI(self.client_config).remove(self, force, prune)
 
     @overload
-    def save(self, output: None = None) -> Iterator[bytes]: ...
+    def save(
+        self, output: None = None, *, timeout: float | None = None
+    ) -> Iterator[bytes]: ...
 
     @overload
-    def save(self, output: ValidPath) -> None: ...
+    def save(self, output: ValidPath, *, timeout: float | None = None) -> None: ...
 
     @overload
-    def save(self, output: ValidPath | None) -> Iterator[bytes] | None: ...
+    def save(
+        self, output: ValidPath | None, *, timeout: float | None = None
+    ) -> Iterator[bytes] | None: ...
 
-    def save(self, output: ValidPath | None = None) -> Iterator[bytes] | None:
+    def save(
+        self, output: ValidPath | None = None, *, timeout: float | None = None
+    ) -> Iterator[bytes] | None:
         """Save this image as a Docker tar archive.
 
         See the [`docker.image.save`](../sub-commands/image.md#pywhales.components.image.cli_wrapper.ImageCLI.save) command for
@@ -234,6 +265,10 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
 
         Args:
             output: Archive path, or `None` to return archive bytes lazily.
+            timeout: Positive finite seconds from each local CLI launch (the
+                inspection and the save), replacing the client default; `None`
+                inherits it. Each launch gets its own deadline, and a lazy
+                archive starts its save clock on first iteration.
 
         Returns:
             An archive-byte generator when `output=None`; otherwise `None` after
@@ -241,8 +276,14 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
             generator starts its save subprocess on first iteration. Close it
             when abandoning consumption to leave its subprocess context; cleanup
             can wait for the CLI and is not ProcessStream cancellation.
+
+        Raises:
+            ValueError: `timeout` is not positive and finite. Booleans are
+                rejected before inspection.
+            DockerTimeout: The save CLI exceeds its deadline; it is killed and
+                reaped without guaranteeing that daemon-side work stops.
         """
-        return ImageCLI(self.client_config).save(self, output)
+        return ImageCLI(self.client_config).save(self, output, timeout=timeout)
 
     def tag(self, new_tag: str) -> None:
         """Add a tag to a Docker image.
@@ -253,7 +294,12 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
         return ImageCLI(self.client_config).tag(self, new_tag)
 
     def copy_from(
-        self, path_in_image: ValidPath, destination: ValidPath, pull: str = "missing"
+        self,
+        path_in_image: ValidPath,
+        destination: ValidPath,
+        pull: str = "missing",
+        *,
+        timeout: float | None = None,
     ) -> None:
         """Copy files from this image to the local filesystem.
 
@@ -264,9 +310,15 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
             destination: Local destination path.
             pull: Image acquisition policy, forwarded to container creation;
                 defaults to `"missing"`.
+            timeout: Positive finite seconds from each local CLI launch the
+                copy makes, replacing the client default; `None` inherits it.
+
+        Raises:
+            ValueError: `timeout` is not positive and finite.
+            DockerTimeout: A launched local CLI exceeds its deadline.
         """
         return ImageCLI(self.client_config).copy_from(
-            self, path_in_image, destination, pull
+            self, path_in_image, destination, pull, timeout=timeout
         )
 
     def copy_to(
@@ -275,6 +327,8 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
         path_in_image: ValidPath,
         new_tag: str | None = None,
         pull: str = "missing",
+        *,
+        timeout: float | None = None,
     ) -> Image:
         """Copy local files into a temporary container and commit a new image.
 
@@ -287,12 +341,18 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
             new_tag: Optional tag applied when committing; `None` omits a tag.
             pull: Image acquisition policy, forwarded to container creation;
                 defaults to `"missing"`.
+            timeout: Positive finite seconds from each local CLI launch the
+                copy makes, replacing the client default; `None` inherits it.
 
         Returns:
             The committed image using the originating client configuration.
+
+        Raises:
+            ValueError: `timeout` is not positive and finite.
+            DockerTimeout: A launched local CLI exceeds its deadline.
         """
         return ImageCLI(self.client_config).copy_to(
-            self, local_path, path_in_image, new_tag, pull
+            self, local_path, path_in_image, new_tag, pull, timeout=timeout
         )
 
     def exists(self) -> bool:
@@ -445,7 +505,11 @@ class ImageCLI(DockerCLICaller):
             return True
 
     def load(
-        self, input: ValidPath | bytes | Iterator[bytes], quiet: bool = False
+        self,
+        input: ValidPath | bytes | Iterator[bytes],
+        quiet: bool = False,
+        *,
+        timeout: float | None = None,
     ) -> builtins.list[str]:
         """Load images eagerly from an archive path or archive bytes.
 
@@ -453,20 +517,31 @@ class ImageCLI(DockerCLICaller):
 
         Path input consumes a process-backed progress stream before returning.
         Byte input is written to a local CLI's stdin and fully consumed during
-        the call. These archive bytes are not progress-log records. A configured
-        default deadline reaps the local CLI even if the input iterator stalls;
-        an iterator's Python code is not interrupted.
+        the call. These archive bytes are not progress-log records. The selected
+        deadline (explicit `timeout`, otherwise the configured default) reaps
+        the local CLI even if the input iterator stalls; an iterator's Python
+        code is not interrupted.
 
         Args:
             input: Archive path, complete archive bytes, or an iterator of archive
                 byte chunks. Loading adds images and tags to the selected daemon.
             quiet: Pass the CLI's quiet flag. For path input, also suppress
                 printing of decoded output records.
+            timeout: Positive finite seconds from the load CLI's own launch,
+                replacing the client default; `None` inherits it. It is
+                validated before `input` is consumed.
 
         Returns:
             Image tags or IDs extracted from `Loaded image` output lines, in
             output order, for both paths and byte input.
+
+        Raises:
+            ValueError: `timeout` is not positive and finite. Booleans are
+                rejected before any input is consumed or CLI is resolved.
+            DockerTimeout: The load CLI exceeds its deadline; it is killed and
+                reaped without guaranteeing that daemon-side work stops.
         """
+        validate_timeout(timeout)
         full_cmd = Command([*self.docker_cmd, "image", "load"])
 
         if isinstance(input, (str, Path)):
@@ -477,7 +552,7 @@ class ImageCLI(DockerCLICaller):
 
         if isinstance(input, (str, Path)):
             all_tags = []
-            for _, stream_bytes in stream_stdout_and_stderr(full_cmd):
+            for _, stream_bytes in stream_stdout_and_stderr(full_cmd, timeout=timeout):
                 decoded = stream_bytes.decode()[:-1]
                 if not quiet:
                     print(decoded)
@@ -486,7 +561,7 @@ class ImageCLI(DockerCLICaller):
             return all_tags
 
         input_chunks = (input,) if isinstance(input, bytes) else input
-        stdout_lines = self._load_from_generator(full_cmd, input_chunks)
+        stdout_lines = self._load_from_generator(full_cmd, input_chunks, timeout)
         all_tags = []
         for line in stdout_lines:
             if "Loaded image" in line:
@@ -494,10 +569,13 @@ class ImageCLI(DockerCLICaller):
         return all_tags
 
     def _load_from_generator(
-        self, full_cmd: Sequence[object], input: Iterable[bytes]
+        self,
+        full_cmd: Sequence[object],
+        input: Iterable[bytes],
+        timeout: float | None,
     ) -> builtins.list[str]:
         policy = get_execution_policy(full_cmd)
-        validate_timeout(policy.default_timeout)
+        selected_timeout = _select_archive_timeout(policy, timeout)
         environment = resolve_environment(
             policy.environment, frozen=policy.frozen_environment
         )
@@ -506,9 +584,7 @@ class ImageCLI(DockerCLICaller):
         with ExecutionTelemetry(policy.telemetry_observer, "archive_load") as telemetry:
             telemetry.start()
             deadline = (
-                None
-                if policy.default_timeout is None
-                else monotonic() + policy.default_timeout
+                None if selected_timeout is None else monotonic() + selected_timeout
             )
             with Popen(
                 command, stdin=PIPE, stdout=PIPE, env=environment, bufsize=0
@@ -1137,6 +1213,8 @@ class ImageCLI(DockerCLICaller):
         self,
         images: ValidImage | Iterable[ValidImage],
         output: None = None,
+        *,
+        timeout: float | None = None,
     ) -> Iterator[bytes]: ...
 
     @overload
@@ -1144,6 +1222,8 @@ class ImageCLI(DockerCLICaller):
         self,
         images: ValidImage | Iterable[ValidImage],
         output: ValidPath,
+        *,
+        timeout: float | None = None,
     ) -> None: ...
 
     @overload
@@ -1151,29 +1231,43 @@ class ImageCLI(DockerCLICaller):
         self,
         images: ValidImage | Iterable[ValidImage],
         output: ValidPath | None,
+        *,
+        timeout: float | None = None,
     ) -> Iterator[bytes] | None: ...
 
     def save(
         self,
         images: ValidImage | Iterable[ValidImage],
         output: ValidPath | None = None,
+        *,
+        timeout: float | None = None,
     ) -> Iterator[bytes] | None:
         """Save one or more images as a Docker tar archive.
 
         Alias: `docker.save(...)`
 
-        Inspection occurs eagerly before returning. An output path runs the save
-        CLI during the call; omitted output returns a generator whose save CLI
-        starts on first iteration. Exhaust or close that generator to leave its
-        subprocess context. A configured default deadline reaps the CLI while
-        consumption is paused and is reported on resumption. Archive bytes have
-        no progress-stream buffer budget; no daemon rollback is guaranteed.
+        Inspection occurs eagerly before returning; its CLI launch has its own
+        deadline (the explicit `timeout`, otherwise the configured default) that
+        is independent of the save launch's. An output path runs the save CLI
+        during the call; omitted output returns a generator whose save CLI starts
+        on first iteration.
+        Exhaust or close that generator to leave its subprocess context. The
+        selected deadline (explicit `timeout`, otherwise the configured default)
+        reaps the CLI while consumption is paused and is reported on resumption.
+        Archive bytes have no progress-stream buffer budget; no daemon rollback
+        is guaranteed.
 
         Args:
             images: Single image or non-empty iterable of images to save.
             output: Path of the tar archive to produce. If `output` is None, a generator
                 of bytes is produced. It can be used to stream those bytes elsewhere,
                 to another Docker daemon for example.
+            timeout: Positive finite seconds from each local CLI launch (the
+                inspection and the save), replacing the client default; `None`
+                inherits it. Each launch gets its own deadline. For a lazy
+                archive the save clock starts on first iteration, using the
+                client default as configured at that moment when `timeout` is
+                omitted.
 
         Returns:
             An iterator of archive-byte chunks when `output=None`; these are
@@ -1181,32 +1275,42 @@ class ImageCLI(DockerCLICaller):
             `None` after the local CLI completes.
 
         Raises:
-            ValueError: No images were supplied.
+            ValueError: No images were supplied, or `timeout` is not positive
+                and finite. Booleans are rejected before inspection.
             NoSuchImage: A requested image does not exist.
             DockerException: Inspection or the save command fails, with lazy save
                 failures delivered during iteration.
+            DockerTimeout: The save CLI exceeds its deadline; it is killed and
+                reaped without guaranteeing that daemon-side work stops.
         """
+        validate_timeout(timeout)
         image_list = [images] if isinstance(images, (str, Image)) else list(images)
         if len(image_list) == 0:
             raise ValueError("One or more images must be provided")
 
-        # Trigger an exception early if an image doesn't exist.
-        self.inspect([str(image) for image in image_list])
+        # Trigger an exception early if an image doesn't exist. The scope ends
+        # before any generator yields, so it never spans a suspension point.
+        with execution_timeout(self.client_config, timeout):
+            self.inspect([str(image) for image in image_list])
 
         full_cmd = Command([*self.docker_cmd, "image", "save"])
         full_cmd.add_simple_arg("--output", output)
         full_cmd.extend(image_list)
         if output is None:
             # we stream the bytes
-            return self._save_generator(full_cmd)
+            return self._save_generator(full_cmd, timeout)
         else:
-            run(full_cmd)
+            run(full_cmd, timeout=timeout)
 
-    def _save_generator(self, full_cmd: Sequence[object]) -> Iterator[bytes]:
+    def _save_generator(
+        self, full_cmd: Sequence[object], timeout: float | None
+    ) -> Iterator[bytes]:
         """Launch an archive export on first iteration and yield stdout bytes.
 
         Args:
             full_cmd: Complete Docker save arguments to stringify at launch.
+            timeout: Validated per-call seconds, or `None` to select the client
+                default when the generator first runs.
 
         Yields:
             Archive-byte chunks from stdout, with no progress-record framing or
@@ -1219,7 +1323,7 @@ class ImageCLI(DockerCLICaller):
             DockerException: The save CLI exits unsuccessfully.
         """
         policy = get_execution_policy(full_cmd)
-        validate_timeout(policy.default_timeout)
+        selected_timeout = _select_archive_timeout(policy, timeout)
         environment = resolve_environment(
             policy.environment, frozen=policy.frozen_environment
         )
@@ -1228,9 +1332,7 @@ class ImageCLI(DockerCLICaller):
         with ExecutionTelemetry(policy.telemetry_observer, "archive_save") as telemetry:
             telemetry.start()
             deadline = (
-                None
-                if policy.default_timeout is None
-                else monotonic() + policy.default_timeout
+                None if selected_timeout is None else monotonic() + selected_timeout
             )
             with Popen(
                 command, stdout=PIPE, stderr=PIPE, env=environment, bufsize=0
@@ -1319,6 +1421,8 @@ class ImageCLI(DockerCLICaller):
         path_in_image: ValidPath,
         destination: ValidPath,
         pull: str = "missing",
+        *,
+        timeout: float | None = None,
     ) -> None:
         """Copy files out of an image through a temporary container.
 
@@ -1331,9 +1435,26 @@ class ImageCLI(DockerCLICaller):
             destination: Local destination path.
             pull: Image acquisition policy forwarded to container creation;
                 defaults to `"missing"`.
+            timeout: Positive finite seconds from each local CLI launch this
+                helper makes (inspection, pull, container create, copy, stop
+                and removal), replacing the client default; `None` inherits it.
+                Each launch has its own deadline rather than one shared budget.
+                The configuration is not mutated.
+
+        Raises:
+            ValueError: `timeout` is not positive and finite. Booleans are
+                rejected before any CLI is resolved or launched.
+            DockerTimeout: A launched local CLI exceeds its deadline; it is
+                killed and reaped without guaranteeing that daemon-side work
+                stops. The temporary container is still removed if it was
+                created.
         """
-        with ContainerCLI(self.client_config).create(image, pull=pull) as tmp_container:
-            tmp_container.copy_from(path_in_image, destination)
+        validate_timeout(timeout)
+        with (
+            execution_timeout(self.client_config, timeout),
+            ContainerCLI(self.client_config).create(image, pull=pull) as tmp_container,
+        ):
+            tmp_container.copy_from(path_in_image, destination, timeout=timeout)
 
     def copy_to(
         self,
@@ -1342,6 +1463,8 @@ class ImageCLI(DockerCLICaller):
         path_in_image: ValidPath,
         new_tag: str | None = None,
         pull: str = "missing",
+        *,
+        timeout: float | None = None,
     ) -> Image:
         """Copy local files into a temporary container and commit a new image.
 
@@ -1355,12 +1478,29 @@ class ImageCLI(DockerCLICaller):
             new_tag: Optional tag for the committed image; `None` omits a tag.
             pull: Image acquisition policy forwarded to container creation;
                 defaults to `"missing"`.
+            timeout: Positive finite seconds from each local CLI launch this
+                helper makes (inspection, pull, container create, copy, commit,
+                stop and removal), replacing the client default; `None`
+                inherits it. Each launch has its own deadline rather than one
+                shared budget. The configuration is not mutated.
 
         Returns:
             The committed image using the originating client configuration.
+
+        Raises:
+            ValueError: `timeout` is not positive and finite. Booleans are
+                rejected before any CLI is resolved or launched.
+            DockerTimeout: A launched local CLI exceeds its deadline; it is
+                killed and reaped without guaranteeing that daemon-side work
+                stops. The temporary container is still removed if it was
+                created.
         """
-        with ContainerCLI(self.client_config).create(
-            base_image, pull=pull
-        ) as tmp_container:
-            tmp_container.copy_to(local_path, path_in_image)
+        validate_timeout(timeout)
+        with (
+            execution_timeout(self.client_config, timeout),
+            ContainerCLI(self.client_config).create(
+                base_image, pull=pull
+            ) as tmp_container,
+        ):
+            tmp_container.copy_to(local_path, path_in_image, timeout=timeout)
             return tmp_container.commit(tag=new_tag)

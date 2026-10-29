@@ -2,6 +2,7 @@ import json
 import sys
 import tempfile
 import time
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
@@ -466,3 +467,63 @@ def test_update_not_swarm_manager(docker_client: DockerClient) -> None:
 
     assert e.value.stderr is not None
     assert "not a swarm manager" in e.value.stderr.lower()
+
+
+EMPTY_SELECTIONS = [
+    pytest.param(list, id="list"),
+    pytest.param(tuple, id="tuple"),
+    pytest.param(lambda: (item for item in ()), id="generator"),
+]
+SINGLE_SELECTIONS = [
+    pytest.param(lambda: "alpha", id="str"),
+    pytest.param(lambda: ["alpha"], id="list"),
+    pytest.param(lambda: (item for item in ["alpha"]), id="generator"),
+]
+
+
+@pytest.mark.parametrize("make_empty", EMPTY_SELECTIONS)
+@pytest.mark.parametrize("method", ["remove", "ps"])
+def test_service_empty_selection_skips_cli(
+    method: str, make_empty: Callable[[], Iterable[str]]
+) -> None:
+    client = DockerClient(client_call=["not-installed"])
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch("subprocess.run", side_effect=AssertionError("subprocess")),
+    ):
+        result = getattr(client.service, method)(make_empty())
+    assert result == ([] if method == "ps" else None)
+
+
+def test_service_scale_empty_mapping_skips_inspect_and_cli() -> None:
+    client = DockerClient(client_call=["not-installed"])
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch("subprocess.run", side_effect=AssertionError("subprocess")),
+    ):
+        client.service.scale({})
+
+
+@pytest.mark.parametrize("make_selection", SINGLE_SELECTIONS)
+@pytest.mark.parametrize(
+    ("method", "subcommand"),
+    [("remove", ["remove"]), ("ps", ["ps", "--quiet", "--no-trunc"])],
+)
+def test_service_selection_builds_argv_once(
+    method: str,
+    subcommand: list[str],
+    make_selection: Callable[[], str | Iterable[str]],
+) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    with patch(
+        "subprocess.run", return_value=CompletedProcess([], 0, b"", b"")
+    ) as command:
+        getattr(client.service, method)(make_selection())
+    command.assert_called_once()
+    assert command.call_args.args[0] == [
+        "docker-test",
+        "service",
+        *subcommand,
+        "alpha",
+    ]

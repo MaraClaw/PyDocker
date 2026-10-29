@@ -583,12 +583,13 @@ class ServiceCLI(DockerCLICaller):
         ]
 
     def ps(
-        self, x: ValidService | Sequence[ValidService]
+        self, x: ValidService | Iterable[ValidService]
     ) -> builtins.list[pywhales.components.task.cli_wrapper.Task]:
         """List Swarm tasks associated with one or more services.
 
         Args:
-            x: Service names, IDs, or handles to list tasks for.
+            x: Service names, IDs, or handles to list tasks for. An empty
+                selection returns [] without invoking the CLI.
 
         Returns:
             Task handles in CLI output order, including any task history Docker lists.
@@ -596,13 +597,16 @@ class ServiceCLI(DockerCLICaller):
         Raises:
             NoSuchService: If Docker reports that a requested service is absent.
         """
+        services = to_list(x)
+        if not services:
+            return []
         full_cmd = [
             *self.docker_cmd,
             "service",
             "ps",
             "--quiet",
             "--no-trunc",
-            *to_list(x),
+            *services,
         ]
         ids = run(full_cmd).splitlines()
         return [
@@ -612,21 +616,21 @@ class ServiceCLI(DockerCLICaller):
             for id_ in ids
         ]
 
-    def remove(self, services: ValidService | Sequence[ValidService]) -> None:
+    def remove(self, services: ValidService | Iterable[ValidService]) -> None:
         """Remove one or more Swarm services.
 
         Args:
-            services: Service names, IDs, or handles. An empty list is a no-op.
+            services: Service names, IDs, or handles. An empty selection is a no-op.
 
         Raises:
             NoSuchService: If Docker reports that a requested service is absent.
         """
+        selected = to_list(services)
+        if not selected:
+            return
         full_cmd = Command([*self.docker_cmd, "service", "remove"])
 
-        if services == []:
-            return
-
-        for service in to_list(services):
+        for service in selected:
             full_cmd.append(service)
 
         run(full_cmd)
@@ -658,12 +662,15 @@ class ServiceCLI(DockerCLICaller):
 
         Args:
             new_scales: Mapping between services and the desired scales. For example
-                use new_scales={"service1": 4, "service2": 8}.
+                use new_scales={"service1": 4, "service2": 8}. An empty mapping
+                is a no-op.
             detach: Return after submission instead of waiting for convergence.
 
         Raises:
             NoSuchService: If inspection reports that a requested service is absent.
         """
+        if not new_scales:
+            return
         # verify that the services exists
         self.inspect([str(service) for service in new_scales])
 

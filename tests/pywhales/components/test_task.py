@@ -115,3 +115,34 @@ def test_batch_inspect_empty_tasks_avoids_lookup() -> None:
         assert DockerClient().task.inspect([]) == []
     lookup.assert_not_called()
     command.assert_not_called()
+
+
+def test_list_without_services_makes_no_service_ps_call() -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    with patch(
+        "subprocess.run", return_value=CompletedProcess([], 0, b"", b"")
+    ) as command:
+        assert client.task.list() == []
+    command.assert_called_once()
+    assert command.call_args.args[0] == ["docker-test", "service", "list", "--quiet"]
+
+
+def test_list_passes_listed_services_to_one_service_ps() -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    responses = [b"short\n", b"full-id\n", b"task-id\n"]
+    with patch(
+        "subprocess.run",
+        side_effect=[CompletedProcess([], 0, out, b"") for out in responses],
+    ) as command:
+        tasks = client.task.list()
+    assert [task.id for task in tasks] == ["task-id"]
+    assert command.call_args.args[0] == [
+        "docker-test",
+        "service",
+        "ps",
+        "--quiet",
+        "--no-trunc",
+        "full-id",
+    ]

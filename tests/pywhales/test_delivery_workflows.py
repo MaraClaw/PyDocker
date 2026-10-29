@@ -10,16 +10,20 @@ import json
 import subprocess
 import sys
 import tarfile
+import threading
 import zipfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import override
+from typing import IO, BinaryIO, override
 
 import pytest
 from pydantic import BaseModel, JsonValue
 
 from scripts.delivery import __main__ as cli
+from scripts.delivery import api as http
+from scripts.delivery import archives, artifacts, budgets, limits
 from scripts.delivery.api import Curl, GitHub, Rejected, Response, Transport
 from scripts.delivery.artifacts import describe, download, sha256
 from scripts.delivery.chain import name, producer, receipt, seal
@@ -52,9 +56,9 @@ BASE_URL = "https://api.github.com/repos/owner/repo/"
 PYPI = "https://pypi.org/pypi/pywhales/0.6.1/json"
 
 
-def zipped(files: dict[str, bytes]) -> bytes:
+def zipped(files: dict[str, bytes], *, compression: int = zipfile.ZIP_STORED) -> bytes:
     result = io.BytesIO()
-    with zipfile.ZipFile(result, "w") as archive:
+    with zipfile.ZipFile(result, "w", compression=compression) as archive:
         for filename, data in files.items():
             archive.writestr(filename, data)
     return result.getvalue()
@@ -174,7 +178,8 @@ class Service(Transport):
             if isinstance(value, BaseModel)
             else json.dumps(value).encode()
         )
-        self.routes[("GET", BASE_URL + path)] = Response(status, body)
+        url = BASE_URL + path if path else BASE_URL.removesuffix("/")
+        self.routes[("GET", url)] = Response(status, body)
 
     @override
     def request(self, method: str, url: str, body: bytes | None = None) -> Response:
@@ -295,6 +300,27 @@ def service(monkeypatch: pytest.MonkeyPatch) -> Service:
 def invoke(monkeypatch: pytest.MonkeyPatch, *arguments: str) -> int:
     monkeypatch.setattr(sys, "argv", ["delivery", *arguments])
     return cli.main()
+
+
+def test_repository_identity_uses_canonical_root(service: Service) -> None:
+    assert service.api.identity() == service.source.repository
+    assert service.calls == [("GET", BASE_URL.removesuffix("/"), None)]
+
+
+@pytest.mark.parametrize(
+    "repository",
+    [
+        Repository(id=2, full_name="owner/repo", default_branch="main"),
+        Repository(id=1, full_name="other/repo", default_branch="main"),
+        Repository(id=1, full_name="owner/repo", default_branch="other"),
+    ],
+)
+def test_repository_identity_rejects_mismatch(
+    service: Service, repository: Repository
+) -> None:
+    service.put("", repository)
+    with pytest.raises(Rejected, match="repository identity"):
+        service.api.identity()
 
 
 def test_cli_lifecycle_preserves_exact_packages_and_manual_site(
@@ -953,21 +979,616 @@ def test_http_transport_failures_never_expose_authorization(
 ) -> None:
     monkeypatch.setenv("GH_TOKEN", "fixture-secret-token")
 
-    def fail(
-        command: list[str],
-        *,
-        input: bytes | None,
-        capture_output: bool,
-        check: bool,
-        timeout: int,
-    ) -> subprocess.CompletedProcess[bytes]:
-        assert capture_output and not check and timeout > 0
-        if timeout_failure:
-            raise subprocess.TimeoutExpired(command, timeout)
-        return subprocess.CompletedProcess(command, 7, b"", b"failed")
-
-    timeout_failure = timeout
-    monkeypatch.setattr(subprocess, "run", fail)
-    with pytest.raises(Rejected, match="HTTP transport") as rejected:
+    script = "import sys; sys.stderr.write('fixture-secret-token'); sys.exit(7)"
+    processes, _commands = controlled_curl(monkeypatch, script)
+    if timeout:
+        clock = iter((0.0, 131.0))
+        monkeypatch.setattr(http.time, "monotonic", lambda: next(clock))
+    message = "HTTP transport timed out" if timeout else "HTTP transport failed"
+    with pytest.raises(Rejected, match=message) as rejected:
         Curl().request("GET", BASE_URL + "actions/runs/100")
     assert "fixture-secret-token" not in str(rejected.value)
+    assert processes[0].returncode is not None
+    assert processes[0].stdout is not None and processes[0].stdout.closed
+
+
+def controlled_curl(
+    monkeypatch: pytest.MonkeyPatch, script: str
+) -> tuple[list[subprocess.Popen[bytes]], list[list[str]]]:
+    processes: list[subprocess.Popen[bytes]] = []
+    commands: list[list[str]] = []
+    launch = subprocess.Popen
+
+    def start(
+        command: list[str], *, stdin: BinaryIO, stdout: int, stderr: int
+    ) -> subprocess.Popen[bytes]:
+        assert stdout == subprocess.PIPE and stderr == subprocess.DEVNULL
+        commands.append(command)
+        process = launch(
+            [sys.executable, "-c", script], stdin=stdin, stdout=stdout, stderr=stderr
+        )
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", start)
+    return processes, commands
+
+
+@pytest.mark.parametrize("framing", ["unknown", "dishonest"])
+@pytest.mark.parametrize("size", [0, 32, 33])
+def test_http_counts_received_body_without_trusting_length(
+    monkeypatch: pytest.MonkeyPatch, framing: str, size: int
+) -> None:
+    payload = b"x" * size
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(206)
+            if framing == "dishonest":
+                self.send_header("Content-Length", "1")
+                self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            if framing == "dishonest":
+                if payload:
+                    self.wfile.write(
+                        f"{len(payload):x}\r\n".encode() + payload + b"\r\n"
+                    )
+                self.wfile.write(b"0\r\n\r\n")
+            else:
+                self.wfile.write(payload)
+
+        @override
+        def log_message(self, format: str, *args: str | int) -> None:
+            return
+
+    launch = subprocess.Popen
+    processes: list[subprocess.Popen[bytes]] = []
+    with HTTPServer(("127.0.0.1", 0), Handler) as server:
+        worker = threading.Thread(target=server.serve_forever)
+        worker.start()
+
+        def start(
+            command: list[str], *, stdin: BinaryIO, stdout: int, stderr: int
+        ) -> subprocess.Popen[bytes]:
+            assert command[command.index("--proto") + 1] == "=https"
+            assert command[command.index("--proto-redir") + 1] == "=https"
+            assert command[command.index("--max-time") + 1] == "120"
+            assert command[command.index("--connect-timeout") + 1] == "10"
+            local_command = list(command)
+            local_command[local_command.index("--proto") + 1] = "=http"
+            local_command[-1] = f"http://127.0.0.1:{server.server_port}/"
+            process = launch(local_command, stdin=stdin, stdout=stdout, stderr=stderr)
+            processes.append(process)
+            return process
+
+        monkeypatch.setattr(subprocess, "Popen", start)
+        monkeypatch.setattr(limits, "RESPONSE_BYTES", 32)
+        try:
+            if size > 32:
+                with pytest.raises(Rejected, match="byte budget"):
+                    Curl().request("GET", "https://delivery.invalid/")
+            else:
+                assert Curl().request("GET", "https://delivery.invalid/") == Response(
+                    206, payload
+                )
+        finally:
+            server.shutdown()
+            worker.join(timeout=5)
+        assert not worker.is_alive()
+    assert processes[0].returncode is not None
+    assert processes[0].stdout is not None and processes[0].stdout.closed
+
+
+def test_curl_discards_stderr_and_preserves_binary_body_status_and_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"\x00\n404\n"
+    monkeypatch.setenv("GH_TOKEN", "fixture-secret-token")
+    monkeypatch.setattr(limits, "RESPONSE_BYTES", len(payload))
+    processes, commands = controlled_curl(
+        monkeypatch,
+        "import sys; sys.stderr.buffer.write(b'e'*2097152); "
+        "sys.stdout.buffer.write(sys.stdin.buffer.read()+b'\\n201')",
+    )
+    for url in (
+        BASE_URL,
+        "https://pypi.org/fixture",
+        "https://api.github.com.evil/fixture",
+    ):
+        assert Curl().request("POST", url, payload) == Response(201, payload)
+    assert "Authorization: Bearer fixture-secret-token" in commands[0]
+    assert all(
+        not any("Authorization:" in arg for arg in command) for command in commands[1:]
+    )
+    assert all(process.returncode == 0 for process in processes)
+
+
+def test_curl_budget_abort_kills_and_reaps_live_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(limits, "RESPONSE_BYTES", 8)
+    processes, _commands = controlled_curl(
+        monkeypatch, "import os\nwhile True: os.write(1,b'x'*4096)"
+    )
+
+    with pytest.raises(Rejected, match="byte budget"):
+        Curl().request("GET", "https://delivery.invalid/")
+
+    assert processes[0].returncode is not None and processes[0].returncode < 0
+    assert processes[0].stdout is not None and processes[0].stdout.closed
+
+
+def test_curl_read_error_kills_and_reaps_live_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processes, _commands = controlled_curl(
+        monkeypatch, "import os\nwhile True: os.write(1,b'x'*4096)"
+    )
+    original_read = http.os.read
+
+    def fail(fd: int, size: int) -> bytes:
+        if processes:
+            raise OSError("fixture read failure")
+        return original_read(fd, size)
+
+    monkeypatch.setattr(http.os, "read", fail)
+
+    with pytest.raises(Rejected, match="HTTP transport failed"):
+        Curl().request("GET", "https://delivery.invalid/")
+
+    assert processes[0].returncode is not None and processes[0].returncode < 0
+    assert processes[0].stdout is not None and processes[0].stdout.closed
+
+
+@pytest.mark.parametrize("suffix", [b"", b"\n20", b"\nwat", b"x200"])
+def test_curl_rejects_malformed_status_without_partial_response(
+    monkeypatch: pytest.MonkeyPatch, suffix: bytes
+) -> None:
+    processes, _commands = controlled_curl(
+        monkeypatch, f"import sys; sys.stdout.buffer.write({suffix!r})"
+    )
+    with pytest.raises(Rejected, match="invalid status"):
+        Curl().request("GET", "https://delivery.invalid/")
+    assert processes[0].returncode == 0
+
+
+def tarred(files: dict[str, bytes], *, compressed: bool) -> bytes:
+    result = io.BytesIO()
+    with (
+        tarfile.open(fileobj=result, mode="w:gz")
+        if compressed
+        else tarfile.open(fileobj=result, mode="w:")
+    ) as archive:
+        for name, data in files.items():
+            member = tarfile.TarInfo(name)
+            member.size = len(data)
+            archive.addfile(member, io.BytesIO(data))
+    return result.getvalue()
+
+
+def sized_distribution(kind: str) -> tuple[dict[str, bytes], dict[str, bytes]]:
+    contents = {"pywhales/py.typed": b"", "payload": b"x" * 128, "second": b"y" * 64}
+    metadata = b"Name: pywhales\nVersion: 0.6.1\n"
+    files = distributions()
+    if kind == "wheel":
+        contents["pywhales-0.6.1.dist-info/METADATA"] = metadata
+        files[WHEEL] = zipped(contents, compression=zipfile.ZIP_DEFLATED)
+    else:
+        contents["PKG-INFO"] = metadata
+        contents = {f"pywhales-0.6.1/{name}": data for name, data in contents.items()}
+        files[SDIST] = tarred(contents, compressed=True)
+    return files, contents
+
+
+@pytest.mark.parametrize("kind", ["artifact", "wheel", "sdist", "pages"])
+@pytest.mark.parametrize("axis", ["entries", "member_bytes", "expanded_bytes"])
+@pytest.mark.parametrize("excess", [False, True])
+def test_all_archive_entries_accept_exact_budgets_and_reject_first_excess(
+    service: Service,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    axis: str,
+    excess: bool,
+) -> None:
+    contents = {"index.html": b"x" * 128, "second": b"y" * 64}
+    files = distributions()
+    if kind in {"wheel", "sdist"}:
+        files, contents = sized_distribution(kind)
+    policy = {
+        "entries": len(contents),
+        "member_bytes": max(map(len, contents.values())),
+        "expanded_bytes": sum(map(len, contents.values())),
+    }
+    policy[axis] -= int(excess)
+    bound = limits.ArchiveLimits(**policy)
+    monkeypatch.setattr(
+        limits,
+        {
+            "artifact": "ARTIFACT",
+            "wheel": "DISTRIBUTION",
+            "sdist": "DISTRIBUTION",
+            "pages": "SITE",
+        }[kind],
+        bound,
+    )
+    artifact = service.artifact(55, "site", service.source, contents)
+    wrapped = zipped(contents, compression=zipfile.ZIP_DEFLATED)
+    artifact = artifact.model_copy(update={"digest": f"sha256:{sha256(wrapped)}"})
+    service.routes[("GET", BASE_URL + "actions/artifacts/55/zip")] = Response(
+        200, wrapped
+    )
+    site = tmp_path / "site"
+    site.mkdir()
+    for filename, data in contents.items():
+        target = site / filename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    archive = tmp_path / "artifact.tar"
+    archive.write_bytes(tarred(contents, compressed=False))
+
+    def verify() -> None:
+        if kind == "artifact":
+            assert download(service.api, artifact) == contents
+        elif kind in {"wheel", "sdist"}:
+            inspect(files, "0.6.1")
+        else:
+            verify_pages_tar(site, archive)
+
+    if excess:
+        with pytest.raises(Rejected, match="budget exceeded"):
+            verify()
+    else:
+        verify()
+
+
+@pytest.mark.parametrize("kind", ["artifact", "wheel", "sdist", "pages"])
+def test_dishonest_member_metadata_cannot_bypass_actual_expansion(
+    service: Service, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    contents = {"payload": b"x"}
+    files = distributions()
+    if kind in {"wheel", "sdist"}:
+        files, contents = sized_distribution(kind)
+        contents = {
+            name: b"x" if name.endswith("payload") else data
+            for name, data in contents.items()
+        }
+        files[WHEEL if kind == "wheel" else SDIST] = (
+            zipped(contents) if kind == "wheel" else tarred(contents, compressed=True)
+        )
+    artifact = service.artifact(55, "site", service.source, contents)
+    archive_path = tmp_path / "artifact.tar"
+    archive_path.write_bytes(tarred(contents, compressed=False))
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "payload").write_bytes(b"x")
+    monkeypatch.setattr(limits, "ARTIFACT", limits.ArchiveLimits(100, 127, 1024))
+    monkeypatch.setattr(limits, "DISTRIBUTION", limits.ArchiveLimits(100, 127, 1024))
+    monkeypatch.setattr(limits, "SITE", limits.ArchiveLimits(100, 127, 1024))
+    zip_open = zipfile.ZipFile.open
+    tar_open = tarfile.TarFile.extractfile
+
+    def zip_stream(package: zipfile.ZipFile, entry: zipfile.ZipInfo) -> IO[bytes]:
+        if entry.filename.endswith("payload"):
+            return io.BytesIO(b"x" * 128)
+        return zip_open(package, entry)
+
+    def tar_stream(
+        package: tarfile.TarFile, member: tarfile.TarInfo
+    ) -> IO[bytes] | None:
+        if member.name.endswith("payload"):
+            return io.BytesIO(b"x" * 128)
+        return tar_open(package, member)
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", zip_stream)
+    monkeypatch.setattr(tarfile.TarFile, "extractfile", tar_stream)
+
+    with pytest.raises(Rejected, match="input byte budget exceeded"):
+        if kind == "artifact":
+            download(service.api, artifact)
+        elif kind in {"wheel", "sdist"}:
+            inspect(files, "0.6.1")
+        else:
+            verify_pages_tar(site, archive_path)
+
+
+@pytest.mark.parametrize("kind", ["project", "wheel", "sdist"])
+@pytest.mark.parametrize("excess", [False, True])
+def test_local_smoke_bounds_each_input_before_isolated_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, excess: bool
+) -> None:
+    files = distributions()
+    project = ('[project]\nversion = "0.6.1"\n# ' + "é" * 64 + "\n").encode()
+    selected = {"project": "pyproject.toml", "wheel": WHEEL, "sdist": SDIST}[kind]
+    if kind != "project":
+        files[selected] += b"\0" * 8192
+    (tmp_path / "pyproject.toml").write_bytes(project)
+    (tmp_path / "dist").mkdir()
+    for filename, data in files.items():
+        (tmp_path / "dist" / filename).write_bytes(data)
+    monkeypatch.setattr(
+        limits,
+        "PROJECT_BYTES" if kind == "project" else "DISTRIBUTION_BYTES",
+        len(project if kind == "project" else files[selected]) - int(excess),
+    )
+    installed: list[list[str]] = []
+
+    def install(
+        command: list[str], *, cwd: str, check: bool, timeout: int
+    ) -> subprocess.CompletedProcess[bytes]:
+        installed.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(subprocess, "run", install)
+
+    if excess:
+        with pytest.raises(Rejected, match="input byte budget exceeded"):
+            smoke(tmp_path)
+        assert installed == []
+    else:
+        smoke(tmp_path)
+        assert len(installed) == 2
+
+
+@pytest.mark.parametrize("excess", [False, True])
+def test_sealer_independently_bounds_project_configuration(
+    service: Service,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    excess: bool,
+) -> None:
+    project = ('[project]\nversion = "0.6.1"\n# ' + "é" * 64 + "\n").encode()
+    (tmp_path / "pyproject.toml").write_bytes(project)
+    monkeypatch.setattr(limits, "PROJECT_BYTES", len(project) - int(excess))
+    monkeypatch.setenv("GITHUB_SHA", service.source.head_sha)
+    for kind, artifact in zip(("DIST", "SITE"), service.artifacts()[:2], strict=True):
+        monkeypatch.setenv(f"{kind}_ARTIFACT_ID", str(artifact.id))
+        monkeypatch.setenv(
+            f"{kind}_ARTIFACT_DIGEST", artifact.digest.removeprefix("sha256:")
+        )
+
+    if excess:
+        with pytest.raises(Rejected, match="input byte budget exceeded"):
+            seal(service.api, 100, tmp_path)
+    else:
+        assert seal(service.api, 100, tmp_path) == service.tested
+
+
+@pytest.mark.parametrize("kind", ["wheel", "sdist"])
+@pytest.mark.parametrize("excess", [False, True])
+def test_distribution_inspection_independently_bounds_compressed_inputs(
+    monkeypatch: pytest.MonkeyPatch, kind: str, excess: bool
+) -> None:
+    files = distributions()
+    selected = WHEEL if kind == "wheel" else SDIST
+    files[selected] += b"\0" * 8192
+    monkeypatch.setattr(
+        limits, "DISTRIBUTION_BYTES", len(files[selected]) - int(excess)
+    )
+
+    if excess:
+        with pytest.raises(Rejected, match="distribution input byte budget"):
+            inspect(files, "0.6.1")
+    else:
+        inspect(files, "0.6.1")
+
+
+@pytest.mark.parametrize("excess", [False, True])
+def test_pages_independently_bounds_actual_local_tar_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, excess: bool
+) -> None:
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "index.html").write_bytes(b"site")
+    data = tarred({"index.html": b"site"}, compressed=False)
+    archive = tmp_path / "artifact.tar"
+    archive.write_bytes(data)
+    monkeypatch.setattr(limits, "PAGES_TAR_BYTES", len(data) - int(excess))
+
+    if excess:
+        with pytest.raises(Rejected, match="input byte budget exceeded"):
+            verify_pages_tar(site, archive)
+    else:
+        verify_pages_tar(site, archive)
+
+
+@pytest.mark.parametrize("axis", ["entries", "member_bytes", "expanded_bytes"])
+def test_pages_reference_site_has_its_own_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, axis: str
+) -> None:
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "index.html").write_bytes(b"x" * 8)
+    (site / "second").write_bytes(b"y" * 8)
+    data = tarred({"index.html": b"", "second": b""}, compressed=False)
+    archive = tmp_path / "artifact.tar"
+    archive.write_bytes(data)
+    policy = {"entries": 2, "member_bytes": 8, "expanded_bytes": 16}
+    policy[axis] -= 1
+    monkeypatch.setattr(limits, "SITE", limits.ArchiveLimits(**policy))
+
+    if axis == "entries":
+        archive.write_bytes(tarred({"index.html": b""}, compressed=False))
+    with pytest.raises(Rejected, match="budget exceeded"):
+        verify_pages_tar(site, archive)
+
+
+def test_bounded_read_stops_on_first_excess_without_unbounded_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class Source(io.BytesIO):
+        @override
+        def read(self, size: int | None = -1, /) -> bytes:
+            assert size is not None and 0 < size <= 5 - self.tell()
+            return super().read(min(size, 2))
+
+    source = Source(b"abcdefgh" * 1000)
+    monkeypatch.setattr(Path, "open", lambda *args, **kwargs: source)
+
+    with pytest.raises(Rejected, match="input byte budget exceeded"):
+        budgets.local(tmp_path / "growing-file", 4)
+    assert source.closed
+
+
+def test_digest_rejection_precedes_any_zip_member_trust(
+    service: Service, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def decode(data: bytes, policy: limits.ArchiveLimits) -> dict[str, bytes]:
+        pytest.fail("member parser used before digest verification")
+
+    artifact = service.artifacts()[0].model_copy(
+        update={"digest": f"sha256:{'0' * 64}"}
+    )
+    monkeypatch.setattr(artifacts, "zip_files", decode)
+
+    with pytest.raises(Rejected, match="archive digest mismatch"):
+        download(service.api, artifact)
+
+
+def test_rejected_extraction_does_not_publish_partial_files(tmp_path: Path) -> None:
+    destination = tmp_path / "output"
+
+    with pytest.raises(OSError):
+        artifacts.extract(
+            {"first": b"accepted", "first/nested": b"conflict"}, destination
+        )
+
+    assert not destination.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("kind", ["artifact", "wheel", "sdist", "pages"])
+@pytest.mark.parametrize("fault", ["malformed", "path", "duplicate", "special"])
+def test_all_archive_entry_points_reject_unsafe_or_ambiguous_members(
+    service: Service, tmp_path: Path, kind: str, fault: str
+) -> None:
+    result = io.BytesIO()
+    name = "../escape" if fault == "path" else "payload"
+    if kind in {"artifact", "wheel"}:
+        with zipfile.ZipFile(result, "w") as package:
+            entry = zipfile.ZipInfo(name)
+            if fault == "special":
+                entry.create_system = 3
+                entry.external_attr = 0o120777 << 16
+            package.writestr(entry, b"data")
+            if fault == "duplicate":
+                with pytest.warns(UserWarning):
+                    package.writestr(name, b"second")
+    else:
+        with (
+            tarfile.open(fileobj=result, mode="w:gz")
+            if kind == "sdist"
+            else tarfile.open(fileobj=result, mode="w:")
+        ) as tar:
+            entry = tarfile.TarInfo(name)
+            if fault == "special":
+                entry.type = tarfile.SYMTYPE
+                entry.linkname = "target"
+            tar.addfile(entry)
+            if fault == "duplicate":
+                tar.addfile(tarfile.TarInfo(name))
+    data = b"broken" if fault == "malformed" else result.getvalue()
+    artifact = service.artifact(55, "site", service.source, {"placeholder": b""})
+    artifact = artifact.model_copy(update={"digest": f"sha256:{sha256(data)}"})
+    service.routes[("GET", BASE_URL + "actions/artifacts/55/zip")] = Response(200, data)
+    files = distributions() | {WHEEL if kind == "wheel" else SDIST: data}
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "payload").write_bytes(b"")
+    archive = tmp_path / "artifact.tar"
+    archive.write_bytes(data)
+    output = tmp_path / "output"
+
+    reason = {
+        "malformed": "invalid .* archive",
+        "path": "unsafe archive path",
+        "duplicate": "duplicate archive path",
+        "special": "archive special file",
+    }[fault]
+    with pytest.raises(Rejected, match=reason):
+        if kind == "artifact":
+            artifacts.extract(download(service.api, artifact), output)
+        elif kind in {"wheel", "sdist"}:
+            inspect(files, "0.6.1")
+        else:
+            verify_pages_tar(site, archive)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("tar", [False, True])
+@pytest.mark.parametrize("excess", [False, True])
+def test_directory_entries_count_even_without_payload(tar: bool, excess: bool) -> None:
+    result = io.BytesIO()
+    if tar:
+        with tarfile.open(fileobj=result, mode="w:") as package:
+            for name in ("first", "second"):
+                entry = tarfile.TarInfo(name)
+                entry.type = tarfile.DIRTYPE
+                package.addfile(entry)
+    else:
+        with zipfile.ZipFile(result, "w") as package:
+            for name in ("first/", "second/"):
+                package.writestr(name, b"")
+    policy = limits.ArchiveLimits(2 - int(excess), 0, 0)
+
+    def decode() -> dict[str, bytes]:
+        if tar:
+            return archives.tar_files(result.getvalue(), policy, pages=True)
+        return archives.zip_files(result.getvalue(), policy)
+
+    if excess:
+        with pytest.raises(Rejected, match="entry budget exceeded"):
+            decode()
+    else:
+        assert decode() == {}
+
+
+def test_artifact_response_budget_is_independent_of_transport(
+    service: Service, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = service.artifact(55, "site", service.source, {"payload": b""})
+    data = service.routes[("GET", BASE_URL + "actions/artifacts/55/zip")].body
+    monkeypatch.setattr(limits, "RESPONSE_BYTES", len(data))
+    assert download(service.api, artifact) == {"payload": b""}
+    monkeypatch.setattr(limits, "RESPONSE_BYTES", len(data) - 1)
+
+    with pytest.raises(Rejected, match="artifact input byte budget"):
+        download(service.api, artifact)
+
+
+def test_zip_nul_name_cannot_be_truncated_into_a_trusted_path() -> None:
+    data = zipped({"aabb": b"data"}).replace(b"aabb", b"aa\0b")
+
+    with pytest.raises(Rejected, match="unsafe archive path"):
+        archives.zip_files(data, limits.ARTIFACT)
+
+
+@pytest.mark.parametrize("tar", [False, True])
+def test_high_ratio_compressed_members_exceed_small_expansion_budget(tar: bool) -> None:
+    contents = {"payload": b"x" * (2 * 1024 * 1024)}
+    data = (
+        tarred(contents, compressed=True)
+        if tar
+        else zipped(contents, compression=zipfile.ZIP_DEFLATED)
+    )
+    assert len(data) < 4096
+    policy = limits.ArchiveLimits(10, 65536, 65536)
+
+    with pytest.raises(Rejected, match="byte budget exceeded"):
+        if tar:
+            archives.tar_files(data, policy)
+        else:
+            archives.zip_files(data, policy)
+
+
+def test_pages_rejects_reference_symlink(tmp_path: Path) -> None:
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "index.html").symlink_to(tmp_path / "outside")
+    (tmp_path / "outside").write_bytes(b"data")
+    archive = tmp_path / "artifact.tar"
+    archive.write_bytes(tarred({"index.html": b"data"}, compressed=False))
+
+    with pytest.raises(Rejected, match="Pages site special file"):
+        verify_pages_tar(site, archive)

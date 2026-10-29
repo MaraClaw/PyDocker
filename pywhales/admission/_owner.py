@@ -12,6 +12,7 @@ from ._contracts import (
     EndpointIdentity,
     PressureClass,
     SaturationPolicy,
+    validate_demand,
     validate_drain_timeout,
     validate_queue_timeout,
 )
@@ -24,7 +25,7 @@ from ._errors import (
 )
 from ._guard import check_reentry
 from ._request import AdmissionRequest
-from ._state import Bucket, Outcome, Ticket
+from ._state import Bucket, Outcome
 
 
 class AdmissionOwner:
@@ -63,6 +64,7 @@ class AdmissionOwner:
                     ticket.done = True
                     bucket.record(Outcome.REJECTED_CLOSED)
                 bucket.pending.clear()
+                bucket.pending_demand = 0
             self._condition.notify_all()
 
     def wait_drained(self, *, timeout: float) -> bool:
@@ -97,7 +99,11 @@ class AdmissionOwner:
             return True
 
     def request(
-        self, pressure_class: PressureClass, queue_timeout: float | None = None
+        self,
+        pressure_class: PressureClass,
+        queue_timeout: float | None = None,
+        *,
+        demand: int = 1,
     ) -> AdmissionRequest:
         """Return an inert single-use request without occupying pending capacity.
 
@@ -108,11 +114,17 @@ class AdmissionOwner:
             pressure_class: A configured application-defined pressure class.
             queue_timeout: Positive finite seconds spent awaiting admission, or
                 None for no queue deadline. Timing starts at call() or stream().
+            demand: Positive integer initial reservation, defaulting to one. It
+                must not exceed the class demand_capacity when configured.
+
+        Raises:
+            ValueError: If the class, queue timeout, or demand is invalid.
         """
         validate_queue_timeout(queue_timeout)
         if pressure_class not in self._buckets:
             raise ValueError("pressure class is not configured")
-        return AdmissionRequest(self, self._buckets[pressure_class], queue_timeout)
+        bucket = self._buckets[pressure_class]
+        return AdmissionRequest(self, bucket, queue_timeout, demand=demand)
 
     def iter_calls[T](
         self,
@@ -165,12 +177,16 @@ class AdmissionOwner:
                 ticket.done = True
                 bucket.record(Outcome.FAILED)
                 raise
-            if bucket.active < bucket.limit.active and not bucket.pending:
+            if (
+                bucket.active < bucket.limit.active
+                and bucket.fits(ticket.demand)
+                and not bucket.pending
+            ):
                 if deadline is not None and monotonic() >= deadline:
                     ticket.done = True
                     bucket.record(Outcome.QUEUE_TIMED_OUT)
                     raise AdmissionQueueTimeout()
-                self._grant(bucket, ticket)
+                bucket.reserve(ticket)
                 return
             match bucket.limit.policy:
                 case SaturationPolicy.REJECT:
@@ -184,10 +200,7 @@ class AdmissionOwner:
                         raise AdmissionRejected(RejectionReason.QUEUE_FULL)
                 case unreachable:
                     assert_never(unreachable)
-            bucket.pending.append(ticket)
-            bucket.pending_high_water = max(
-                bucket.pending_high_water, len(bucket.pending)
-            )
+            bucket.enqueue(ticket)
             try:
                 while True:
                     if ticket.cancelled:
@@ -202,8 +215,9 @@ class AdmissionOwner:
                     if (
                         bucket.pending[0] is ticket
                         and bucket.active < bucket.limit.active
+                        and bucket.fits(ticket.demand)
                     ):
-                        self._grant(bucket, ticket)
+                        bucket.reserve(ticket)
                         return
                     self._condition.wait(
                         None if remaining is None else min(remaining, TIMEOUT_MAX)
@@ -214,14 +228,27 @@ class AdmissionOwner:
                     bucket.record(Outcome.FAILED)
                 raise
             finally:
-                if ticket in bucket.pending:
-                    bucket.pending.remove(ticket)
+                bucket.dequeue(ticket)
                 self._condition.notify_all()
 
-    def _grant(self, bucket: Bucket, ticket: Ticket) -> None:
-        ticket.active = True
-        bucket.active += 1
-        bucket.active_high_water = max(bucket.active_high_water, bucket.active)
+    def _try_resize(self, request: AdmissionRequest, demand: int) -> bool:
+        with self._condition:
+            ticket, bucket = request._ticket, request._bucket
+            validate_demand(demand, bucket.limit.demand_capacity)
+            if not ticket.active or ticket.closing:
+                raise RuntimeError("admission reservation is not active")
+            delta = demand - ticket.demand
+            if delta > 0 and (bucket.pending or not bucket.fits(delta)):
+                return False
+            bucket.resize(ticket, demand)
+            if delta < 0:
+                self._condition.notify_all()
+            return True
+
+    def _begin_close(self, request: AdmissionRequest) -> None:
+        """End resize eligibility before source cleanup, retaining the reservation."""
+        with self._condition:
+            request._ticket.closing = True
 
     def _cancel(self, request: AdmissionRequest) -> bool:
         with self._condition:
@@ -231,8 +258,7 @@ class AdmissionOwner:
             ticket.cancelled = True
             ticket.done = True
             bucket.record(Outcome.CANCELLED)
-            if ticket in bucket.pending:
-                bucket.pending.remove(ticket)
+            bucket.dequeue(ticket)
             self._condition.notify_all()
             return True
 
@@ -241,5 +267,6 @@ class AdmissionOwner:
             request._ticket.active = False
             request._ticket.done = True
             request._bucket.active -= 1
+            request._bucket.active_demand -= request._ticket.demand
             request._bucket.record(outcome)
             self._condition.notify_all()

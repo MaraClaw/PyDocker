@@ -36,11 +36,20 @@ task authorizes, with existing registry authentication. Multi-platform builds
 need a capable builder/exporter; don't assume the local image store can load
 every multi-platform result.
 
+Both `build` and `bake` accept a keyword-only `timeout` in positive finite
+seconds, replacing the client's `default_timeout` for that one local CLI
+launch; `None` inherits it. Builder inspection before launch and image
+inspection after completion fall outside this budget, and each of `bake`'s
+build/follow-up-config calls gets its own fresh budget rather than one shared
+deadline. A streaming deadline keeps advancing before and between iterations.
+Expiry raises `DockerTimeout` without guaranteeing that the daemon-side build
+stops.
+
 ## Return Contracts
 
 | Mode | Result |
 | --- | --- |
-| Blocking normal build that loads an image | `Image` |
+| Blocking normal build with an identifiable locally loaded image | `Image` |
 | Blocking build with push/nonlocal export and no local load | `None` |
 | Blocking `call="check"`, `"outline"`, or `"targets"` | Captured report `str` |
 | `stream_logs=True` | Owned `MappedProcessStream[str]`, not an image |
@@ -48,6 +57,14 @@ every multi-platform result.
 Don't access `.id` on an arbitrary build result. A successful build can return
 `None`. Report calls bypass image recovery, and consuming a log stream doesn't
 produce a final `Image` return value.
+
+A normal blocking `bake()` returns `BakeResult` configuration by default: it
+builds, then runs a separate `--print` query. That query isn't a build-time
+snapshot. `return_config=False` skips it and returns `None`; `print=True` only
+queries configuration and conflicts with streaming, report calls, and
+`return_config=False`. Bake reports return `str`, and Bake streams yield decoded
+`str`; neither performs the follow-up query. `variables={...}` overlays the
+Bake subprocess environment on each invocation.
 
 ## Stream Decoded Build Logs
 

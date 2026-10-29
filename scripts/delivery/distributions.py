@@ -1,15 +1,15 @@
 """Inspect and isolate-install both exact distribution files before sealing."""
 
-import io
 import subprocess
-import tarfile
 import tempfile
 import tomllib
-import zipfile
 from email.parser import BytesParser
 from pathlib import Path
 
+from . import limits
 from .api import require
+from .archives import tar_files, zip_files
+from .budgets import local
 
 
 def inspect(files: dict[str, bytes], version: str) -> None:
@@ -17,22 +17,12 @@ def inspect(files: dict[str, bytes], version: str) -> None:
     wheel = f"pywhales-{version}-py3-none-any.whl"
     sdist = f"pywhales-{version}.tar.gz"
     require(set(files) == {wheel, sdist}, "distribution filenames")
-    with zipfile.ZipFile(io.BytesIO(files[wheel])) as archive:
-        wheel_files = {
-            name: archive.read(name)
-            for name in archive.namelist()
-            if not name.endswith("/")
-        }
-    with tarfile.open(fileobj=io.BytesIO(files[sdist]), mode="r:gz") as archive:
-        sdist_files: dict[str, bytes] = {}
-        for member in archive.getmembers():
-            require(member.isfile() or member.isdir(), "sdist special file")
-            if member.isfile():
-                stream = archive.extractfile(member)
-                require(stream is not None, "sdist file unreadable")
-                assert stream is not None
-                with stream:
-                    sdist_files[member.name] = stream.read()
+    require(
+        all(len(data) <= limits.DISTRIBUTION_BYTES for data in files.values()),
+        "distribution input byte budget exceeded",
+    )
+    wheel_files = zip_files(files[wheel], limits.DISTRIBUTION)
+    sdist_files = tar_files(files[sdist], limits.DISTRIBUTION)
     for contents, prefix, metadata in (
         (wheel_files, "", f"pywhales-{version}.dist-info/METADATA"),
         (sdist_files, f"pywhales-{version}/", f"pywhales-{version}/PKG-INFO"),
@@ -53,12 +43,20 @@ def inspect(files: dict[str, bytes], version: str) -> None:
 def smoke(root: Path) -> None:
     """Install wheel and sdist separately outside the checkout with isolated Python."""
     root = root.resolve()
-    version = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
+    version = tomllib.loads(
+        local(root / "pyproject.toml", limits.PROJECT_BYTES).decode("utf-8")
+    )["project"]["version"]
     # uv's output-directory marker is not part of the uploaded distributions.
+    paths: dict[str, Path] = {}
+    expected = {f"pywhales-{version}-py3-none-any.whl", f"pywhales-{version}.tar.gz"}
+    for path in (root / "dist").iterdir():
+        if path.name == ".gitignore":
+            continue
+        require(path.name in expected and path.is_file(), "distribution filenames")
+        paths[path.name] = path
+    require(set(paths) == expected, "distribution filenames")
     files = {
-        path.name: path.read_bytes()
-        for path in (root / "dist").iterdir()
-        if path.name != ".gitignore"
+        name: local(path, limits.DISTRIBUTION_BYTES) for name, path in paths.items()
     }
     inspect(files, version)
     code = (

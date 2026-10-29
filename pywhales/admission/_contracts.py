@@ -43,11 +43,16 @@ class SaturationPolicy(Enum):
 
 @dataclass(frozen=True, slots=True)
 class ClassLimit:
-    """Positive active capacity and bounded pending capacity for one class."""
+    """Request-count limits with optional application-defined demand capacity.
+
+    demand_capacity=None leaves aggregate demand unbounded. Reservations account
+    only for participating application work, not daemon memory or CPU limits.
+    """
 
     active: int
     pending: int
     policy: SaturationPolicy = SaturationPolicy.WAIT
+    demand_capacity: int | None = None
 
     def __post_init__(self) -> None:
         if type(self.active) is not int or self.active <= 0:
@@ -56,6 +61,16 @@ class ClassLimit:
             raise ValueError("pending must be a nonnegative integer")
         if not isinstance(self.policy, SaturationPolicy):
             raise ValueError("policy must be a SaturationPolicy")
+        if self.demand_capacity is not None:
+            validate_demand(self.demand_capacity)
+
+
+def validate_demand(demand: int, capacity: int | None = None) -> None:
+    """Reject noninteger, boolean, nonpositive, or over-capacity demand."""
+    if type(demand) is not int or demand <= 0:
+        raise ValueError("demand must be a positive integer")
+    if capacity is not None and demand > capacity:
+        raise ValueError("demand exceeds the class demand capacity")
 
 
 def validate_queue_timeout(timeout: float | None) -> None:
@@ -92,8 +107,18 @@ class OutcomeCounts:
 
 
 @dataclass(frozen=True, slots=True)
+class DemandSnapshot:
+    """Exact reserved active demand, queued demand, and independent high waters."""
+
+    active: int
+    pending: int
+    active_high_water: int
+    pending_high_water: int
+
+
+@dataclass(frozen=True, slots=True)
 class ClassSnapshot:
-    """Exact class occupancy and high-water marks at a snapshot instant."""
+    """Exact request counts and separate demand at a snapshot instant."""
 
     pressure_class: PressureClass
     limit: ClassLimit
@@ -102,6 +127,7 @@ class ClassSnapshot:
     active_high_water: int
     pending_high_water: int
     outcomes: OutcomeCounts
+    demand: DemandSnapshot = DemandSnapshot(0, 0, 0, 0)
 
 
 @dataclass(frozen=True, slots=True)

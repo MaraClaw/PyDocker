@@ -131,3 +131,35 @@ def test_batch_inspect_empty_plugins_avoids_lookup() -> None:
         assert DockerClient().plugin.inspect([]) == []
     lookup.assert_not_called()
     command.assert_not_called()
+
+
+@pytest.mark.parametrize("handle", [False, True])
+@pytest.mark.parametrize("timeout", [None, 2.5])
+def test_plugin_push_forwards_timeout(handle: bool, timeout: float | None) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    with patch("pywhales.components.plugin.cli_wrapper.run") as mock_run:
+        mock_run.return_value = ""
+
+        if handle:
+            Plugin(client.client_config, test_plugin_name, is_immutable_id=True).push(
+                timeout=timeout
+            )
+        else:
+            client.plugin.push(test_plugin_name, timeout=timeout)
+
+    mock_run.assert_called_once()
+    assert mock_run.call_args.kwargs["timeout"] == timeout
+
+
+@pytest.mark.parametrize("timeout", [0.0, -1.0, float("nan"), True])
+def test_plugin_push_invalid_timeout_precedes_launch(timeout: float) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    with (
+        patch("pywhales.components.plugin.cli_wrapper.run") as mock_run,
+        pytest.raises(ValueError),
+    ):
+        client.plugin.push(test_plugin_name, timeout=timeout)
+
+    mock_run.assert_not_called()

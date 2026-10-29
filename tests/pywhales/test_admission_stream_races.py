@@ -11,6 +11,7 @@ import pytest
 from pywhales.admission import (
     AdmissionOwner,
     ClassLimit,
+    DemandSnapshot,
     EndpointIdentity,
     PressureClass,
 )
@@ -66,7 +67,9 @@ def test_reader_gets_original_first_group_when_closer_finishes_first() -> None:
     original, cleanup = ValueError("read"), RuntimeError("cleanup")
     source.read_error, source.cleanup_error = original, cleanup
     source.finish_read.set()
-    stream = owner.request(pressure).stream(lambda: source)
+    request = owner.request(pressure, demand=4)
+    stream = request.stream(lambda: source)
+    assert request.try_resize(3)
     closer_done = Event()
     finish = stream._finish
 
@@ -100,6 +103,7 @@ def test_reader_gets_original_first_group_when_closer_finishes_first() -> None:
             source.finish_read.set()
     assert owner.snapshot().classes[0].active == 0
     assert owner.snapshot().classes[0].outcomes.failed == 1
+    assert owner.snapshot().classes[0].demand == DemandSnapshot(0, 0, 4, 0)
 
 
 @pytest.mark.parametrize("reader_failure", [False, True])
@@ -198,10 +202,14 @@ def test_interrupted_cleanup_wait_still_waits_then_releases_permit() -> None:
 
 def test_closed_owner_drain_waits_for_source_exit_and_inflight_read() -> None:
     pressure = PressureClass("stream")
-    owner = AdmissionOwner(EndpointIdentity("local"), {pressure: ClassLimit(1, 0)})
+    owner = AdmissionOwner(
+        EndpointIdentity("local"), {pressure: ClassLimit(1, 0, demand_capacity=6)}
+    )
     source = ClosingSource()
     source.hold_exit = True
-    stream = owner.request(pressure).stream(lambda: source)
+    request = owner.request(pressure, demand=4)
+    stream = request.stream(lambda: source)
+    assert stream.try_resize(3)
     waiting, cleanup_waiting = Event(), Event()
     wait, stream_wait = owner._condition.wait, stream._condition.wait
 
@@ -213,10 +221,12 @@ def test_closed_owner_drain_waits_for_source_exit_and_inflight_read() -> None:
         cleanup_waiting.set()
         return stream_wait(timeout)
 
-    with ThreadPoolExecutor(3) as executor:
+    with ThreadPoolExecutor(4) as executor:
         read = executor.submit(next, stream)
         try:
             assert source.reading.wait(3)
+            assert executor.submit(request.try_resize, 2).result(3)
+            assert executor.submit(stream.try_resize, 3).result(3)
             owner.close()
             assert not source.exit_started.is_set()
             with patch.object(owner._condition, "wait", side_effect=signal_wait):
@@ -225,9 +235,17 @@ def test_closed_owner_drain_waits_for_source_exit_and_inflight_read() -> None:
             with patch.object(stream._condition, "wait", side_effect=signal_cleanup):
                 closed = executor.submit(stream.close)
                 assert source.exit_started.wait(3)
+                for resize in (request.try_resize, stream.try_resize):
+                    for demand in (1, 3, 5):
+                        with pytest.raises(RuntimeError):
+                            executor.submit(resize, demand).result(3)
+                assert owner.snapshot().classes[0].demand.active == 3
                 assert not owner.wait_drained(timeout=0.001)
                 source.finish_exit.set()
                 assert cleanup_waiting.wait(3)
+                with pytest.raises(RuntimeError):
+                    executor.submit(request.try_resize, 5).result(3)
+                assert owner.snapshot().classes[0].demand.active == 3
                 assert not owner.wait_drained(timeout=0.001)
                 assert not drained.done() and not closed.done()
                 source.finish_read.set()
@@ -241,3 +259,4 @@ def test_closed_owner_drain_waits_for_source_exit_and_inflight_read() -> None:
             source.wake.set()
     stream.close()
     assert owner.snapshot().classes[0].outcomes.stream_closed == 1
+    assert owner.snapshot().classes[0].demand == DemandSnapshot(0, 0, 4, 0)

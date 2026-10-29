@@ -799,6 +799,7 @@ class ComposeCLI(DockerCLICaller):
         quiet: bool = ...,
         *,
         stream_logs: Literal[True],
+        timeout: float | None = ...,
     ) -> Iterable[tuple[str, bytes]] | None: ...
 
     @overload
@@ -809,6 +810,8 @@ class ComposeCLI(DockerCLICaller):
         include_deps: bool = ...,
         quiet: bool = ...,
         stream_logs: Literal[False] = ...,
+        *,
+        timeout: float | None = ...,
     ) -> None: ...
 
     @overload
@@ -819,6 +822,8 @@ class ComposeCLI(DockerCLICaller):
         include_deps: bool = False,
         quiet: bool = False,
         stream_logs: bool = False,
+        *,
+        timeout: float | None = None,
     ) -> Iterable[tuple[str, bytes]] | None: ...
 
     def pull(
@@ -828,6 +833,8 @@ class ComposeCLI(DockerCLICaller):
         include_deps: bool = False,
         quiet: bool = False,
         stream_logs: bool = False,
+        *,
+        timeout: float | None = None,
     ) -> Iterable[tuple[str, bytes]] | None:
         """Pull images for selected Compose services.
 
@@ -842,14 +849,22 @@ class ComposeCLI(DockerCLICaller):
                 To disable all output, use `quiet=True`
             stream_logs: Return an owned stdout/stderr byte stream instead of
                 waiting for command completion.
+            timeout: Positive finite seconds from local CLI launch, replacing the
+                client default; `None` inherits it. Booleans are rejected before
+                selecting services, even for an empty request.
 
         Returns:
             An owned stream of `(source, bytes)` records when `stream_logs=True`
             and services are selected; otherwise `None`, including for `[]`.
 
         Raises:
-            ValueError: `quiet=True` is combined with `stream_logs=True`.
+            ValueError: `quiet=True` is combined with `stream_logs=True`, or
+                `timeout` is not positive and finite.
+            DockerTimeout: The local CLI exceeds its deadline and is killed and
+                reaped, without undoing pulled layers or guaranteeing that
+                daemon-side transfers stop.
         """
+        validate_timeout(timeout)
         if quiet and stream_logs:
             raise ValueError(
                 "It's not possible to have stream_logs=True and quiet=True at the same time. "
@@ -865,9 +880,9 @@ class ComposeCLI(DockerCLICaller):
             services = to_list(services)
             full_cmd += services
         if stream_logs:
-            return stream_stdout_and_stderr(full_cmd)
+            return stream_stdout_and_stderr(full_cmd, timeout=timeout)
         else:
-            run(full_cmd, capture_stdout=False, capture_stderr=False)
+            run(full_cmd, capture_stdout=False, capture_stderr=False, timeout=timeout)
 
     def push(self, services: list[str] | None = None) -> None:
         """Push service images.

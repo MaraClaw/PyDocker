@@ -11,6 +11,7 @@ import json
 import os
 from collections import OrderedDict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import suppress
 from datetime import datetime
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
@@ -54,6 +55,7 @@ from pywhales.components.image.streams import (
     MultiImageStream,
 )
 from pywhales.exceptions import DockerException, NoSuchImage
+from pywhales.telemetry._lifecycle import ExecutionTelemetry
 from pywhales.utils import (
     MappedProcessStream,
     ValidPath,
@@ -501,52 +503,48 @@ class ImageCLI(DockerCLICaller):
         )
         command = [str(argument) for argument in full_cmd]
         environment = finalize_environment(environment, command)
-        deadline = (
-            None
-            if policy.default_timeout is None
-            else monotonic() + policy.default_timeout
-        )
-        with Popen(
-            command,
-            stdin=PIPE,
-            stdout=PIPE,
-            env=environment,
-            bufsize=0 if deadline is not None else -1,
-        ) as process:
-            assert process.stdin is not None
-            assert process.stdout is not None
-            owner = (
+        with ExecutionTelemetry(policy.telemetry_observer, "archive_load") as telemetry:
+            telemetry.start()
+            deadline = (
                 None
-                if deadline is None
-                else ArchiveDeadline(
+                if policy.default_timeout is None
+                else monotonic() + policy.default_timeout
+            )
+            with Popen(
+                command, stdin=PIPE, stdout=PIPE, env=environment, bufsize=0
+            ) as process:
+                assert process.stdin is not None
+                assert process.stdout is not None
+                owner = ArchiveDeadline(
                     process, command, deadline, raw=policy.raw_diagnostics
                 )
-            )
-            for buffer_bytes in input:
-                if owner is None:
-                    process.stdin.write(buffer_bytes)
-                    process.stdin.flush()
-                else:
-                    owner.write(process.stdin, buffer_bytes)
-            if owner is not None:
-                owner.check()
-            process.stdin.close()
-            if owner is None:
-                stdout = process.stdout.read()
-            else:
-                chunks = []
-                while chunk := owner.read(process.stdout):
-                    chunks.append(chunk)
-                stdout = b"".join(chunks)
-                owner.check()
-            exit_code = process.wait()
-            if owner is not None:
-                owner.check()
-        if exit_code != 0:
-            raise DockerException(
-                command, exit_code, raw_diagnostics=policy.raw_diagnostics
-            )
-        return stdout.decode().splitlines()
+                try:
+                    for buffer_bytes in input:
+                        owner.write(process.stdin, buffer_bytes)
+                    owner.check()
+                    process.stdin.close()
+                    chunks = []
+                    while chunk := owner.read(process.stdout):
+                        chunks.append(chunk)
+                    stdout = b"".join(chunks)
+                    owner.check()
+                    exit_code = process.wait()
+                    owner.check()
+                finally:
+                    if process.poll() is None:
+                        with suppress(ProcessLookupError):
+                            process.kill()
+                    process.wait()
+                    owner.thread.join()
+                    telemetry.return_code = process.returncode
+                    telemetry.stdin_bytes = owner.stdin_bytes
+                    telemetry.stdout_bytes = owner.stdout_bytes
+                    telemetry.stderr_bytes = owner.stderr_bytes
+            if exit_code != 0:
+                raise DockerException(
+                    command, exit_code, raw_diagnostics=policy.raw_diagnostics
+                )
+            return stdout.decode().splitlines()
 
     def list(
         self,
@@ -624,6 +622,8 @@ class ImageCLI(DockerCLICaller):
         quiet: bool = False,
         stream_logs: Literal[False] = False,
         platform: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> Image: ...
 
     @overload
@@ -633,6 +633,8 @@ class ImageCLI(DockerCLICaller):
         quiet: bool = False,
         stream_logs: Literal[False] = False,
         platform: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> builtins.list[Image]: ...
 
     @overload
@@ -643,6 +645,7 @@ class ImageCLI(DockerCLICaller):
         *,
         stream_logs: Literal[True],
         platform: str | None = None,
+        timeout: float | None = None,
     ) -> ImageStream: ...
 
     @overload
@@ -652,6 +655,8 @@ class ImageCLI(DockerCLICaller):
         quiet: bool,
         stream_logs: Literal[True],
         platform: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> ImageStream: ...
 
     @overload
@@ -662,6 +667,7 @@ class ImageCLI(DockerCLICaller):
         *,
         stream_logs: Literal[True],
         platform: str | None = None,
+        timeout: float | None = None,
     ) -> ImageStream | EmptyImageStream: ...
 
     @overload
@@ -671,6 +677,8 @@ class ImageCLI(DockerCLICaller):
         quiet: bool,
         stream_logs: Literal[True],
         platform: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> ImageStream | EmptyImageStream: ...
 
     @overload
@@ -680,6 +688,8 @@ class ImageCLI(DockerCLICaller):
         quiet: bool = False,
         stream_logs: bool = False,
         platform: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> Image | ImageStream: ...
 
     @overload
@@ -689,6 +699,8 @@ class ImageCLI(DockerCLICaller):
         quiet: bool = False,
         stream_logs: bool = False,
         platform: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> builtins.list[Image] | ImageStream | EmptyImageStream: ...
 
     def pull(
@@ -697,6 +709,8 @@ class ImageCLI(DockerCLICaller):
         quiet: bool = False,
         stream_logs: bool = False,
         platform: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> Image | builtins.list[Image] | ImageStream | EmptyImageStream:
         """Pull one or more image references into the selected Docker daemon.
 
@@ -720,6 +734,10 @@ class ImageCLI(DockerCLICaller):
             stream_logs: Return owned `(image_reference, bytes)` progress records
                 instead of waiting for transfers and returning image handles.
             platform: If you want to enforce a platform.
+            timeout: Positive finite seconds from each transfer subprocess's own
+                launch, replacing the client default; `None` inherits it. Image
+                inspection and executor queueing do not consume this budget, and
+                each concurrent transfer gets its own deadline.
 
         Returns:
             One image for a string, or an ordered list for iterable input when
@@ -729,11 +747,17 @@ class ImageCLI(DockerCLICaller):
             iterable input returns `[]`, or an empty generator when streaming.
 
         Raises:
-            ValueError: `quiet=True` is combined with `stream_logs=True`.
+            ValueError: `quiet=True` is combined with `stream_logs=True`, or
+                `timeout` is not positive and finite. Booleans are rejected
+                before consuming references, even for an empty request.
             DockerException: A transfer or subsequent image inspection fails.
+            DockerTimeout: A transfer subprocess exceeds its own deadline; it is
+                killed and reaped without undoing the pull or guaranteeing that
+                daemon-side work stops.
             BufferError: A streamed record or retained stderr exceeds the selected
                 byte budget. Multi-image failure also cancels sibling transfers.
         """
+        validate_timeout(timeout)
         if quiet and stream_logs:
             raise ValueError(
                 "It's not possible to have stream_logs=True and quiet=True at the same time. "
@@ -751,6 +775,7 @@ class ImageCLI(DockerCLICaller):
                 stream_logs=stream_logs,
                 platform=platform,
                 buffer_bytes=buffer_bytes,
+                timeout=timeout,
             )
             if stream_logs:
                 assert result is not None
@@ -768,6 +793,7 @@ class ImageCLI(DockerCLICaller):
                 stream_logs=stream_logs,
                 platform=platform,
                 buffer_bytes=buffer_bytes,
+                timeout=timeout,
             )
             if stream_logs:
                 assert result is not None
@@ -779,6 +805,7 @@ class ImageCLI(DockerCLICaller):
                 quiet=quiet,
                 stream_logs=stream_logs,
                 platform=platform,
+                timeout=timeout,
                 buffer_bytes=buffer_bytes,
             )
 
@@ -790,6 +817,7 @@ class ImageCLI(DockerCLICaller):
         platform: str | None = None,
         *,
         buffer_bytes: int | None,
+        timeout: float | None = None,
     ) -> builtins.list[Image] | ImageStream:
         if stream_logs:
             return self._pull_multiple_tags_stream(
@@ -798,11 +826,25 @@ class ImageCLI(DockerCLICaller):
                 stream_logs=stream_logs,
                 platform=platform,
                 buffer_bytes=buffer_bytes,
+                timeout=timeout,
             )
         else:
+
+            def pull_one(
+                image_name: str, quiet: bool, stream_logs: bool, platform: str | None
+            ) -> None:
+                self._pull_single_tag(
+                    image_name,
+                    quiet,
+                    stream_logs,
+                    platform,
+                    buffer_bytes=buffer_bytes,
+                    timeout=timeout,
+                )
+
             pool = ThreadPool(4)
             pool.starmap(
-                func=self._pull_single_tag,
+                func=pull_one,
                 iterable=(
                     (image_name, quiet, stream_logs, platform)
                     for image_name in image_names
@@ -820,10 +862,16 @@ class ImageCLI(DockerCLICaller):
         platform: str | None = None,
         *,
         buffer_bytes: int | None,
+        timeout: float | None = None,
     ) -> MultiImageStream:
         def start(image_name: str) -> MappedProcessStream[tuple[str, bytes]]:
             child = self._pull_single_tag(
-                image_name, quiet, True, platform, buffer_bytes=buffer_bytes
+                image_name,
+                quiet,
+                True,
+                platform,
+                buffer_bytes=buffer_bytes,
+                timeout=timeout,
             )
             assert child is not None
             return child
@@ -842,6 +890,7 @@ class ImageCLI(DockerCLICaller):
         platform: str | None = None,
         *,
         buffer_bytes: int | None = None,
+        timeout: float | None = None,
     ) -> MappedProcessStream[tuple[str, bytes]] | None:
         full_cmd = Command([*self.docker_cmd, "image", "pull"])
 
@@ -854,12 +903,14 @@ class ImageCLI(DockerCLICaller):
         full_cmd.append(image_name)
 
         if stream_logs:
-            stream = stream_stdout_and_stderr(full_cmd, buffer_bytes=buffer_bytes)
+            stream = stream_stdout_and_stderr(
+                full_cmd, buffer_bytes=buffer_bytes, timeout=timeout
+            )
             return MappedProcessStream(
                 stream, ((image_name, line) for _, line in stream)
             )
         else:
-            run(full_cmd, capture_stdout=quiet, capture_stderr=quiet)
+            run(full_cmd, capture_stdout=quiet, capture_stderr=quiet, timeout=timeout)
             return None
 
     @overload
@@ -1159,8 +1210,9 @@ class ImageCLI(DockerCLICaller):
 
         Yields:
             Archive-byte chunks from stdout, with no progress-record framing or
-            configured payload budget. Exhaustion or generator closure leaves
-            the subprocess context, which closes pipes and waits for the child.
+            configured payload budget. Exhaustion or generator closure closes
+            pipes, reaps the local child, and joins its accounting thread before
+            completing telemetry. Closure kills a still-running local child.
 
         Raises:
             NoSuchImage: The save CLI reports a missing image.
@@ -1173,53 +1225,59 @@ class ImageCLI(DockerCLICaller):
         )
         command = [str(argument) for argument in full_cmd]
         environment = finalize_environment(environment, command)
-        deadline = (
-            None
-            if policy.default_timeout is None
-            else monotonic() + policy.default_timeout
-        )
-        with Popen(
-            command,
-            stdout=PIPE,
-            stderr=PIPE,
-            env=environment,
-            bufsize=0 if deadline is not None else -1,
-        ) as process:
-            assert process.stdout is not None
-            assert process.stderr is not None
-            owner = (
+        with ExecutionTelemetry(policy.telemetry_observer, "archive_save") as telemetry:
+            telemetry.start()
+            deadline = (
                 None
-                if deadline is None
-                else ArchiveDeadline(
+                if policy.default_timeout is None
+                else monotonic() + policy.default_timeout
+            )
+            with Popen(
+                command, stdout=PIPE, stderr=PIPE, env=environment, bufsize=0
+            ) as process:
+                assert process.stdout is not None
+                assert process.stderr is not None
+                owner = ArchiveDeadline(
                     process, command, deadline, raw=policy.raw_diagnostics
                 )
-            )
-            if owner is None:
-                yield from process.stdout
-                exit_code = process.wait(0.1)
-            else:
-                while chunk := owner.read(process.stdout):
-                    yield chunk
-                owner.check()
-                exit_code = process.wait()
-                owner.check()
-            if exit_code != 0:
-                if owner is not None:
-                    os.set_blocking(process.stderr.fileno(), True)
-                stderr = process.stderr.read()
-                if "No such image" in stderr.decode():
-                    raise NoSuchImage(
-                        command,
-                        exit_code,
-                        stderr=stderr,
-                        raw_diagnostics=policy.raw_diagnostics,
-                    )
-                raise DockerException(
-                    command,
-                    exit_code,
-                    stderr=stderr,
-                    raw_diagnostics=policy.raw_diagnostics,
-                )
+                try:
+                    if deadline is None:
+                        yield from owner.lines(process.stdout)
+                        exit_code = process.wait(0.1)
+                    else:
+                        while chunk := owner.read(process.stdout):
+                            yield chunk
+                        owner.check()
+                        exit_code = process.wait()
+                        owner.check()
+                    if exit_code != 0:
+                        with owner.lock:
+                            os.set_blocking(process.stderr.fileno(), True)
+                            stderr = process.stderr.read()
+                            owner.record_read(process.stderr, stderr)
+                        if "No such image" in stderr.decode():
+                            raise NoSuchImage(
+                                command,
+                                exit_code,
+                                stderr=stderr,
+                                raw_diagnostics=policy.raw_diagnostics,
+                            )
+                        raise DockerException(
+                            command,
+                            exit_code,
+                            stderr=stderr,
+                            raw_diagnostics=policy.raw_diagnostics,
+                        )
+                finally:
+                    if process.poll() is None:
+                        with suppress(ProcessLookupError):
+                            process.kill()
+                    process.wait()
+                    owner.thread.join()
+                    telemetry.return_code = process.returncode
+                    telemetry.stdin_bytes = owner.stdin_bytes
+                    telemetry.stdout_bytes = owner.stdout_bytes
+                    telemetry.stderr_bytes = owner.stderr_bytes
 
     def tag(self, source_image: Image | str, new_tag: str) -> None:
         """Add a tag to a Docker image.

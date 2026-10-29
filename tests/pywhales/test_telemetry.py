@@ -42,11 +42,12 @@ def test_metadata_is_sanitized_when_captured_results_contain_secrets(
     assert result == (secret + "\ufffd", secret)
     launch = records[0]
     assert isinstance(launch, LaunchRecord)
-    assert launch.family == "captured" and launch.schema_version == 2
+    assert launch.family == "captured" and launch.schema_version == 3
     completed = records[1]
     assert isinstance(completed, CompletionRecord)
     assert completed.attempt_id == launch.attempt_id
-    assert completed.schema_version == 2 and completed.return_code == 0
+    assert completed.schema_version == 3 and completed.return_code == 0
+    assert completed.stdin_bytes is None
     assert completed.outcome == "success"
     assert (completed.stdout_bytes, completed.stderr_bytes) == (
         len(secret) + 2,

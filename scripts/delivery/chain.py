@@ -4,8 +4,10 @@ import os
 import tomllib
 from pathlib import Path
 
+from . import limits
 from .api import GitHub, require
 from .artifacts import describe, download, inventory, linked, select, verified
+from .budgets import local
 from .distributions import inspect
 from .models import Artifact, Bundle, Identity, Job, Receipt, Run, Seal
 from .trust import (
@@ -81,7 +83,9 @@ def seal(api: GitHub, run_id: int, root: Path) -> Seal:
             "uploader output linkage",
         )
     distributions = download(api, dist)
-    version = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
+    version = tomllib.loads(
+        local(root / "pyproject.toml", limits.PROJECT_BYTES).decode("utf-8")
+    )["project"]["version"]
     inspect(distributions, version)
     return Seal(
         producer=identity(run),

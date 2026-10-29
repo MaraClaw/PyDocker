@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING
 
+from ._contracts import validate_demand
 from ._guard import operation_scope
 from ._state import Bucket, Outcome, Ticket
 from ._stream import AdmittedStream
@@ -18,13 +19,39 @@ class AdmissionRequest:
     """Inert single-use handle; cancellation only applies before active admission."""
 
     def __init__(
-        self, owner: AdmissionOwner, bucket: Bucket, timeout: float | None
+        self,
+        owner: AdmissionOwner,
+        bucket: Bucket,
+        timeout: float | None,
+        *,
+        demand: int = 1,
     ) -> None:
         """Bind an unregistered ticket to the owner's selected class."""
+        validate_demand(demand, bucket.limit.demand_capacity)
         self._owner = owner
         self._bucket = bucket
         self._timeout = timeout
-        self._ticket = Ticket()
+        self._ticket = Ticket(demand=demand)
+
+    def try_resize(self, demand: int) -> bool:
+        """Atomically try to replace this active reservation without waiting.
+
+        Shrinking wakes FIFO waiters. Growth returns False, unchanged, when demand
+        capacity is unavailable or any request is pending in this class. Equal
+        demand succeeds. Owner closure alone does not end active work.
+
+        Args:
+            demand: Positive integer total reservation, not a delta.
+
+        Returns:
+            Whether the reservation was resized, without releasing its active slot.
+
+        Raises:
+            ValueError: If demand is invalid or exceeds the class capacity.
+            RuntimeError: Before admission, after release, or once stream cleanup
+                begins, including through this original request handle.
+        """
+        return self._owner._try_resize(self, demand)
 
     def call[T](self, operation: Callable[[], T]) -> T:
         """Admit then invoke work once, retaining capacity through BaseException.

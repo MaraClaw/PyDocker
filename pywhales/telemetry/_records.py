@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
-type OperationFamily = Literal["captured", "stream"]
+type OperationFamily = Literal["captured", "stream", "archive_load", "archive_save"]
 type Outcome = Literal["success", "failure", "timeout", "closed"]
 
 
@@ -19,13 +19,13 @@ class LaunchRecord:
     Attributes:
         family: Fixed execution family, never inferred from command arguments.
         attempt_id: Opaque identifier shared with the completion record.
-        schema_version: Record schema version, currently 2.
+        schema_version: Record schema version, currently 3.
         phase: Fixed launch discriminator. Measurements are not yet available.
     """
 
     family: OperationFamily
     attempt_id: str = field(kw_only=True)
-    schema_version: Literal[2] = field(default=2, init=False)
+    schema_version: Literal[3] = field(default=3, init=False)
     phase: Literal["launch"] = field(default="launch", init=False)
 
 
@@ -40,9 +40,12 @@ class CompletionRecord:
             or stream closure/exhaustion, including paused stream consumption.
         stdout_bytes: Bytes actually captured/read, or None when unavailable.
         stderr_bytes: Bytes actually captured/read, or None when unavailable.
+        stdin_bytes: Bytes accepted by successful local pipe writes, including
+            partial progress before failure, or None when unobserved. This does
+            not measure bytes processed by the child or selected Docker daemon.
         attempt_id: Opaque identifier shared with the launch record.
         return_code: Reaped local process status, or None if unavailable.
-        schema_version: Record schema version, currently 2.
+        schema_version: Record schema version, currently 3.
         phase: Fixed completion discriminator.
     """
 
@@ -53,7 +56,8 @@ class CompletionRecord:
     stderr_bytes: int | None = None
     attempt_id: str = field(kw_only=True)
     return_code: int | None = field(default=None, kw_only=True)
-    schema_version: Literal[2] = field(default=2, init=False)
+    stdin_bytes: int | None = field(default=None, kw_only=True)
+    schema_version: Literal[3] = field(default=3, init=False)
     phase: Literal["completion"] = field(default="completion", init=False)
 
 

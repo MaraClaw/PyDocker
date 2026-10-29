@@ -122,3 +122,30 @@ def test_manifest_inspect_insecure_flag(
             assert "--insecure" in cmd
         else:
             assert "--insecure" not in cmd
+
+
+@pytest.mark.parametrize("timeout", [None, 2.5])
+def test_manifest_push_forwards_timeout_and_keeps_preflight_unbudgeted(
+    docker_client: DockerClient, timeout: float | None
+) -> None:
+    with patch("pywhales.components.manifest.cli_wrapper.run") as mock_run:
+        mock_run.return_value = "{}"
+
+        docker_client.manifest.push("busybox:latest", timeout=timeout)
+
+    inspect_call, push_call = mock_run.call_args_list
+    assert "timeout" not in inspect_call.kwargs
+    assert push_call.kwargs["timeout"] == timeout
+
+
+@pytest.mark.parametrize("timeout", [0.0, -1.0, float("nan"), True])
+def test_manifest_push_invalid_timeout_precedes_preflight(
+    docker_client: DockerClient, timeout: float
+) -> None:
+    with (
+        patch("pywhales.components.manifest.cli_wrapper.run") as mock_run,
+        pytest.raises(ValueError),
+    ):
+        docker_client.manifest.push("busybox:latest", timeout=timeout)
+
+    mock_run.assert_not_called()

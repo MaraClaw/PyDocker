@@ -77,6 +77,50 @@ downloaded artifacts, and privileged checkouts always use `github.workflow_sha`.
 
 ## Executable Local Checks
 
+### Finite input budgets
+
+All sizes below are binary MiB (1,048,576 bytes). Policies live in `limits.py`;
+they are fixed trusted-tool limits, not producer-controlled metadata or CLI
+overrides.
+
+| Independent boundary | Input bytes | Entries (including directories) | Expanded bytes/member | Expanded bytes total |
+| --- | ---: | ---: | ---: | ---: |
+| HTTPS response / downloaded artifact ZIP | 64 MiB | 8,192 per ZIP | 16 MiB | 128 MiB |
+| Wheel and sdist, each (including local smoke) | 16 MiB | 4,096 each | 8 MiB | 64 MiB each |
+| Standalone Pages tar | 160 MiB | 8,192 | 16 MiB | 128 MiB |
+| Local Pages reference site | Files read individually | 8,192 | 16 MiB | 128 MiB |
+| Local project configuration (smoke and seal) | 1 MiB | — | — | — |
+
+PyWhales distributes pure Python, type markers and metadata, not native binaries
+or bundled datasets. A 16 MiB compressed distribution and 64 MiB expanded
+distribution leave substantial room for sources and tests. Static MkDocs output
+gets twice that aggregate allowance and 8,192 files/directories for API pages,
+search data and assets. The 160 MiB Pages wrapper accommodates 128 MiB of site
+payload plus tar headers, padding and path metadata. The 64 MiB network allowance
+also accommodates the pair of compressed distributions or a compressed site ZIP;
+ordinary paginated REST JSON is much smaller. Larger legitimate deliverables
+require an explicit review of these trusted policies, not silently unbounded
+fallbacks. The separate 1 MiB project-configuration cap leaves room for extensive
+tool configuration and UTF-8 comments while bounding both independent local
+`pyproject.toml` reads before TOML decoding.
+
+Actual received/read bytes are counted in bounded chunks with a one-byte excess
+probe before accumulation. Exact limits succeed; declared lengths and archive
+sizes only permit early rejection, never exemption from actual accounting.
+Curl's final four-byte status suffix has a separate framing allowance; stderr
+goes directly to the null device (zero retained bytes). The existing 10-second
+connect, 120-second curl and 130-second supervisor deadlines, HTTPS-only
+redirects and host-scoped authorization remain in effect. Every aborted owned
+curl is killed and reaped.
+
+The ZIP digest is checked before any member is trusted. Nested wheel/sdist and
+standalone tar/site checks have independent budgets; an outer ZIP limit is not
+treated as a nested expansion limit. Only complete verified inventories reach
+consumers, and site extraction is staged before publication into its fresh
+destination. Rejection discards staging. These guarantees cover retained bodies
+and member payloads, **not total parser/decompressor memory or CPU**, cumulative
+pagination, or resources used by the producer-only isolated package installs.
+
 ```bash
 uv run --locked pytest tests/pywhales/test_delivery_workflows.py
 uv run --locked ruff check scripts/delivery tests/pywhales/test_delivery_workflows.py

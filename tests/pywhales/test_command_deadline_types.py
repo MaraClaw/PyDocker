@@ -16,6 +16,8 @@ from pywhales.components.buildx.cli_wrapper import (
 from pywhales.components.compose.cli_wrapper import ComposeRunArgs
 from pywhales.components.compose.models import ComposeEvent
 from pywhales.components.container.cli_wrapper import ExecuteArgs, RunArgs
+from pywhales.components.image.streams import EmptyImageStream, ImageStream
+from pywhales.components.plugin.cli_wrapper import Plugin
 from pywhales.components.system.models import DockerEvent
 from pywhales.utils import MappedProcessStream, ProcessStream
 
@@ -258,6 +260,38 @@ def _check_log_deadlines(
         ),
         str | Iterable[tuple[str, bytes]],
     )
+
+
+def _check_image_pull_deadlines(
+    client: DockerClient, timeout: float | None, flag: bool
+) -> None:
+    assert_type(client.image.pull("app", timeout=timeout), Image)
+    assert_type(client.pull("app", timeout=timeout), Image)
+    assert_type(docker.pull("app", timeout=timeout), Image)
+    assert_type(client.image.pull(["app"], timeout=timeout), list[Image])
+    assert_type(
+        client.image.pull("app", stream_logs=True, timeout=timeout), ImageStream
+    )
+    assert_type(
+        client.image.pull(["app"], stream_logs=True, timeout=timeout),
+        ImageStream | EmptyImageStream,
+    )
+    assert_type(
+        client.image.pull("app", stream_logs=flag, timeout=timeout),
+        Image | ImageStream,
+    )
+    assert_type(
+        client.image.pull(["app"], stream_logs=flag, timeout=timeout),
+        list[Image] | ImageStream | EmptyImageStream,
+    )
+
+
+def _check_manifest_and_plugin_push_deadlines(
+    client: DockerClient, plugin: Plugin, timeout: float | None
+) -> None:
+    assert_type(client.manifest.push("name", timeout=timeout), None)
+    assert_type(client.plugin.push("name", timeout=timeout), None)
+    assert_type(plugin.push(timeout=timeout), None)
 
 
 def _check_event_deadlines(client: DockerClient, timeout: float | None) -> None:

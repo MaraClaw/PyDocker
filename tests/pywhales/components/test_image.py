@@ -8,6 +8,7 @@ images, and require disposable daemon state.
 import contextlib
 import json
 import sys
+import time
 from collections.abc import Callable, Generator
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -68,13 +69,18 @@ class _ImageCommands:
         self.stderr = b"err0\nerr1\n"
 
     def start(
-        self, command: Command, *, buffer_bytes: int | None = None
+        self,
+        command: Command,
+        *,
+        buffer_bytes: int | None = None,
+        timeout: float | None = None,
     ) -> ProcessStream:
         """Start a stack-owned Python child for a patched image command.
 
         Args:
             command: Wrapper argv whose final argument names the child.
             buffer_bytes: Output-buffer budget forwarded to the real stream.
+            timeout: Per-launch deadline forwarded to the real stream.
 
         Returns:
             A running stream with piped stdin, also owned by the cleanup stack.
@@ -89,6 +95,7 @@ class _ImageCommands:
                 [sys.executable, "-c", code, name],
                 pipe_stdin=True,
                 buffer_bytes=buffer_bytes,
+                timeout=timeout,
             )
         )
         self.children[name] = child
@@ -377,6 +384,56 @@ def test_image_snapshot_passes_exact_budget_to_real_shared_stream_boundary(
 
     with stream:
         assert sorted(stream) == [(name, b"progress\n") for name in names]
+
+
+def test_multi_image_timeout_is_launch_relative_not_group_relative(
+    image_commands: _ImageCommands,
+) -> None:
+    names = ["one", "two", "three", "four", "five"]
+    stream = image_commands.client.image.pull(names, stream_logs=True, timeout=0.5)
+    assert isinstance(stream, MultiImageStream)
+    try:
+        next(stream)
+        for _ in range(4):
+            image_commands.started.get(timeout=3)
+        assert "five" not in image_commands.children
+
+        time.sleep(0.3)
+        for name in ("one", "two", "three", "four"):
+            image_commands.finish(name)
+        image_commands.started.get(timeout=3)
+        assert "five" in image_commands.children
+
+        time.sleep(0.35)
+        image_commands.finish("five")
+        output = list(stream)
+        assert {name for name, _ in output} == set(names)
+        for child in image_commands.children.values():
+            _assert_image_process_released(child)
+    finally:
+        stream.close()
+
+
+def test_multi_image_timeout_expires_one_child_and_cancels_siblings(
+    image_commands: _ImageCommands,
+) -> None:
+    stream = image_commands.client.image.pull(
+        ["one", "two"], stream_logs=True, timeout=0.4
+    )
+    assert isinstance(stream, MultiImageStream)
+    try:
+        next(stream)
+        for _ in range(2):
+            image_commands.started.get(timeout=3)
+        image_commands.finish("one")
+
+        with pytest.raises(DockerTimeout):
+            list(stream)
+        for child in image_commands.children.values():
+            _assert_image_process_released(child)
+    finally:
+        image_commands.release_children()
+        stream.close()
 
 
 @pytest.mark.parametrize("budget", [4, 64])
@@ -1077,10 +1134,13 @@ def test_image_stream_factories_use_selected_client_budget_and_root_alias(
     selected: list[int | None] = []
 
     def record_budget(
-        command: Command, *, buffer_bytes: int | None = None
+        command: Command,
+        *,
+        buffer_bytes: int | None = None,
+        timeout: float | None = None,
     ) -> ProcessStream:
         selected.append(buffer_bytes)
-        return start(command, buffer_bytes=buffer_bytes)
+        return start(command, buffer_bytes=buffer_bytes, timeout=timeout)
 
     with patch(
         "pywhales.components.image.cli_wrapper.stream_stdout_and_stderr",
@@ -1460,11 +1520,14 @@ def test_multiple_image_stream_child_startup_failure_closes_sibling(
     start = image_commands.start
 
     def start_or_fail(
-        command: Command, *, buffer_bytes: int | None = None
+        command: Command,
+        *,
+        buffer_bytes: int | None = None,
+        timeout: float | None = None,
     ) -> ProcessStream:
         if command[-1] == "two":
             raise error
-        return start(command, buffer_bytes=buffer_bytes)
+        return start(command, buffer_bytes=buffer_bytes, timeout=timeout)
 
     with patch(
         "pywhales.components.image.cli_wrapper.stream_stdout_and_stderr",

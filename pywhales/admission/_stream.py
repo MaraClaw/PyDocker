@@ -92,6 +92,20 @@ class AdmittedStream[T](AbstractContextManager["AdmittedStream[T]"], Iterator[T]
         """
         self._finish(None, Outcome.STREAM_CLOSED)
 
+    def try_resize(self, demand: int) -> bool:
+        """Try to replace the active reservation without waiting for capacity.
+
+        Use total positive integer demand, not a delta. Shrinking wakes FIFO
+        waiters; growth returns False without change if capacity is unavailable
+        or this class has pending work. Equal demand succeeds. Both this handle
+        and the original request reject resizing once cleanup begins.
+
+        Raises:
+            ValueError: If demand is invalid or exceeds the class capacity.
+            RuntimeError: If cleanup has begun or the reservation was released.
+        """
+        return self._request.try_resize(demand)
+
     @override
     def __exit__(
         self,
@@ -124,6 +138,7 @@ class AdmittedStream[T](AbstractContextManager["AdmittedStream[T]"], Iterator[T]
                 if original is not None or interrupted is not None:
                     self._raise_cleanup(original, interrupted)
                 return
+            self._request._owner._begin_close(self._request)
             self._closing = True
         cleanup_error: BaseException | None = None
         try:

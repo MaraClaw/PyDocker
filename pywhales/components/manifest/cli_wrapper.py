@@ -16,7 +16,7 @@ from pywhales.client_config import (
 from pywhales.components._cleanup import resource_cleanup
 from pywhales.components.buildx.imagetools.models import ImageVariantManifest
 from pywhales.components.manifest.models import ManifestListInspectResult
-from pywhales.utils import custom_parse_object_as, run, to_list
+from pywhales.utils import custom_parse_object_as, run, to_list, validate_timeout
 
 
 class ManifestList(ReloadableObjectFromJson[ManifestListInspectResult]):
@@ -167,21 +167,39 @@ class ManifestCLI(DockerCLICaller):
         """
         return ManifestList(self.client_config, x, insecure=insecure)
 
-    def push(self, x: str, purge: bool = False, quiet: bool = False) -> None:
+    def push(
+        self,
+        x: str,
+        purge: bool = False,
+        quiet: bool = False,
+        *,
+        timeout: float | None = None,
+    ) -> None:
         """Push a manifest list to a repository.
 
         Args:
             x: Manifest-list reference to inspect and push.
             purge: Remove the local manifest list after pushing.
             quiet: Capture and discard push output instead of displaying it.
+            timeout: Positive finite seconds from the push CLI's own launch,
+                replacing the client default; `None` inherits it. The local
+                manifest-list preflight inspection does not consume this budget.
+
+        Raises:
+            ValueError: `timeout` is not positive and finite. Booleans are
+                rejected before the preflight inspection.
+            DockerTimeout: The push CLI exceeds its deadline and is killed and
+                reaped, without undoing the push or guaranteeing that
+                daemon-side work stops.
         """
+        validate_timeout(timeout)
         # this is just to raise a correct exception if the manifest list doesn't exist
         self.inspect(x)
 
         full_cmd = Command([*self.docker_cmd, "manifest", "push"])
         full_cmd.add_flag("--purge", purge)
         full_cmd.append(x)
-        run(full_cmd, capture_stdout=quiet, capture_stderr=quiet)
+        run(full_cmd, capture_stdout=quiet, capture_stderr=quiet, timeout=timeout)
 
     def remove(
         self, manifest_lists: ValidManifestList | Sequence[ValidManifestList]

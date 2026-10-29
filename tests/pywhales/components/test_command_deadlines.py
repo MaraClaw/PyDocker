@@ -57,6 +57,8 @@ elif args[:2] == ['buildx', 'ls']:
     print(json.dumps({'Name': 'selected', 'Driver': 'docker'}))
 elif args[:2] == ['image', 'inspect']:
     print('[{"Id":"sha256:built"}]')
+elif args[:2] == ['manifest', 'inspect']:
+    print('{}')
 elif args[:2] == ['container', 'inspect']:
     print('[{"Id":"container-id"}]')
 elif args[:2] == ['service', 'inspect']:
@@ -504,3 +506,120 @@ def test_event_deadline_preserves_typed_mapping_and_eof(
     )
     assert event.action == "start"
     assert_released(result._stream)
+
+
+type TransferOperation = Literal[
+    "image_pull", "compose_pull", "manifest_push", "plugin_push"
+]
+TRANSFER_OPERATIONS: tuple[TransferOperation, ...] = (
+    "image_pull",
+    "compose_pull",
+    "manifest_push",
+    "plugin_push",
+)
+STREAMABLE_TRANSFERS: tuple[TransferOperation, ...] = (
+    "image_pull",
+    "compose_pull",
+)
+
+
+def invoke_transfer(
+    client: DockerClient,
+    operation: TransferOperation,
+    *,
+    timeout: float | None,
+    stream: bool = False,
+) -> object:
+    """Dispatch a registry-transfer scenario with its selected execution deadline.
+
+    Args:
+        client: Client configured to run the local Python driver.
+        operation: Transfer entry point whose forwarding and timeout behavior is
+            tested.
+        timeout: Per-launch duration in seconds, or None for no deadline.
+        stream: Return an owned output stream instead of an eager result when
+            true. Manifest and plugin pushes have no streaming mode.
+
+    Returns:
+        An image for image pulls, None for pushes and non-streamed Compose
+        pulls, or a caller-owned stream for streamed transfers.
+
+    Raises:
+        ValueError: If timeout is not a finite positive duration or None.
+        DockerTimeout: If an eager launch exceeds its deadline. A streaming
+            deadline is reported when the returned stream is consumed or exited.
+    """
+    match operation:
+        case "image_pull":
+            return client.image.pull(
+                "built", quiet=not stream, stream_logs=stream, timeout=timeout
+            )
+        case "compose_pull":
+            return client.compose.pull(
+                "app", quiet=not stream, stream_logs=stream, timeout=timeout
+            )
+        case "manifest_push":
+            return client.manifest.push("manifest-list", quiet=True, timeout=timeout)
+        case "plugin_push":
+            return client.plugin.push("plugin-ref", timeout=timeout)
+        case unreachable:
+            assert_never(unreachable)
+
+
+@pytest.mark.parametrize("operation", TRANSFER_OPERATIONS)
+@pytest.mark.parametrize(
+    "timeout", [0.0, -1.0, float("inf"), float("-inf"), float("nan"), True, False]
+)
+def test_invalid_transfer_timeout_precedes_every_launch(
+    client: DockerClient, tmp_path: Path, operation: TransferOperation, timeout: float
+) -> None:
+    with pytest.raises(ValueError):
+        invoke_transfer(client, operation, timeout=timeout)
+
+    assert not (tmp_path / "launches.jsonl").exists()
+
+
+@pytest.mark.parametrize("operation", TRANSFER_OPERATIONS)
+def test_transfer_deadline_reaches_selected_process(
+    client: DockerClient, monkeypatch: pytest.MonkeyPatch, operation: TransferOperation
+) -> None:
+    monkeypatch.setenv("PYWHALES_TEST_BLOCK", "1")
+
+    with pytest.raises(DockerTimeout):
+        invoke_transfer(client, operation, timeout=0.4)
+
+
+@pytest.mark.parametrize("operation", TRANSFER_OPERATIONS)
+@pytest.mark.parametrize("timeout", [None, 5.0])
+def test_transfer_deadline_preserves_results(
+    client: DockerClient, operation: TransferOperation, timeout: float | None
+) -> None:
+    result = invoke_transfer(client, operation, timeout=timeout)
+
+    match operation:
+        case "image_pull":
+            assert isinstance(result, Image)
+            assert result.id == "sha256:built"
+        case "compose_pull" | "manifest_push" | "plugin_push":
+            assert result is None
+        case unreachable:
+            assert_never(unreachable)
+
+
+@pytest.mark.parametrize("operation", STREAMABLE_TRANSFERS)
+def test_transfer_stream_deadline_preserves_shape(
+    client: DockerClient,
+    operation: Literal["image_pull", "compose_pull"],
+) -> None:
+    result = invoke_transfer(client, operation, timeout=5, stream=True)
+
+    if operation == "compose_pull":
+        assert isinstance(result, ProcessStream)
+        with result:
+            lines = list(result)
+        assert lines == [("stdout", b"container-id\n")]
+    else:
+        assert isinstance(result, MappedProcessStream)
+        with result:
+            lines = list(result)
+        assert lines == [("built", b"container-id\n")]

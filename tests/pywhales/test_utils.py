@@ -8,19 +8,33 @@ does not replace the local process requirements.
 import os
 import select
 import signal
+import subprocess
 import sys
+import threading
+from collections import Counter
+from collections.abc import Buffer, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event, Thread
-from time import monotonic
+from time import monotonic, sleep
+from types import SimpleNamespace
+from typing import Literal, assert_never, override
 
 import pytest
 
+import pywhales._process_stream
+import pywhales._readiness
+import pywhales._stdin_pump
 import pywhales.utils
 from pywhales._observation import observation
+from pywhales._readiness import WakeLatch, wait_ready
+from pywhales._stdin_pump import StdinPump
+from pywhales._stream_buffer import StreamBuffer
 from pywhales.client_config import ClientConfig
 from pywhales.components.buildx.cli_wrapper import stream_buildx_logs
 from pywhales.exceptions import DockerException, DockerTimeout, NoSuchContainer
 from pywhales.inventory import InspectionPolicy
+from pywhales.telemetry._lifecycle import ExecutionTelemetry
 from pywhales.utils import (
     MappedProcessStream,
     ProcessStream,
@@ -119,10 +133,12 @@ def test_process_stream_close_after_eof() -> None:
 
 
 def _assert_process_released(stream: ProcessStream) -> None:
-    """Check child reaping, reader and watchdog shutdown, and pipe closure."""
+    """Check child reaping, worker shutdown, and wake-descriptor and pipe closure."""
     assert stream._process.poll() is not None
     assert all(not thread.is_alive() for thread in stream._threads)
+    assert not stream._reaper.is_alive()
     assert not stream._watchdog.is_alive()
+    assert stream._stop.fileno() is None
     assert all(
         pipe.closed
         for pipe in (stream.stdin, stream._process.stdout, stream._process.stderr)
@@ -1296,3 +1312,499 @@ def test_process_stream_record_bound_includes_newline_across_chunks(
         _assert_process_released(stream)
     finally:
         stream.close()
+
+
+@dataclass
+class WaitLog:
+    """Timed waits and condition waits made by threads other than the main one."""
+
+    timed: list[tuple[int, float]] = field(default_factory=list)
+    conditions: Counter[int] = field(default_factory=Counter)
+
+    def timeouts(self, owned: set[int | None]) -> list[float]:
+        return [timeout for ident, timeout in self.timed if ident in owned]
+
+
+@pytest.fixture
+def waits(monkeypatch: pytest.MonkeyPatch) -> WaitLog:
+    """Record worker-thread timeouts and turn them into untimed waits.
+
+    A worker that depends on a timer to make progress stalls, so tests prove
+    both that no timer is requested and that progress never needed one.
+    """
+    log = WaitLog()
+    event_wait = threading.Event.wait
+    condition_wait = threading.Condition.wait
+
+    def untimed(timeout: float | None) -> float | None:
+        if timeout is None or threading.current_thread() is threading.main_thread():
+            return timeout
+        log.timed.append((threading.get_ident(), timeout))
+        return None
+
+    def event(self: threading.Event, timeout: float | None = None) -> bool:
+        return event_wait(self, untimed(timeout))
+
+    def condition(self: threading.Condition, timeout: float | None = None) -> bool:
+        if threading.current_thread() is not threading.main_thread():
+            log.conditions[threading.get_ident()] += 1
+        return condition_wait(self, untimed(timeout))
+
+    monkeypatch.setattr(threading.Event, "wait", event)
+    monkeypatch.setattr(threading.Condition, "wait", condition)
+    return log
+
+
+def _next_within(stream: ProcessStream, seconds: float = 3) -> tuple[str, bytes] | None:
+    """Return the next record, or None if delivery is still pending after a bound."""
+    records: list[tuple[str, bytes]] = []
+
+    def pull() -> None:
+        try:
+            records.append(next(stream))
+        except StopIteration, DockerException:
+            return
+
+    puller = Thread(target=pull, daemon=True)
+    puller.start()
+    puller.join(seconds)
+    return records[0] if records else None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX readiness waits")
+def test_idle_process_stream_has_no_timers_and_delivers_each_line(
+    waits: WaitLog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given an idle stream with no deadline and a child that echoes stdin lines.
+    reads: Counter[int] = Counter()
+    read = os.read
+
+    def counted(fd: int, size: int) -> bytes:
+        reads[fd] += 1
+        return read(fd, size)
+
+    monkeypatch.setattr(os, "read", counted)
+    before = set(threading.enumerate())
+    stream = stream_stdout_and_stderr(
+        [
+            sys.executable,
+            "-c",
+            "import sys\nfor line in sys.stdin: print(line, end='', flush=True)",
+        ],
+        pipe_stdin=True,
+    )
+    owned = {thread.ident for thread in set(threading.enumerate()) - before}
+    assert stream._process.stdout is not None and stream._process.stderr is not None
+    pipes = {stream._process.stdout.fileno(), stream._process.stderr.fileno()}
+    try:
+        # When nothing is written for a while.
+        sleep(0.4)
+
+        # Then no worker read, woke, or requested a timer on its own.
+        assert sum(reads[fd] for fd in pipes) <= 4
+        assert waits.timeouts(owned) == []
+        assert {
+            ident: count for ident, count in waits.conditions.items() if ident in owned
+        } == {stream._watchdog.ident: 1}
+
+        # And each line is delivered although no timer could have woken a reader.
+        assert stream.stdin is not None
+        for number in range(5):
+            line = f"line {number}\n".encode()
+            stream.stdin.write(line)
+            stream.stdin.flush()
+            assert _next_within(stream) == ("stdout", line)
+        assert waits.timeouts(owned) == []
+    finally:
+        stream.close()
+    _assert_process_released(stream)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX readiness waits")
+def test_deadline_stream_waits_for_the_remaining_time_in_one_wait(
+    waits: WaitLog,
+) -> None:
+    before = set(threading.enumerate())
+    stream = stream_stdout_and_stderr(
+        [sys.executable, "-c", "input()"], pipe_stdin=True, timeout=30
+    )
+    owned = {thread.ident for thread in set(threading.enumerate()) - before}
+    try:
+        sleep(0.3)
+
+        (timeout,) = waits.timeouts(owned)
+        assert 29 < timeout <= 30
+    finally:
+        stream.close()
+    _assert_process_released(stream)
+
+
+_HOLDER = (
+    "import os, signal, sys\n"
+    "release, status = map(int, sys.argv[1:])\n"
+    "if os.fork() == 0:\n"
+    "    os.write(status, b'R')\n"
+    "    os.read(release, 1)\n"
+    "    os._exit(0)\n"
+    "os.close(release)\n"
+    "os.close(status)\n"
+)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX fork and inherited fds")
+@pytest.mark.parametrize("ending", ["close", "expiry", "failure"])
+def test_process_stream_ending_stops_workers_while_descendant_holds_output(
+    ending: Literal["close", "expiry", "failure"],
+) -> None:
+    release_read, release_write = os.pipe()
+    status_read, status_write = os.pipe()
+    with (
+        os.fdopen(release_read, "rb", buffering=0) as release_reader,
+        os.fdopen(release_write, "wb", buffering=0) as release_writer,
+        os.fdopen(status_read, "rb", buffering=0) as status_reader,
+        os.fdopen(status_write, "wb", buffering=0) as status_writer,
+    ):
+        # Given a child whose descendant keeps stdout and stderr open after the
+        # child itself is stopped.
+        stream = stream_stdout_and_stderr(
+            [
+                sys.executable,
+                "-c",
+                _HOLDER
+                + ("os.write(1, b'oversize\\n')\n" if ending == "failure" else "")
+                + "signal.pause()\n",
+                release_reader.fileno(),
+                status_writer.fileno(),
+            ],
+            pass_fds=(release_reader.fileno(), status_writer.fileno()),
+            timeout=1 if ending == "expiry" else None,
+            buffer_bytes=3 if ending == "failure" else None,
+        )
+        try:
+            release_reader.close()
+            status_writer.close()
+            assert select.select([status_reader], [], [], 3)[0]
+            assert status_reader.read(1) == b"R"
+
+            # When the stream is closed, expires, or fails.
+            match ending:
+                case "close":
+                    closer = Thread(target=stream.close, daemon=True)
+                    closer.start()
+                    closer.join(timeout=3)
+                    assert not closer.is_alive(), "close waited for the descendant"
+                case "expiry" | "failure":
+                    assert stream._released.wait(timeout=3)
+                case unreachable:
+                    assert_never(unreachable)
+
+            # Then every worker stopped, the child was reaped, and the error
+            # is delivered once while the descendant still holds the pipes.
+            _assert_process_released(stream)
+            assert not select.select([status_reader], [], [], 0)[0]
+            match ending:
+                case "close":
+                    assert list(stream) == []
+                case "expiry":
+                    with pytest.raises(DockerTimeout):
+                        next(stream)
+                case "failure":
+                    with pytest.raises(BufferError):
+                        next(stream)
+                case unreachable:
+                    assert_never(unreachable)
+            assert list(stream) == []
+        finally:
+            release_writer.close()
+            stream.close()
+            assert select.select([status_reader], [], [], 3)[0]
+            assert status_reader.read(1) == b""
+
+
+@pytest.mark.parametrize("fail_at", [2, 3, 4])
+@pytest.mark.parametrize("buffer_bytes", [None, 10])
+def test_process_stream_setup_failure_unwinds_child_pipes_and_threads(
+    fail_at: int, buffer_bytes: int | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launched: list[subprocess.Popen[bytes]] = []
+    starts = 0
+    saturated = Event()
+    rescued = Event()
+    queues: list[StreamBuffer] = []
+    put = StreamBuffer.put
+
+    def enqueue(queue: StreamBuffer, item: tuple[str, bytes]) -> bool:
+        with queue.condition:
+            if buffer_bytes is not None and queue._bytes + len(item[1]) > buffer_bytes:
+                queues.append(queue)
+                saturated.set()
+            return put(queue, item)
+
+    def rescue() -> None:
+        rescued.set()
+        queues[0].close()
+
+    rescue_timer = threading.Timer(3, rescue)
+
+    class FailingThread(Thread):
+        @override
+        def start(self) -> None:
+            nonlocal starts
+            starts += 1
+            if starts == fail_at:
+                if buffer_bytes is not None:
+                    assert saturated.wait(timeout=3)
+                    rescue_timer.start()
+                raise RuntimeError("can't start new thread")
+            super().start()
+
+    def launch(
+        args: list[str],
+        *,
+        stdin: int | None,
+        stdout: int,
+        stderr: int,
+        env: Mapping[str, str],
+        pass_fds: Sequence[int],
+    ) -> subprocess.Popen[bytes]:
+        process = subprocess.Popen(
+            args, stdin=stdin, stdout=stdout, stderr=stderr, env=env, pass_fds=pass_fds
+        )
+        launched.append(process)
+        return process
+
+    monkeypatch.setattr(pywhales._process_stream, "Thread", FailingThread)
+    monkeypatch.setattr(pywhales.utils, "Popen", launch)
+    monkeypatch.setattr(StreamBuffer, "put", enqueue)
+    before = set(threading.enumerate())
+
+    try:
+        with pytest.raises(RuntimeError):
+            stream_stdout_and_stderr(
+                [
+                    sys.executable,
+                    "-c",
+                    "import os; os.write(1, b'x\\n' * 100); input()",
+                ],
+                pipe_stdin=True,
+                buffer_bytes=buffer_bytes,
+            )
+    finally:
+        rescue_timer.cancel()
+        if rescue_timer.ident is not None:
+            rescue_timer.join()
+
+    assert not rescued.is_set(), "setup cleanup waited for queue capacity"
+    (process,) = launched
+    assert process.returncode is not None
+    assert all(
+        pipe.closed for pipe in (process.stdin, process.stdout, process.stderr) if pipe
+    )
+    assert set(threading.enumerate()) == before
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX fork and inherited fds")
+@pytest.mark.parametrize("failed_body", [False, True])
+def test_stdin_pump_full_pipe_waits_without_timers_and_cancels_with_exact_counters(
+    failed_body: bool, monkeypatch: pytest.MonkeyPatch, waits: WaitLog
+) -> None:
+    # Given a child that never reads stdin, whose descendant keeps the pipe open,
+    # and more input than the pipe holds.
+    blocked: Counter[int] = Counter()
+    accepted: Counter[int] = Counter()
+    write = os.write
+
+    def counted(fd: int, data: Buffer) -> int:
+        try:
+            count = write(fd, data)
+        except BlockingIOError:
+            blocked[fd] += 1
+            raise
+        accepted[fd] += count
+        return count
+
+    monkeypatch.setattr(os, "write", counted)
+    payload = b"x" * (8 * 1024 * 1024)
+    telemetry = ExecutionTelemetry(None, "captured")
+    release_read, release_write = os.pipe()
+    code = (
+        "import os, sys, time\n"
+        "if os.fork() == 0:\n"
+        "    os.read(int(sys.argv[1]), 1)\n"
+        "    os._exit(0)\n"
+        "time.sleep(60)\n"
+    )
+    try:
+        with subprocess.Popen(
+            [sys.executable, "-c", code, str(release_read)],
+            stdin=subprocess.PIPE,
+            pass_fds=(release_read,),
+        ) as child:
+            try:
+                assert child.stdin is not None
+                fd = child.stdin.fileno()
+                before = set(threading.enumerate())
+                pump = StdinPump(child, payload, telemetry)
+                pump.__enter__()
+                owned = {thread.ident for thread in set(threading.enumerate()) - before}
+                deadline = monotonic() + 3
+                while not blocked[fd] and monotonic() < deadline:
+                    sleep(0.01)
+
+                # When the writer sits on a full pipe for a while.
+                sleep(0.3)
+
+                # Then it neither retried on a timer nor requested one.
+                assert 0 < blocked[fd] <= 2
+                assert waits.timeouts(owned) == []
+
+                # And leaving the context stops it promptly, with exact counts,
+                # although a descendant still holds the pipe open.
+                error = RuntimeError("body failed") if failed_body else None
+                leaving = Thread(
+                    target=pump.__exit__,
+                    args=(RuntimeError if failed_body else None, error, None),
+                    daemon=True,
+                )
+                leaving.start()
+                leaving.join(timeout=3)
+                assert not leaving.is_alive(), "leaving waited for the descendant"
+                assert pump._thread is not None and not pump._thread.is_alive()
+                assert telemetry.stdin_bytes == accepted[fd]
+                assert 0 < accepted[fd] < len(payload)
+                assert pump._pipe is not None and pump._pipe.closed
+            finally:
+                child.kill()
+    finally:
+        os.write(release_write, b"x")
+        os.close(release_read)
+        os.close(release_write)
+
+
+def test_stdin_pump_start_failure_kills_child_and_keeps_stdin_attached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingThread(Thread):
+        @override
+        def start(self) -> None:
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(pywhales._stdin_pump, "Thread", FailingThread)
+    with subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"], stdin=subprocess.PIPE
+    ) as child:
+        try:
+            with (
+                pytest.raises(RuntimeError),
+                StdinPump(child, b"data", ExecutionTelemetry(None, "captured")),
+            ):
+                pytest.fail("entered with a writer that could not start")
+
+            assert child.wait(timeout=3) == -signal.SIGKILL
+            assert child.stdin is not None
+        finally:
+            child.kill()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX wake descriptors")
+def test_wake_latch_wakes_pollers_once_and_closes_idempotently() -> None:
+    latch = WakeLatch()
+    fd = latch.fileno()
+    assert fd is not None
+    poller = select.poll()
+    poller.register(fd, select.POLLIN)
+    assert poller.poll(0) == [] and not latch.is_set()
+
+    latch.set()
+    latch.set()
+
+    assert latch.is_set()
+    assert poller.poll(0) and poller.poll(0)
+    latch.close()
+    latch.close()
+    latch.set()
+    assert latch.fileno() is None and latch.is_set()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX wake descriptors")
+def test_wake_latch_set_and_close_race_without_errors() -> None:
+    errors: list[BaseException] = []
+
+    def attempt(action: Callable[[], None]) -> None:
+        try:
+            action()
+        except (OSError, TypeError, ValueError, AttributeError) as error:
+            errors.append(error)
+
+    for _ in range(300):
+        latch = WakeLatch()
+        workers = [
+            Thread(target=attempt, args=(action,))
+            for action in (latch.set, latch.close, latch.set, latch.close)
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+        latch.close()
+
+    assert errors == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX readiness waits")
+def test_wait_ready_blocks_until_the_latch_is_set() -> None:
+    read_fd, write_fd = os.pipe()
+    latch = WakeLatch()
+    finished = Event()
+    try:
+        waiter = Thread(
+            target=lambda: (wait_ready(read_fd, latch=latch), finished.set()),
+            daemon=True,
+        )
+        waiter.start()
+        assert not finished.wait(0.3)
+
+        latch.set()
+
+        assert finished.wait(3)
+        waiter.join(timeout=3)
+    finally:
+        latch.set()
+        latch.close()
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX readiness waits")
+def test_wait_ready_honours_timeouts_and_survives_huge_ones() -> None:
+    read_fd, write_fd = os.pipe()
+    try:
+        started = monotonic()
+        wait_ready(read_fd, timeout=0.2)
+        assert 0.15 <= monotonic() - started < 3
+
+        os.write(write_fd, b"x")
+        wait_ready(read_fd, timeout=1e308)
+        wait_ready(write_fd, writable=True, timeout=float("inf"))
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+def test_windows_waits_stay_bounded_slices(monkeypatch: pytest.MonkeyPatch) -> None:
+    naps: list[float] = []
+    latch = WakeLatch()
+    monkeypatch.setattr(pywhales._readiness, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(pywhales._readiness.time, "sleep", naps.append)
+    try:
+        wait_ready(0)
+        wait_ready(0, timeout=0.001)
+        wait_ready(0, latch=latch)
+        latch.set()
+        started = monotonic()
+        wait_ready(0, latch=latch)
+
+        assert naps == [pywhales._readiness.POLL_SLICE, 0.001]
+        assert monotonic() - started < 3
+    finally:
+        latch.close()

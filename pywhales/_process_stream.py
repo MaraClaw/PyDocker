@@ -1,7 +1,9 @@
 """Process-backed output iteration, deadlines, and local CLI cleanup.
 
-Reader threads and a watchdog keep running independently of stream consumption.
-Cleanup controls only the local process, not daemon-managed resources.
+Reader threads, a child-reaping thread, and a watchdog keep running independently
+of stream consumption. On POSIX they wait on readiness: no timer runs while idle,
+and every stop path wakes the readers through the stop latch. Cleanup controls
+only the local process, not daemon-managed resources.
 """
 
 from __future__ import annotations
@@ -15,6 +17,13 @@ from time import monotonic
 from types import TracebackType
 from typing import IO, Self, override
 
+from pywhales._readiness import (
+    WakeLatch,
+    bounded_wait,
+    reap,
+    unwind_launch,
+    wait_ready,
+)
 from pywhales._stream_buffer import StreamBuffer
 from pywhales.exceptions import (
     DockerException,
@@ -76,10 +85,10 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         self._telemetry_outcome: Outcome | None = None
         self._read_bytes = {"stdout": 0, "stderr": 0}
         self._queue = StreamBuffer(buffer_bytes)
-        self._stop = Event()
         self._released = Event()
         self._closed = False
         self._expired = False
+        self._exited = False
         self._error: OSError | BufferError | DockerException | None = None
         self._failure_callback: (
             Callable[[OSError | BufferError | DockerException], None] | None
@@ -92,14 +101,34 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         self._inflight = {"stdout": b"", "stderr": b""}
         assert process.stdout is not None
         assert process.stderr is not None
-        self._threads = tuple(
-            Thread(target=self._read_pipe, args=(pipe, name), daemon=True)
-            for pipe, name in ((process.stdout, "stdout"), (process.stderr, "stderr"))
-        )
-        for thread in self._threads:
-            thread.start()
-        self._watchdog = Thread(target=self._monitor, daemon=True)
-        self._watchdog.start()
+        stop: WakeLatch | None = None
+        started: list[Thread] = []
+        try:
+            stop = self._stop = WakeLatch()
+            self._threads = tuple(
+                Thread(target=self._read_pipe, args=(pipe, name), daemon=True)
+                for pipe, name in (
+                    (process.stdout, "stdout"),
+                    (process.stderr, "stderr"),
+                )
+            )
+            self._reaper = Thread(
+                target=reap, args=(process, self._publish_exit), daemon=True
+            )
+            self._watchdog = Thread(target=self._monitor, daemon=True)
+            for thread in (*self._threads, self._reaper, self._watchdog):
+                thread.start()
+                started.append(thread)
+        except BaseException:
+            self._queue.close()
+            unwind_launch(process, stop, started)
+            raise
+
+    def _publish_exit(self) -> None:
+        """Record child exit and wake the watchdog and any waiting consumer."""
+        with self._queue.condition:
+            self._exited = True
+            self._queue.condition.notify_all()
 
     def _on_failure(
         self, callback: Callable[[OSError | BufferError | DockerException], None]
@@ -141,7 +170,7 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
     def _notify_exit_failure(self) -> None:
         """Notify a registered owner if the child has exited unsuccessfully."""
         with self._queue.condition:
-            exit_code = self._process.poll()
+            exit_code = self._process.returncode if self._exited else None
             if exit_code is None or exit_code == 0 or self._failure_callback is None:
                 return
             stderr = bytes(self._stderr)
@@ -180,7 +209,7 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
                                 self._read_bytes[name] += len(chunk)
                             offset = 0
                     except BlockingIOError:
-                        self._stop.wait(0.01)
+                        wait_ready(pipe.fileno(), latch=self._stop)
                         continue
                     if not chunk:
                         if pending:
@@ -264,7 +293,7 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
             not self._stop.is_set()
             and self._deadline is not None
             and monotonic() >= self._deadline
-            and self._process.poll() is None
+            and not self._exited
         ):
             self._expired = True
             self._timeout_stdout = (
@@ -278,24 +307,28 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
     def _monitor(self) -> None:
         """Enforce the deadline and reap the child independently of iteration.
 
-        Kill a running child when stopped, join readers, and close piped stdin
-        before signalling that owned resources have been released.
+        Sleep until stop, child exit, or the deadline, never on a fixed interval.
+        Kill a running child when stopped, join the child reaper and readers,
+        close piped stdin, then close the stop latch's wake descriptor, which no
+        thread waits on any longer, before signalling that owned resources have
+        been released.
         """
         try:
             with self._queue.condition:
-                while not self._stop.is_set() and self._process.poll() is None:
+                while not self._stop.is_set() and not self._exited:
                     self._expire()
                     if not self._stop.is_set():
                         remaining = (
-                            0.01
+                            None
                             if self._deadline is None
-                            else max(0, min(0.01, self._deadline - monotonic()))
+                            else self._deadline - monotonic()
                         )
-                        self._queue.condition.wait(remaining)
-            if self._stop.is_set() and self._process.poll() is None:
+                        self._queue.condition.wait(bounded_wait(remaining))
+                exited = self._exited
+            if self._stop.is_set() and not exited:
                 with suppress(ProcessLookupError):
                     self._process.kill()
-            self._process.wait()
+            self._reaper.join()
             self._notify_exit_failure()
             for thread in self._threads:
                 thread.join()
@@ -303,6 +336,7 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
                 os.set_blocking(self.stdin.fileno(), False)
                 with suppress(BrokenPipeError, BlockingIOError):
                     self.stdin.close()
+            self._stop.close()
         finally:
             self._released.set()
 

@@ -1,16 +1,15 @@
 """Deadline ownership for direct binary archive subprocesses."""
 
 import os
-import subprocess
 from collections.abc import Buffer, Iterator
 from contextlib import suppress
 from io import BufferedReader, RawIOBase
-from select import select
 from subprocess import Popen
 from threading import Event, Lock, Thread
-from time import monotonic, sleep
+from time import monotonic
 from typing import IO, override
 
+from pywhales._readiness import bounded_wait, reap, wait_ready
 from pywhales.exceptions import DockerTimeout
 
 
@@ -20,6 +19,11 @@ class ArchiveDeadline:
     Counters include successful writes and reads, never submitted buffer sizes.
     The pipe lock serializes caller I/O with watchdog drains. Reap the process
     and join thread before publishing counters; a deadline is optional.
+
+    Pipe waits are readiness waits made under the pipe lock, so the watchdog
+    never closes a pipe beneath one. A wait lasts the remaining time to the
+    deadline, which is when the watchdog needs the lock to expire the child,
+    and has no timer at all without a deadline or after a natural exit.
     """
 
     def __init__(
@@ -42,46 +46,73 @@ class ArchiveDeadline:
         self.stderr_bytes: int | None = None if process.stderr is None else 0
         self.released = Event()
         self.lock = Lock()
+        self._exited = Event()
         for pipe in (process.stdin, process.stdout, process.stderr):
             if pipe is not None and (
                 deadline is not None or (pipe is process.stdin and os.name != "nt")
             ):
                 os.set_blocking(pipe.fileno(), False)
+        self._reaper = (
+            None
+            if deadline is None
+            else Thread(target=reap, args=(process, self._exited.set), daemon=True)
+        )
         self.thread = Thread(target=self._watch, daemon=True)
-        self.thread.start()
+        try:
+            if self._reaper is not None:
+                self._reaper.start()
+            self.thread.start()
+        except RuntimeError:
+            with suppress(ProcessLookupError):
+                process.kill()
+            if self._reaper is not None and self._reaper.ident is not None:
+                self._reaper.join()
+            raise
 
     def _watch(self) -> None:
         try:
             if self.deadline is None:
                 self.process.wait()
                 return
-            while True:
-                remaining = self.deadline - monotonic()
-                try:
-                    self.process.wait(timeout=max(0, min(86400, remaining)))
-                    return
-                except subprocess.TimeoutExpired:
-                    if monotonic() < self.deadline:
-                        continue
-                    if self.process.poll() is not None:
-                        return
-                    self.expired = True
-                    with suppress(ProcessLookupError):
-                        self.process.kill()
-                    self.process.wait()
-                    with self.lock:
-                        self.stdout = self._drain(self.process.stdout)
-                        self.stderr = self._drain(self.process.stderr)
-                        for pipe in (
-                            self.process.stdin,
-                            self.process.stdout,
-                            self.process.stderr,
-                        ):
-                            if pipe is not None and not pipe.closed:
-                                pipe.close()
-                    return
+            while not self._exited.wait(bounded_wait(self.deadline - monotonic())):
+                if monotonic() >= self.deadline:
+                    break
+            if self._exited.is_set():
+                return
+            self.expired = True
+            with suppress(ProcessLookupError):
+                self.process.kill()
+            self.process.wait()
+            with self.lock:
+                self.stdout = self._drain(self.process.stdout)
+                self.stderr = self._drain(self.process.stderr)
+                for pipe in (
+                    self.process.stdin,
+                    self.process.stdout,
+                    self.process.stderr,
+                ):
+                    if pipe is not None and not pipe.closed:
+                        pipe.close()
         finally:
+            if self._reaper is not None:
+                self._reaper.join()
             self.released.set()
+
+    def _wait(self, pipe: IO[bytes], *, writable: bool) -> bool:
+        """Wait for readiness while holding the pipe lock.
+
+        Returns:
+            False if the deadline has passed and the watchdog has yet to decide
+            between expiry and a natural exit; the caller then releases the
+            lock and waits for that decision.
+        """
+        timeout = None
+        if self.deadline is not None and not self.released.is_set():
+            timeout = self.deadline - monotonic()
+            if timeout <= 0:
+                return False
+        wait_ready(pipe.fileno(), writable=writable, timeout=timeout)
+        return True
 
     def _drain(self, pipe: IO[bytes] | None) -> bytes | None:
         if pipe is None or pipe.closed:
@@ -126,14 +157,16 @@ class ArchiveDeadline:
     def read(self, pipe: IO[bytes], size: int = 65536) -> bytes:
         while True:
             self.check()
+            settle = False
             with self.lock:
                 if self.expired:
                     continue
                 try:
                     return self._read(pipe, size)
                 except BlockingIOError:
-                    pass
-            sleep(0.01)
+                    settle = not self._wait(pipe, writable=False)
+            if settle:
+                self.released.wait()
 
     def lines(self, pipe: IO[bytes]) -> Iterator[bytes]:
         """Yield buffered lines, counting raw reads including read-ahead."""
@@ -146,21 +179,21 @@ class ArchiveDeadline:
         view = memoryview(data)
         while offset < len(data):
             self.check()
-            written = 0
+            settle = False
             with self.lock:
                 if self.expired:
                     continue
-                with suppress(BlockingIOError):
+                try:
                     end = offset + 4096 if os.name == "nt" else len(view)
                     written = os.write(pipe.fileno(), view[offset:end])
+                except BlockingIOError:
+                    settle = not self._wait(pipe, writable=True)
+                else:
                     assert self.stdin_bytes is not None
                     self.stdin_bytes += written
-            offset += written
-            if not written:
-                if self.deadline is None:
-                    select([], [pipe], [])
-                else:
-                    sleep(0.01)
+                    offset += written
+            if settle:
+                self.released.wait()
 
 
 class _ArchiveReader(RawIOBase):

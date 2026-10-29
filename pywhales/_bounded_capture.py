@@ -10,6 +10,7 @@ from pywhales._capture_pipes import CapturePipes
 from pywhales._execution_policy import ExecutionPolicy
 from pywhales._launch_limits import argv_size, check_launch
 from pywhales._observation import ObservationState, check_observation
+from pywhales._readiness import watch_exit
 from pywhales.exceptions import (
     DockerTimeout,
     ObservationCancelled,
@@ -53,11 +54,17 @@ def bounded_capture(
     read_bytes = {process.stdout.fileno(): 0, process.stderr.fileno(): 0}
     try:
         buffers = {process.stdout.fileno(): stdout, process.stderr.fileno(): stderr}
-        with CapturePipes((process.stdout, process.stderr)) as pipes:
+        with (
+            watch_exit(process) as exited,
+            CapturePipes((process.stdout, process.stderr), exited) as pipes,
+        ):
             while True:
                 if any(token.is_set() for token in observation.cancel_tokens):
                     raise ObservationCancelled()
                 now = monotonic()
+                if exited.is_set():
+                    # A natural exit ends the selected timeout; scopes still apply.
+                    deadline = None
                 if (
                     deadline is not None
                     and now >= deadline
@@ -65,24 +72,27 @@ def bounded_capture(
                         observation.deadline is None or deadline < observation.deadline
                     )
                 ):
-                    if process.poll() is None:
-                        process.kill()
-                        process.wait()
-                        raise DockerTimeout(
-                            args,
-                            process.returncode,
-                            bytes(stdout),
-                            bytes(stderr),
-                            raw_diagnostics=policy.raw_diagnostics,
-                        ) from None
-                    deadline = None
+                    process.kill()
+                    process.wait()
+                    raise DockerTimeout(
+                        args,
+                        process.returncode,
+                        bytes(stdout),
+                        bytes(stderr),
+                        raw_diagnostics=policy.raw_diagnostics,
+                    ) from None
                 check_observation(observation)
-                if not pipes and process.poll() is not None:
+                if not pipes and exited.is_set():
                     break
-                wait = 0.05
+                # Wait for pipe data or child exit; only a deadline or a cancel
+                # token (a plain Event that cannot wake the wait) bounds it.
+                wait = None
                 for end in (deadline, observation.deadline):
                     if end is not None:
-                        wait = min(wait, max(0, end - now))
+                        remaining = max(0, end - now)
+                        wait = remaining if wait is None else min(wait, remaining)
+                if observation.cancel_tokens:
+                    wait = 0.05 if wait is None else min(wait, 0.05)
                 for fd, available in pipes.ready(wait):
                     if available == 0:
                         pipes.discard(fd)

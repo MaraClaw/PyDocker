@@ -7,6 +7,7 @@
 - `_inspect_validation.py`: whole-response validation for context, plugin, and task batches.
 - `utils.py`: `run()`, stream factories/adapters, CLI value conversion, and JSON aliases.
 - `_process_stream.py`: process ownership and watchdog; `_stream_buffer.py`: queue accounting.
+- `_readiness.py`: wake latch, readiness wait, and child-exit helpers shared by pipe workers, capture, and archives.
 - `exceptions.py`: captured command details and stderr-based exception selection.
 
 ## Commands And Configuration
@@ -64,6 +65,12 @@
   not containers, services, or other daemon-managed resources.
 - `close()` is idempotent and waits for process/thread cleanup. Preserve recorded terminal errors
   for one delivery through iteration or clean context exit; don't replace an active body exception.
+- POSIX pipe workers wait on readiness, not timers: stream readers, the stdin writer, and bounded capture
+  block on the pipe plus a `WakeLatch`, and a reaper thread publishes child exit instead of `poll()` loops.
+  Only a real deadline (its remaining time), a cancel token (bounded 50 ms check), or Windows pipes
+  (bounded slices) may time a wait. Every stop path must `set()` the latch; `close()` it only after the
+  threads waiting on it are joined. `ArchiveDeadline` waits under its pipe lock for at most the remaining
+  deadline, so expiry never closes a pipe beneath a wait.
 
 ## Buffer And Error Invariants
 

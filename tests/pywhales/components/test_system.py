@@ -6,6 +6,7 @@ Docker transport rather than a daemon.
 """
 
 import json
+import subprocess
 import sys
 import time
 from datetime import date, datetime, timedelta
@@ -17,10 +18,141 @@ import pytest
 from pydantic import ValidationError
 
 from pywhales import DockerClient
+from pywhales.components.system.cli_wrapper import DiskFreeResult
 from pywhales.components.system.models import DockerEvent, SystemInfo
 from pywhales.exceptions import DockerException, NoSuchContainer
 from pywhales.test_utils import get_all_jsons, random_name
 from pywhales.utils import stream_stdout_and_stderr
+
+
+@pytest.mark.parametrize("with_percent", [False, True])
+def test_disk_free_parses_all_resource_groups(with_percent: bool) -> None:
+    records = [
+        {
+            "Type": "Images",
+            "TotalCount": "4",
+            "Active": "2",
+            "Size": "1.5GB",
+            "Reclaimable": "500MB",
+        },
+        {
+            "Type": "Containers",
+            "TotalCount": "3",
+            "Active": "1",
+            "Size": "20MB",
+            "Reclaimable": "10MB",
+        },
+        {
+            "Type": "Local Volumes",
+            "TotalCount": "2",
+            "Active": "0",
+            "Size": "8MB",
+            "Reclaimable": "4MB",
+        },
+        {
+            "Type": "Build Cache",
+            "TotalCount": "5",
+            "Active": "1",
+            "Size": "2GB",
+            "Reclaimable": "1GB",
+        },
+    ]
+    if with_percent:
+        for record in records:
+            record["Reclaimable"] += " (50%)"
+    result = DiskFreeResult("\n".join(json.dumps(record) for record in records))
+
+    for item, expected in zip(
+        (result.images, result.containers, result.volumes, result.build_cache),
+        (
+            (4, 2, 1_500_000_000, 500_000_000),
+            (3, 1, 20_000_000, 10_000_000),
+            (2, 0, 8_000_000, 4_000_000),
+            (5, 1, 2_000_000_000, 1_000_000_000),
+        ),
+        strict=True,
+    ):
+        assert (item.total_count, item.active, item.size, item.reclaimable) == expected
+        assert item.reclaimable_percent == (50.0 if with_percent else 100.0)
+        assert isinstance(item.size, int)
+        assert isinstance(item.total_count, int)
+
+
+def test_disk_free_executes_json_format_and_returns_summary() -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["fake-docker", "prefix"]
+    output = "\n".join(
+        json.dumps(
+            {
+                "Type": kind,
+                "TotalCount": "1",
+                "Active": "0",
+                "Size": "2MB",
+                "Reclaimable": "1MB (50%)",
+            }
+        )
+        for kind in ("Images", "Containers", "Local Volumes", "Build Cache")
+    )
+    with patch(
+        "subprocess.run",
+        return_value=subprocess.CompletedProcess([], 0, output.encode(), b""),
+    ) as transport:
+        result = client.system.disk_free()
+
+    assert transport.call_args.args[0] == [
+        "fake-docker",
+        "prefix",
+        "system",
+        "df",
+        "--format",
+        "{{json .}}",
+    ]
+    assert result.volumes.size == 2_000_000
+    assert result.build_cache.reclaimable_percent == 50.0
+
+
+def test_info_executes_json_format_and_parses_schema() -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["fake-docker", "prefix"]
+    output = b'{"ID":"node-id","Containers":3,"Plugins":{"Volume":["local"]},"NCPU":4}'
+    with patch(
+        "subprocess.run", return_value=subprocess.CompletedProcess([], 0, output, b"")
+    ) as transport:
+        result = client.system.info()
+
+    assert transport.call_args.args[0] == [
+        "fake-docker",
+        "prefix",
+        "system",
+        "info",
+        "--format",
+        "{{json .}}",
+    ]
+    assert isinstance(result, SystemInfo)
+    assert (result.id, result.containers, result.n_cpu) == ("node-id", 3, 4)
+    assert result.plugins is not None
+    assert result.plugins.volume == ["local"]
+    assert result.images is None
+
+
+@pytest.mark.parametrize(
+    "output,error",
+    [
+        (b"not-json", json.JSONDecodeError),
+        (b'{"Containers":"not-a-count"}', ValidationError),
+    ],
+)
+def test_info_rejects_malformed_output(output: bytes, error: type[ValueError]) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["fake-docker"]
+    with (
+        patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess([], 0, output, b""),
+        ),
+        pytest.raises(error),
+    ):
+        client.system.info()
 
 
 def test_disk_free(ctr_client: DockerClient) -> None:

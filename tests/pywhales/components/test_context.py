@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
@@ -143,3 +144,47 @@ def test_scalar_inspect_context_none_keeps_current_context_lookup() -> None:
     assert resource.name == "current"
     command.assert_called_once()
     assert command.call_args.args[0] == ["docker-test", "context", "inspect"]
+
+
+EMPTY_SELECTIONS = [
+    pytest.param(list, id="list"),
+    pytest.param(tuple, id="tuple"),
+    pytest.param(lambda: (item for item in ()), id="generator"),
+]
+SINGLE_SELECTIONS = [
+    pytest.param(lambda: "alpha", id="str"),
+    pytest.param(lambda: ["alpha"], id="list"),
+    pytest.param(lambda: (item for item in ["alpha"]), id="generator"),
+]
+
+
+@pytest.mark.parametrize("make_empty", EMPTY_SELECTIONS)
+def test_context_remove_empty_selection_skips_cli(
+    make_empty: Callable[[], Iterable[str]],
+) -> None:
+    client = DockerClient(client_call=["not-installed"])
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch("subprocess.run", side_effect=AssertionError("subprocess")),
+    ):
+        client.context.remove(make_empty(), force=True)
+
+
+@pytest.mark.parametrize("make_selection", SINGLE_SELECTIONS)
+def test_context_remove_single_selection_builds_argv_once(
+    make_selection: Callable[[], str | Iterable[str]],
+) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    with patch(
+        "subprocess.run", return_value=CompletedProcess([], 0, b"", b"")
+    ) as command:
+        client.context.remove(make_selection(), force=True)
+    command.assert_called_once()
+    assert command.call_args.args[0] == [
+        "docker-test",
+        "context",
+        "remove",
+        "--force",
+        "alpha",
+    ]

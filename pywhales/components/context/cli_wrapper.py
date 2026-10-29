@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import builtins
 import json
-from collections.abc import Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
@@ -268,19 +268,20 @@ class ContextCLI(DockerCLICaller):
         return [Context(self.client_config, id_, is_immutable_id=True) for id_ in ids]
 
     def remove(
-        self, x: ValidContext | Sequence[ValidContext], force: bool = False
+        self, x: ValidContext | Iterable[ValidContext], force: bool = False
     ) -> None:
         """Remove one or more contexts.
 
         Args:
-            x: One or more contexts, empty list means no-op.
+            x: One or more contexts, an empty selection means no-op.
             force: Force removal, including the current context.
         """
+        contexts = to_list(x)
+        if not contexts:
+            return
         full_cmd = Command([*self.docker_cmd, "context", "remove"])
         full_cmd.add_flag("--force", force)
-        if x == []:
-            return
-        full_cmd += to_list(x)
+        full_cmd += contexts
         run(full_cmd)
 
     def update(self) -> None:

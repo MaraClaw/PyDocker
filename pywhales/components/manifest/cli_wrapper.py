@@ -1,7 +1,7 @@
 """Docker CLI manifest-list handles, local assembly, and registry publication."""
 
 import json
-from collections.abc import Sequence
+from collections.abc import Iterable
 from types import TracebackType
 from typing import Self, override
 
@@ -202,15 +202,17 @@ class ManifestCLI(DockerCLICaller):
         run(full_cmd, capture_stdout=quiet, capture_stderr=quiet, timeout=timeout)
 
     def remove(
-        self, manifest_lists: ValidManifestList | Sequence[ValidManifestList]
+        self, manifest_lists: ValidManifestList | Iterable[ValidManifestList]
     ) -> None:
         """Remove one or more local Docker manifest lists.
 
         Args:
-            manifest_lists: Manifest-list names or handles. An empty list is a no-op.
+            manifest_lists: Manifest-list names or handles. An empty selection is
+                a no-op.
         """
-        if manifest_lists == []:
+        selected = to_list(manifest_lists)
+        if not selected:
             return
         full_cmd = Command([*self.docker_cmd, "manifest", "rm"])
-        full_cmd += to_list(manifest_lists)
+        full_cmd += selected
         run(full_cmd)

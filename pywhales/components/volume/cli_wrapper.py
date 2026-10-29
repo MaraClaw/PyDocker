@@ -6,7 +6,7 @@ import builtins
 import json
 import os
 import tempfile
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
@@ -302,18 +302,18 @@ class VolumeCLI(DockerCLICaller):
 
         run(full_cmd)
 
-    def remove(self, x: ValidVolume | Sequence[ValidVolume]) -> None:
+    def remove(self, x: ValidVolume | Iterable[ValidVolume]) -> None:
         """Remove one or more volumes.
 
         Args:
-            x: A volume or a list of volumes. An empty list as argument means
+            x: A volume or an iterable of volumes. An empty selection means
                 nothing is done.
         """
-
-        full_cmd = Command([*self.docker_cmd, "volume", "remove"])
-        if x == []:
+        volumes = to_list(x)
+        if not volumes:
             return
-        for v in to_list(x):
+        full_cmd = Command([*self.docker_cmd, "volume", "remove"])
+        for v in volumes:
             full_cmd.append(str(v))
 
         run(full_cmd)

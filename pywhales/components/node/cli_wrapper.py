@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import builtins
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from types import MappingProxyType
 from typing import assert_never, overload, override
@@ -118,16 +118,17 @@ ValidNode = Node | str
 class NodeCLI(DockerCLICaller):
     """Node administration commands requiring access to a Swarm manager."""
 
-    def demote(self, x: ValidNode | Sequence[ValidNode]) -> None:
+    def demote(self, x: ValidNode | Iterable[ValidNode]) -> None:
         """Demote one or more Swarm managers to workers.
 
         Args:
-            x: Node IDs, hostnames, or handles. An empty list is a no-op.
+            x: Node IDs, hostnames, or handles. An empty selection is a no-op.
         """
-        full_cmd = Command([*self.docker_cmd, "node", "demote"])
-        if x == []:
+        nodes = to_list(x)
+        if not nodes:
             return
-        full_cmd += to_list(x)
+        full_cmd = Command([*self.docker_cmd, "node", "demote"])
+        full_cmd += nodes
         run(full_cmd)
 
     @overload
@@ -181,39 +182,40 @@ class NodeCLI(DockerCLICaller):
         all_ids = run(full_cmd).splitlines()
         return [Node(self.client_config, x, is_immutable_id=True) for x in all_ids]
 
-    def promote(self, x: ValidNode | Sequence[ValidNode]) -> None:
+    def promote(self, x: ValidNode | Iterable[ValidNode]) -> None:
         """Promote one or more Swarm nodes to managers.
 
         Args:
-            x: Node IDs, hostnames, or handles. An empty list is a no-op.
+            x: Node IDs, hostnames, or handles. An empty selection is a no-op.
         """
-        full_cmd = Command([*self.docker_cmd, "node", "promote"])
-        if x == []:
+        nodes = to_list(x)
+        if not nodes:
             return
-        full_cmd += to_list(x)
+        full_cmd = Command([*self.docker_cmd, "node", "promote"])
+        full_cmd += nodes
         run(full_cmd)
 
     def ps(
-        self, x: ValidNode | Sequence[ValidNode] | None = None
+        self, x: ValidNode | Iterable[ValidNode] | None = None
     ) -> builtins.list[pywhales.components.task.cli_wrapper.Task]:
         """List Swarm tasks associated with one or more nodes.
 
         Args:
             x: One or more nodes (can be id, name or `pywhales.Node` object.).
                 If the argument is not provided, it defaults to the current node.
-                An empty list means an empty list will also be returned.
+                An empty selection means an empty list will also be returned.
 
         Returns:
             Task handles in CLI output order, including any task history Docker lists.
         """
-        if x == []:
-            return []
-        elif x is None:
+        if x is None:
             # this is the default, on the command line, nothing is provided, and then
             # it automatically defaults to the current node.
             command_args = []
         else:
             command_args = to_list(x)
+            if not command_args:
+                return []
         full_cmd = [
             *self.docker_cmd,
             "node",
@@ -230,19 +232,21 @@ class NodeCLI(DockerCLICaller):
             for id_ in ids
         ]
 
-    def remove(self, x: ValidNode | Sequence[ValidNode], force: bool = False) -> None:
+    def remove(self, x: ValidNode | Iterable[ValidNode], force: bool = False) -> None:
         """Remove one or more nodes from the Swarm.
 
         Args:
-            x: One node or a list of nodes. You can use the id or the hostname of a node.
-                You can also use a `pywhales.Node`.
+            x: One node or an iterable of nodes. You can use the id or the hostname
+                of a node. You can also use a `pywhales.Node`. An empty selection
+                is a no-op.
             force: Force node removal when True.
         """
+        nodes = to_list(x)
+        if not nodes:
+            return
         full_cmd = Command([*self.docker_cmd, "node", "remove"])
         full_cmd.add_flag("--force", force)
-        if x == []:
-            return
-        full_cmd += to_list(x)
+        full_cmd += nodes
         run(full_cmd)
 
     def update(

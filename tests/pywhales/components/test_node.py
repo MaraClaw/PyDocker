@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
@@ -213,3 +214,85 @@ def test_list_tasks_node(docker_client: DockerClient) -> None:
     with docker_client.service.create("busybox", ["sleep", "infinity"]) as my_service:
         assert docker_client.node.ps([]) == []
         assert set(docker_client.node.ps()) == set(docker_client.service.ps(my_service))
+
+
+EMPTY_SELECTIONS = [
+    pytest.param(list, id="list"),
+    pytest.param(tuple, id="tuple"),
+    pytest.param(lambda: (item for item in ()), id="generator"),
+]
+SINGLE_SELECTIONS = [
+    pytest.param(lambda: "alpha", id="str"),
+    pytest.param(lambda: ["alpha"], id="list"),
+    pytest.param(lambda: (item for item in ["alpha"]), id="generator"),
+]
+
+
+@pytest.mark.parametrize("make_empty", EMPTY_SELECTIONS)
+@pytest.mark.parametrize("method", ["demote", "promote", "remove", "ps"])
+def test_node_empty_selection_skips_cli(
+    method: str, make_empty: Callable[[], Iterable[str]]
+) -> None:
+    client = DockerClient(client_call=["not-installed"])
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch("subprocess.run", side_effect=AssertionError("subprocess")),
+    ):
+        result = getattr(client.node, method)(make_empty())
+    assert result == ([] if method == "ps" else None)
+
+
+@pytest.mark.parametrize("make_selection", SINGLE_SELECTIONS)
+@pytest.mark.parametrize(
+    ("method", "kwargs", "subcommand"),
+    [
+        ("demote", {}, ["demote"]),
+        ("promote", {}, ["promote"]),
+        ("remove", {}, ["remove"]),
+        ("remove", {"force": True}, ["remove", "--force"]),
+    ],
+)
+def test_node_selection_builds_argv_once(
+    method: str,
+    kwargs: dict[str, bool],
+    subcommand: list[str],
+    make_selection: Callable[[], str | Iterable[str]],
+) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    with patch(
+        "subprocess.run", return_value=CompletedProcess([], 0, b"", b"")
+    ) as command:
+        getattr(client.node, method)(make_selection(), **kwargs)
+    command.assert_called_once()
+    assert command.call_args.args[0] == ["docker-test", "node", *subcommand, "alpha"]
+
+
+@pytest.mark.parametrize(
+    ("make_selection", "selected"),
+    [
+        pytest.param(lambda: None, [], id="current-node"),
+        pytest.param(lambda: "alpha", ["alpha"], id="str"),
+        pytest.param(lambda: ["alpha"], ["alpha"], id="list"),
+        pytest.param(lambda: (item for item in ["alpha"]), ["alpha"], id="generator"),
+    ],
+)
+def test_node_ps_launches_for_current_node_or_nonempty_selection(
+    make_selection: Callable[[], str | Iterable[str] | None], selected: list[str]
+) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    with patch(
+        "subprocess.run", return_value=CompletedProcess([], 0, b"task-id\n", b"")
+    ) as command:
+        tasks = client.node.ps(make_selection())
+    command.assert_called_once()
+    assert command.call_args.args[0] == [
+        "docker-test",
+        "node",
+        "ps",
+        "--quiet",
+        "--no-trunc",
+        *selected,
+    ]
+    assert [task.id for task in tasks] == ["task-id"]

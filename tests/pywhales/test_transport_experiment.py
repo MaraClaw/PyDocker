@@ -1,10 +1,13 @@
 """Conditional no-go and semantic comparison behavior with no candidate launches."""
 
+import json
 import socket
 import subprocess
+from typing import Literal, assert_never
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
 from scripts.fleet_harness.experiment import (
     Baseline,
@@ -14,7 +17,12 @@ from scripts.fleet_harness.experiment import (
     decide,
 )
 from scripts.fleet_harness.runner import run
-from tests.pywhales.test_fleet_harness import manifest, plan
+from tests.pywhales.test_fleet_harness import (
+    duration_manifest,
+    duration_plan,
+    manifest,
+    plan,
+)
 
 
 def semantics() -> Semantics:
@@ -185,3 +193,63 @@ def test_entry_gate_when_baseline_is_declared_never_launches(
 
     assert reason in decision.reasons
     assert decision.decision == "no_go" and decision.candidate_launches == 0
+
+
+def test_matched_simulation_when_duration_finishes_is_not_incomplete() -> None:
+    # Given equal full-duration runs with a final boundary timeout observation.
+    result = run(duration_manifest(), duration_plan(12.0, 2))
+    comparison = Comparison(
+        cli=result,
+        candidate=result,
+        cli_contract=semantics(),
+        candidate_contract=semantics(),
+    )
+
+    # When prerecorded simulations are compared.
+    decision = decide(Experiment(comparison=comparison))
+
+    # Then completion is usable for comparison, never authorization to adopt.
+    assert decision.comparison_status == "matched_simulation"
+    assert decision.mismatches == () and decision.decision == "no_go"
+    assert decision.candidate_launches == 0
+
+
+@pytest.mark.parametrize("route", ["cli", "candidate"])
+@pytest.mark.parametrize(
+    "defect", ["provider_calls", "completed", "stopped", "rejected"]
+)
+def test_experiment_rejects_when_imported_report_is_incoherent(
+    route: str, defect: Literal["provider_calls", "completed", "stopped", "rejected"]
+) -> None:
+    # Given valid populations with incoherent accounting or status in either route.
+    result = run(manifest(), plan())
+    comparison = Comparison(
+        cli=result,
+        candidate=result,
+        cli_contract=semantics(),
+        candidate_contract=semantics(),
+    )
+    raw = json.loads(Experiment(comparison=comparison).model_dump_json())
+    for report in (raw["comparison"]["cli"], raw["comparison"]["candidate"]):
+        report["provider_calls"] = 4
+    report = raw["comparison"][route]
+    match defect:
+        case "provider_calls":
+            report["provider_calls"] = 5
+            code = "provider_call_accounting"
+        case "completed" | "stopped" | "rejected":
+            report.update(
+                status=defect, reasons=["test_stop"] if defect == "completed" else []
+            )
+            code = "status_reasons"
+        case unreachable:
+            assert_never(unreachable)
+
+    # When the serialized experiment is imported.
+    with pytest.raises(ValidationError) as caught:
+        Experiment.model_validate_json(json.dumps(raw))
+
+    # Then nested RunReport validation rejects the specific route with fixed codes.
+    assert [(error["loc"], error["type"]) for error in caught.value.errors()] == [
+        (("comparison", route), code)
+    ]

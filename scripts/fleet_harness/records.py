@@ -1,6 +1,6 @@
 """Simulation artifacts with explicit collection boundaries and ownership."""
 
-from typing import Literal, Self
+from typing import Literal, Self, assert_never
 
 from pydantic import field_validator, model_validator
 from pydantic_core import PydanticCustomError
@@ -153,6 +153,24 @@ class RunReport(Contract):
             sample.boundary == "selected_cli" for sample in self.samples
         ):
             raise PydanticCustomError("command_population", "command_population")
+        return self
+
+    @model_validator(mode="after")
+    def coherent_execution(self) -> Self:
+        """Reject call accounting or status reasons that contradict execution."""
+        if self.provider_calls != self.command_count + len(self.cleanup.attempted):
+            raise PydanticCustomError(
+                "provider_call_accounting", "provider_call_accounting"
+            )
+        match self.status:
+            case "completed":
+                if self.reasons:
+                    raise PydanticCustomError("status_reasons", "status_reasons")
+            case "stopped" | "rejected":
+                if not self.reasons:
+                    raise PydanticCustomError("status_reasons", "status_reasons")
+            case unreachable:
+                assert_never(unreachable)
         return self
 
 

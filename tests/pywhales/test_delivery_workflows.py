@@ -19,11 +19,11 @@ from pathlib import Path
 from typing import IO, BinaryIO, override
 
 import pytest
-from pydantic import BaseModel, JsonValue
+from pydantic import BaseModel, JsonValue, ValidationError
 
 from scripts.delivery import __main__ as cli
 from scripts.delivery import api as http
-from scripts.delivery import archives, artifacts, budgets, limits
+from scripts.delivery import archives, artifacts, budgets, limits, publication
 from scripts.delivery.api import Curl, GitHub, Rejected, Response, Transport
 from scripts.delivery.artifacts import describe, download, sha256
 from scripts.delivery.chain import name, producer, receipt, seal
@@ -294,6 +294,7 @@ def service(monkeypatch: pytest.MonkeyPatch) -> Service:
     }.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(cli, "Curl", lambda: instance)
+    monkeypatch.setattr(publication.time, "sleep", lambda _seconds: None)
     return instance
 
 
@@ -719,6 +720,137 @@ def test_destination_confirmation_requires_both_unique_correct_kinds(
         service.routes[("GET", PYPI)] = Response(200, json.dumps(release_data).encode())
     with pytest.raises(Rejected):
         confirm(service.api, 100)
+
+
+def test_confirm_rejects_triggering_attempt_mismatch_before_polling(
+    service: Service, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PRODUCER_ATTEMPT", "2")
+    sleeps: list[float] = []
+    monkeypatch.setattr(publication.time, "sleep", sleeps.append)
+    with pytest.raises(Rejected, match="triggering producer attempt mismatch"):
+        confirm(service.api, 100)
+    assert sleeps == []
+
+
+def test_confirm_polls_until_missing_inventory_becomes_complete(
+    service: Service, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        service.published()
+
+    monkeypatch.setattr(publication.time, "sleep", fake_sleep)
+    document = confirm(service.api, 100)
+    assert document.confirmed is True
+    assert sleeps == [publication.CONFIRM_RETRY_DELAY_SECONDS]
+
+
+def test_confirm_polls_through_partial_before_complete(
+    service: Service, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == 1:
+            service.published({WHEEL: service.material[WHEEL]})
+        else:
+            service.published()
+
+    monkeypatch.setattr(publication.time, "sleep", fake_sleep)
+    document = confirm(service.api, 100)
+    assert document.confirmed is True
+    assert sleeps == [publication.CONFIRM_RETRY_DELAY_SECONDS] * 2
+
+
+def test_confirm_exhausts_bounded_retries_with_filenames_when_still_missing(
+    service: Service, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(publication.time, "sleep", sleeps.append)
+    with pytest.raises(Rejected, match="destination publication incomplete") as error:
+        confirm(service.api, 100)
+    assert (
+        sleeps
+        == [publication.CONFIRM_RETRY_DELAY_SECONDS] * publication.CONFIRM_RETRIES
+    )
+    assert WHEEL in str(error.value)
+    assert SDIST in str(error.value)
+
+
+def test_confirm_fails_immediately_on_conflict_after_initial_missing(
+    service: Service, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        service.published({WHEEL: b"conflict"})
+
+    monkeypatch.setattr(publication.time, "sleep", fake_sleep)
+    with pytest.raises(Rejected, match="destination content mismatch"):
+        confirm(service.api, 100)
+    assert sleeps == [publication.CONFIRM_RETRY_DELAY_SECONDS]
+
+
+def test_confirm_fails_immediately_on_invalid_http_after_initial_missing(
+    service: Service, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        service.routes[("GET", PYPI)] = Response(500, b"boom")
+
+    monkeypatch.setattr(publication.time, "sleep", fake_sleep)
+    with pytest.raises(Rejected, match="pypi response"):
+        confirm(service.api, 100)
+    assert sleeps == [publication.CONFIRM_RETRY_DELAY_SECONDS]
+
+
+def test_confirm_fails_immediately_on_malformed_response_after_initial_missing(
+    service: Service, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        service.routes[("GET", PYPI)] = Response(200, b"not json")
+
+    monkeypatch.setattr(publication.time, "sleep", fake_sleep)
+    with pytest.raises(ValidationError):
+        confirm(service.api, 100)
+    assert sleeps == [publication.CONFIRM_RETRY_DELAY_SECONDS]
+
+
+def test_cli_confirm_succeeds_after_missing_inventory_becomes_complete(
+    service: Service, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(publication.time, "sleep", lambda _seconds: service.published())
+    output = tmp_path / "confirmed"
+    assert (
+        invoke(monkeypatch, "confirm", "--run-id", "100", "--output", str(output)) == 0
+    )
+    assert json.loads((output / "receipt.json").read_text())["confirmed"] is True
+
+
+def test_cli_confirm_exits_nonzero_after_bounded_exhaustion(
+    service: Service, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(publication.time, "sleep", sleeps.append)
+    output = tmp_path / "confirmed"
+    assert (
+        invoke(monkeypatch, "confirm", "--run-id", "100", "--output", str(output)) == 1
+    )
+    assert (
+        sleeps
+        == [publication.CONFIRM_RETRY_DELAY_SECONDS] * publication.CONFIRM_RETRIES
+    )
+    assert not output.exists()
 
 
 def test_late_page_duplicate_is_rejected_instead_of_selecting_first(

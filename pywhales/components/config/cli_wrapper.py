@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import builtins
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType, TracebackType
@@ -184,15 +184,16 @@ class ConfigCLI(DockerCLICaller):
         ids = output.splitlines()
         return [Config(self.client_config, id_, is_immutable_id=True) for id_ in ids]
 
-    def remove(self, x: ValidConfig | Sequence[ValidConfig]) -> None:
+    def remove(self, x: ValidConfig | Iterable[ValidConfig]) -> None:
         """Remove one or more configs.
 
         Args:
             x: Config names, IDs, or handles.
-                An empty list means the function call does nothing.
+                An empty selection means the function call does nothing.
         """
-        full_cmd = Command([*self.docker_cmd, "config", "rm"])
-        if x == []:
+        configs = to_list(x)
+        if not configs:
             return
-        full_cmd += to_list(x)
+        full_cmd = Command([*self.docker_cmd, "config", "rm"])
+        full_cmd += configs
         run(full_cmd)

@@ -8,8 +8,12 @@ import pytest
 
 from pywhales import DockerClient
 from pywhales.client_config import ParsingError
-from pywhales.components.context.cli_wrapper import Context
-from pywhales.components.context.models import ContextInspectResult
+from pywhales.components.context.cli_wrapper import (
+    Context,
+    DockerContextConfig,
+    KubernetesContextConfig,
+)
+from pywhales.components.context.models import ContextEndpoint, ContextInspectResult
 from pywhales.test_utils import get_all_jsons
 
 
@@ -187,4 +191,203 @@ def test_context_remove_single_selection_builds_argv_once(
         "remove",
         "--force",
         "alpha",
+    ]
+
+
+@pytest.mark.parametrize("as_dict", [False, True], ids=["dataclass", "dict"])
+def test_create_context_with_endpoint_options(as_dict: bool) -> None:
+    client = DockerClient(host="origin")
+    client.client_config._client_call_with_path = ["docker-test"]
+    source = Context(client.client_config, "source", is_immutable_id=True)
+    docker_options = {
+        "from_": source,
+        "host": "ssh://example",
+        "certificate_authority": Path("/certs/ca.pem"),
+        "certificate": Path("/certs/client.pem"),
+        "key": Path("/certs/key.pem"),
+        "skip_tls_verify": True,
+    }
+    kubernetes_options = {
+        "from_": source,
+        "config_file": Path("/config/kube"),
+        "context_override": "cluster",
+        "namespace_override": "team",
+    }
+    docker = docker_options if as_dict else DockerContextConfig(**docker_options)
+    kubernetes = (
+        kubernetes_options if as_dict else KubernetesContextConfig(**kubernetes_options)
+    )
+    responses = [
+        CompletedProcess([], 0, b"created\n", b""),
+        CompletedProcess([], 0, b'[{"Name":"created"}]', b""),
+    ]
+    with patch("subprocess.run", side_effect=responses) as command:
+        result = client.context.create(
+            "created",
+            default_stack_orchestrator="swarm",
+            description="test context",
+            from_=source,
+            docker=docker,
+            kubernetes=kubernetes,
+        )
+
+    assert isinstance(result, Context)
+    assert result.name == "created"
+    assert result.client_config is client.client_config
+    assert [call.args[0] for call in command.call_args_list] == [
+        [
+            "docker-test",
+            "--host",
+            "origin",
+            "context",
+            "create",
+            "--default-stack-orchestrator",
+            "swarm",
+            "--description",
+            "test context",
+            "--from",
+            "source",
+            "--docker",
+            "from=source,host=ssh://example,ca=/certs/ca.pem,cert=/certs/client.pem,key=/certs/key.pem,skip-tls-verify=True",
+            "--kubernetes",
+            "from=source,config-file=/config/kube,context-override=cluster,namespace-override=team",
+            "created",
+        ],
+        ["docker-test", "--host", "origin", "context", "inspect", "created"],
+    ]
+
+
+@pytest.mark.parametrize("empty_configs", [False, True], ids=["omitted", "empty"])
+def test_create_context_omits_unspecified_options(empty_configs: bool) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    responses = [
+        CompletedProcess([], 0, b"", b""),
+        CompletedProcess([], 0, b'[{"Name":"minimal"}]', b""),
+    ]
+    with patch("subprocess.run", side_effect=responses) as command:
+        result = client.context.create(
+            "minimal",
+            docker={} if empty_configs else None,
+            kubernetes={} if empty_configs else None,
+        )
+
+    options = (
+        ["--docker", "skip-tls-verify=False", "--kubernetes", ""]
+        if empty_configs
+        else []
+    )
+    assert result.name == "minimal"
+    assert [call.args[0] for call in command.call_args_list] == [
+        ["docker-test", "context", "create", *options, "minimal"],
+        ["docker-test", "context", "inspect", "minimal"],
+    ]
+
+
+@pytest.mark.parametrize(
+    ("output", "names"), [(b"", []), (b"second\nfirst\n", ["second", "first"])]
+)
+def test_context_list_returns_ordered_lazy_handles(
+    output: bytes, names: list[str]
+) -> None:
+    client = DockerClient(host="origin")
+    client.client_config._client_call_with_path = ["docker-test"]
+    with patch(
+        "subprocess.run", return_value=CompletedProcess([], 0, output, b"")
+    ) as command:
+        contexts = client.context.list()
+        assert [context.name for context in contexts] == names
+
+    assert all(isinstance(context, Context) for context in contexts)
+    assert all(context.client_config is client.client_config for context in contexts)
+    command.assert_called_once()
+    assert command.call_args.args[0] == [
+        "docker-test",
+        "--host",
+        "origin",
+        "context",
+        "list",
+        "--quiet",
+    ]
+
+
+@pytest.mark.parametrize("as_handle", [False, True], ids=["name", "handle"])
+def test_context_use_inspects_selected_context(as_handle: bool) -> None:
+    client = DockerClient(host="origin")
+    client.client_config._client_call_with_path = ["docker-test"]
+    selection = (
+        Context(client.client_config, "selected", is_immutable_id=True)
+        if as_handle
+        else "selected"
+    )
+    responses = [
+        CompletedProcess([], 0, b"selected\n", b""),
+        CompletedProcess([], 0, b'[{"Name":"selected"}]', b""),
+    ]
+    with patch("subprocess.run", side_effect=responses) as command:
+        result = client.context.use(selection)
+
+    assert isinstance(result, Context)
+    assert result.name == "selected"
+    assert result.client_config is client.client_config
+    assert [call.args[0] for call in command.call_args_list] == [
+        ["docker-test", "--host", "origin", "context", "use", "selected"],
+        ["docker-test", "--host", "origin", "context", "inspect", "selected"],
+    ]
+
+
+def test_context_handle_use_preserves_originating_configuration() -> None:
+    client = DockerClient(host="origin")
+    client.client_config._client_call_with_path = ["docker-test"]
+    context = Context(client.client_config, "selected", is_immutable_id=True)
+    responses = [
+        CompletedProcess([], 0, b"", b""),
+        CompletedProcess([], 0, b'[{"Name":"selected"}]', b""),
+    ]
+    with patch("subprocess.run", side_effect=responses) as command:
+        assert context.use() is None
+    assert [call.args[0] for call in command.call_args_list] == [
+        ["docker-test", "--host", "origin", "context", "use", "selected"],
+        ["docker-test", "--host", "origin", "context", "inspect", "selected"],
+    ]
+
+
+def test_context_inspect_exposes_typed_properties_and_repr() -> None:
+    client = DockerClient(host="origin")
+    client.client_config._client_call_with_path = ["docker-test"]
+    payload = json.dumps(
+        [
+            {
+                "Name": "remote",
+                "Metadata": {"Description": "Remote endpoint"},
+                "Endpoints": {
+                    "docker": {"Host": "ssh://remote", "SkipTLSVerify": True}
+                },
+                "TLSMaterial": {"docker": ["ca.pem"]},
+                "Storage": {"MetadataPath": "/meta", "TLSPath": "/tls"},
+            }
+        ]
+    ).encode()
+    with patch(
+        "subprocess.run", return_value=CompletedProcess([], 0, payload, b"")
+    ) as command:
+        context = client.context.inspect()
+        assert context.metadata == {"Description": "Remote endpoint"}
+        assert context.endpoints == {
+            "docker": ContextEndpoint(host="ssh://remote", skip_tls_verify=True)
+        }
+        assert context.tls_material == {"docker": ["ca.pem"]}
+        assert context.storage is not None
+        assert context.storage.metadata_path == "/meta"
+        assert context.storage.tls_path == "/tls"
+        assert "remote" in repr(context)
+        assert "ssh://remote" in repr(context)
+    assert context.name == "remote"
+    assert context.client_config is client.client_config
+    assert command.call_args_list[0].args[0] == [
+        "docker-test",
+        "--host",
+        "origin",
+        "context",
+        "inspect",
     ]

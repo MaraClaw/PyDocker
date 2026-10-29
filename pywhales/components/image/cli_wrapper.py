@@ -1200,7 +1200,7 @@ class ImageCLI(DockerCLICaller):
             NoSuchImage: A selected image does not exist.
         """
         images = to_list(x)
-        if x == []:
+        if not images:
             return
         full_cmd = Command([*self.docker_cmd, "image", "rm"])
         full_cmd.add_flag("--force", force)

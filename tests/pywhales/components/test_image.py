@@ -9,7 +9,7 @@ import contextlib
 import json
 import sys
 import time
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from queue import Queue
@@ -2753,3 +2753,52 @@ def test_image_save_scope_is_not_held_while_generator_is_suspended() -> None:
             assert next(archive) == b"a\n"
             assert get_execution_policy(client.docker_cmd).default_timeout == 3
             assert b"".join(archive) == b"b\n"
+
+
+EMPTY_SELECTIONS = [
+    pytest.param(list, id="list"),
+    pytest.param(tuple, id="tuple"),
+    pytest.param(lambda: (item for item in ()), id="generator"),
+]
+SINGLE_SELECTIONS = [
+    pytest.param(lambda: "alpha", id="str"),
+    pytest.param(lambda: ["alpha"], id="list"),
+    pytest.param(lambda: (item for item in ["alpha"]), id="generator"),
+]
+
+
+@pytest.mark.parametrize("make_empty", EMPTY_SELECTIONS)
+def test_image_remove_empty_selection_skips_cli(
+    make_empty: Callable[[], Iterable[str]],
+) -> None:
+    client = DockerClient(client_call=["not-installed"])
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch("subprocess.run", side_effect=AssertionError("subprocess")),
+    ):
+        client.image.remove(make_empty(), force=True, prune=False)
+
+
+@pytest.mark.parametrize("make_selection", SINGLE_SELECTIONS)
+@pytest.mark.parametrize(
+    ("kwargs", "flags"),
+    [
+        ({}, []),
+        ({"force": True}, ["--force"]),
+        ({"prune": False}, ["--no-prune"]),
+        ({"force": True, "prune": False}, ["--force", "--no-prune"]),
+    ],
+)
+def test_image_remove_single_selection_keeps_flags(
+    kwargs: dict[str, bool],
+    flags: list[str],
+    make_selection: Callable[[], str | Iterable[str]],
+) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    with patch(
+        "subprocess.run", return_value=CompletedProcess([], 0, b"", b"")
+    ) as command:
+        client.image.remove(make_selection(), **kwargs)
+    command.assert_called_once()
+    assert command.call_args.args[0] == ["docker-test", "image", "rm", *flags, "alpha"]

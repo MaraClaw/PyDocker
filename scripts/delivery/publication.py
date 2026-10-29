@@ -1,11 +1,16 @@
 """Exact PyPI destination inventory and safe partial-publication retries."""
 
 import os
+import time
 from pathlib import Path
+from typing import Final
 
 from .api import GitHub, require
 from .chain import producer, publisher_identity
 from .models import PyPIRelease, Receipt, Seal
+
+CONFIRM_RETRIES: Final = 12
+CONFIRM_RETRY_DELAY_SECONDS: Final = 5
 
 
 def destination(api: GitHub, seal: Seal) -> set[str]:
@@ -56,13 +61,24 @@ def confirm(api: GitHub, run_id: int) -> Receipt:
 
     A skipped or failed uploader is not evidence. A partial or concurrent retry
     is accepted only when the independent destination check is complete.
+    PyPI's index can briefly lag a successful upload, so a nonempty missing set
+    is retried up to CONFIRM_RETRIES times, CONFIRM_RETRY_DELAY_SECONDS apart,
+    rechecking the complete destination inventory (kinds, duplicates, hashes)
+    on every attempt. A conflicting, invalid, or malformed destination response
+    fails immediately and is never retried.
     """
     tested, artifact, _distributions = producer(api, run_id)
     require(
         tested.producer.attempt == int(os.environ["PRODUCER_ATTEMPT"]),
         "triggering producer attempt mismatch",
     )
-    require(not destination(api, tested), "destination publication incomplete")
+    missing = destination(api, tested)
+    for _ in range(CONFIRM_RETRIES):
+        if not missing:
+            break
+        time.sleep(CONFIRM_RETRY_DELAY_SECONDS)
+        missing = destination(api, tested)
+    require(not missing, f"destination publication incomplete: {sorted(missing)}")
     return Receipt(
         publisher=publisher_identity(api),
         seal=tested,

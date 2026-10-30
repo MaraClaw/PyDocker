@@ -10,7 +10,7 @@ import builtins
 import datetime as dt
 import json
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType, TracebackType
 from typing import (
@@ -41,6 +41,7 @@ from pywhales.enums import BuildxReportCall as BuildxReportCall
 from pywhales.utils import (
     MappedProcessStream,
     ValidPath,
+    format_filters_for_cli,
     format_mapping_for_cli,
     run,
     stream_stdout_and_stderr,
@@ -50,6 +51,7 @@ from pywhales.utils import (
 
 type BakeResult = dict[str, dict[str, dict[str, JsonValue]]]
 type BuildxOptions = Mapping[str, str | Path]
+type BuildxPruneFilter = tuple[str, str]
 _BAKE_RESULT_ADAPTER: Final = TypeAdapter(BakeResult)
 
 
@@ -1022,7 +1024,7 @@ class BuildxCLI(DockerCLICaller):
     def prune(
         self,
         all: bool = False,
-        filters: Mapping[str, str] = MappingProxyType({}),
+        filters: Mapping[str, str] | Iterable[BuildxPruneFilter] = MappingProxyType({}),
         *,
         stream_logs: Literal[True],
     ) -> MappedProcessStream[str]: ...
@@ -1031,7 +1033,7 @@ class BuildxCLI(DockerCLICaller):
     def prune(
         self,
         all: bool = False,
-        filters: Mapping[str, str] = MappingProxyType({}),
+        filters: Mapping[str, str] | Iterable[BuildxPruneFilter] = MappingProxyType({}),
         stream_logs: Literal[False] = False,
     ) -> None: ...
 
@@ -1039,14 +1041,14 @@ class BuildxCLI(DockerCLICaller):
     def prune(
         self,
         all: bool = False,
-        filters: Mapping[str, str] = MappingProxyType({}),
+        filters: Mapping[str, str] | Iterable[BuildxPruneFilter] = MappingProxyType({}),
         stream_logs: bool = False,
     ) -> MappedProcessStream[str] | None: ...
 
     def prune(
         self,
         all: bool = False,
-        filters: Mapping[str, str] = MappingProxyType({}),
+        filters: Mapping[str, str] | Iterable[BuildxPruneFilter] = MappingProxyType({}),
         stream_logs: bool = False,
     ) -> MappedProcessStream[str] | None:
         """Remove build cache on the current builder.
@@ -1056,19 +1058,30 @@ class BuildxCLI(DockerCLICaller):
 
         Args:
             all: Remove all cache, not just dangling layers
-            filters: Filters to use, for example `filters=dict(until="24h")`
+            filters: Filters to use, either as a mapping or as an iterable of
+                ``(key, value)`` pairs. For example, `filters=dict(until="24h")`
+                or `filters=[("until", "24h"), ("label", "ci")]`. Pairs keep
+                their order and repeated keys, and an iterator is read once.
+                Repeated keys are forwarded unchanged, so the CLI reports any
+                combination it rejects as a `DockerException`.
             stream_logs: Return owned decoded output instead of waiting for the
                 local CLI to finish.
 
         Returns:
             An owned stream of text chunks when `stream_logs=True`; otherwise
             `None` after the CLI completes.
+
+        Raises:
+            TypeError: If filters is a string, bytes, or an iterable containing
+                anything but ``(key, value)`` tuples of strings. Raised before
+                the Docker executable is looked up.
+            DockerException: If the CLI rejects the command, for example because
+                of repeated filter keys.
         """
+        filter_args = format_filters_for_cli(filters)
         full_cmd = Command([*self.docker_cmd, "buildx", "prune", "--force"])
         full_cmd.add_flag("--all", all)
-        full_cmd.add_args_iterable_or_single(
-            "--filter", format_mapping_for_cli(filters)
-        )
+        full_cmd.add_args_iterable_or_single("--filter", filter_args)
         if stream_logs:
             return stream_buildx_logs(full_cmd)
         run(full_cmd)

@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.0.5
+
+### New Features
+
+- Capture selected Compose project services and wait for their containers to be
+  running and healthy. Changed membership, service labels, or configuration
+  hashes supersede the capture; a one-shot container that exits 0 remains a
+  blocker.
+- Inventory captures and bulk reloads support Buildx builders. Each builder
+  group uses one strictly parsed listing, and cache updates publish only after
+  all groups succeed.
+- Image and Compose push, container start, Compose watch, and Buildx prune accept
+  per-call timeouts for the local CLI. Each image transfer has its own deadline;
+  the preceding image inspection and queueing are excluded. Timeout does not
+  undo daemon or registry work.
+
+### Release Process
+
+- GitHub delivery pagination now enforces item and byte caps, rejects duplicate
+  identities, and validates consistent `total_count` values for jobs and
+  artifacts. Truncation of bare-array release and commit-pull listings remains
+  undetectable.
+
 ## 1.0.0
 
 ### Behavior Changes

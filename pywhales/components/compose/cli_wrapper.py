@@ -33,6 +33,7 @@ from pywhales.utils import (
     MappedProcessStream,
     ProcessStream,
     custom_parse_object_as,
+    format_filters_for_cli,
     format_mapping_for_cli,
     format_port_arg,
     format_signal_arg,
@@ -42,6 +43,8 @@ from pywhales.utils import (
     to_list,
     validate_timeout,
 )
+
+type ComposeLsFilter = tuple[Literal["name"], str]
 
 
 class ComposeRunArgs(TypedDict, total=False, closed=True):
@@ -727,23 +730,33 @@ class ComposeCLI(DockerCLICaller):
         return [Container(self.client_config, x, is_immutable_id=True) for x in ids]
 
     def ls(
-        self, all: bool = False, filters: Mapping[str, str] = MappingProxyType({})
+        self,
+        all: bool = False,
+        filters: Mapping[str, str] | Iterable[ComposeLsFilter] = MappingProxyType({}),
     ) -> list[ComposeProject]:
         """Return Docker Compose projects reported by the CLI.
 
         Args:
             all: Results include all stopped compose projects.
-            filters: Filter results based on conditions provided.
+            filters: Filter results based on conditions provided, either as a
+                mapping or as an iterable of ``(key, value)`` pairs. Pairs keep
+                their order and repeated keys, and an iterator is read once.
+                The key is `name`. For example, `filters={"name": "web"}` or
+                `filters=[("name", "web"), ("name", "worker")]`.
 
         Returns:
             Project summaries in CLI order, including parsed status counts and
             configuration-file paths when available.
+
+        Raises:
+            TypeError: If filters is a string, bytes, or an iterable containing
+                anything but ``(key, value)`` tuples of strings. Raised before
+                the Docker executable is looked up.
         """
+        filter_args = format_filters_for_cli(filters)
         full_cmd = Command([*self.docker_compose_cmd, "ls", "--format", "json"])
         full_cmd.add_flag("--all", all)
-        full_cmd.add_args_iterable_or_single(
-            "--filter", format_mapping_for_cli(filters)
-        )
+        full_cmd.add_args_iterable_or_single("--filter", filter_args)
 
         return [
             ComposeProject(

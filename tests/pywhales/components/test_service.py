@@ -12,7 +12,12 @@ import pytest
 from pywhales import DockerClient, Service
 from pywhales.client_config import ParsingError
 from pywhales.components.service.models import ServiceInspectResult
-from pywhales.exceptions import DockerException, NoSuchService, NotASwarmManager
+from pywhales.exceptions import (
+    DockerException,
+    NoSuchConfig,
+    NoSuchService,
+    NotASwarmManager,
+)
 from pywhales.test_utils import get_all_jsons, random_name
 from pywhales.utils import stream_stdout_and_stderr
 
@@ -527,3 +532,152 @@ def test_service_selection_builds_argv_once(
         *subcommand,
         "alpha",
     ]
+
+
+NOT_A_MANAGER = (
+    b"Error response from daemon: This node is not a swarm manager. "
+    b'Use "docker swarm init" or "docker swarm join" to connect this node to swarm '
+    b"and try again."
+)
+SERVICE_MISSING = b"Error response from daemon: service resource not found"
+SERVICE_JSON = b'[{"ID":"resource","Spec":{"Name":"named"}}]'
+# Each failure below is not this service's own not-found error.
+OTHER_FAILURES = [
+    pytest.param(b"permission denied", DockerException, id="command-failure"),
+    pytest.param(NOT_A_MANAGER, NotASwarmManager, id="not-a-swarm-manager"),
+    pytest.param(
+        b"no such task or service: resource", DockerException, id="task-or-service"
+    ),
+    pytest.param(
+        b"Error response from daemon: config resource not found",
+        NoSuchConfig,
+        id="config-not-found",
+    ),
+]
+
+
+def _service() -> tuple[DockerClient, Service]:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    return client, Service(client.client_config, "resource", is_immutable_id=True)
+
+
+@pytest.mark.parametrize("missing", [False, True], ids=["removed", "already-missing"])
+def test_service_cleanup_ignores_only_a_missing_service(missing: bool) -> None:
+    _, service = _service()
+    response = CompletedProcess(
+        [], 1 if missing else 0, b"", SERVICE_MISSING if missing else b""
+    )
+    with patch("subprocess.run", return_value=response) as command, service:
+        pass
+    command.assert_called_once()
+    assert command.call_args.args[0] == ["docker-test", "service", "remove", "resource"]
+
+
+@pytest.mark.parametrize(("stderr", "error_type"), OTHER_FAILURES)
+def test_service_cleanup_propagates_other_removal_failures(
+    stderr: bytes, error_type: type[DockerException]
+) -> None:
+    _, service = _service()
+    response = CompletedProcess([], 17, b"output", stderr)
+    with (
+        patch("subprocess.run", return_value=response) as command,
+        pytest.raises(DockerException) as raised,
+        service,
+    ):
+        pass
+    command.assert_called_once()
+    assert type(raised.value) is error_type
+    assert raised.value.return_code == 17
+    assert raised.value.stderr == stderr.decode()
+
+
+@pytest.mark.parametrize(("stderr", "error_type"), OTHER_FAILURES)
+def test_service_cleanup_failure_joins_the_body_error(
+    stderr: bytes, error_type: type[DockerException]
+) -> None:
+    _, service = _service()
+    body = RuntimeError("body")
+    response = CompletedProcess([], 17, b"", stderr)
+    with (
+        patch("subprocess.run", return_value=response),
+        pytest.raises(BaseExceptionGroup) as raised,
+        service,
+    ):
+        raise body
+    assert raised.value.message == "Service body and cleanup both failed"
+    assert raised.value.exceptions[0] is body
+    assert type(raised.value.exceptions[1]) is error_type
+
+
+def test_service_missing_at_cleanup_leaves_the_body_error_alone() -> None:
+    _, service = _service()
+    body = RuntimeError("body")
+    response = CompletedProcess([], 1, b"", SERVICE_MISSING)
+    with (
+        patch("subprocess.run", return_value=response),
+        pytest.raises(RuntimeError) as raised,
+        service,
+    ):
+        raise body
+    assert raised.value is body
+
+
+def _exists(client: DockerClient, service: Service, *, as_handle: bool) -> bool:
+    return service.exists() if as_handle else client.service.exists("resource")
+
+
+@pytest.mark.parametrize("as_handle", [False, True], ids=["cli", "handle"])
+def test_service_exists_is_true_after_inspect(as_handle: bool) -> None:
+    client, service = _service()
+    response = CompletedProcess([], 0, SERVICE_JSON, b"")
+    with patch("subprocess.run", return_value=response) as command:
+        found = _exists(client, service, as_handle=as_handle)
+    assert found is True
+    command.assert_called_once()
+    assert command.call_args.args[0] == [
+        "docker-test",
+        "service",
+        "inspect",
+        "resource",
+    ]
+
+
+@pytest.mark.parametrize("as_handle", [False, True], ids=["cli", "handle"])
+@pytest.mark.parametrize(
+    "stderr", [SERVICE_MISSING, b"no such service: resource"], ids=["rm", "inspect"]
+)
+def test_service_exists_is_false_for_a_missing_service(
+    as_handle: bool, stderr: bytes
+) -> None:
+    client, service = _service()
+    response = CompletedProcess([], 1, b"", stderr)
+    with patch("subprocess.run", return_value=response):
+        found = _exists(client, service, as_handle=as_handle)
+    assert found is False
+
+
+@pytest.mark.parametrize("as_handle", [False, True], ids=["cli", "handle"])
+@pytest.mark.parametrize(("stderr", "error_type"), OTHER_FAILURES)
+def test_service_exists_propagates_other_failures(
+    as_handle: bool, stderr: bytes, error_type: type[DockerException]
+) -> None:
+    client, service = _service()
+    response = CompletedProcess([], 1, b"", stderr)
+    with (
+        patch("subprocess.run", return_value=response),
+        pytest.raises(DockerException) as raised,
+    ):
+        _exists(client, service, as_handle=as_handle)
+    assert type(raised.value) is error_type
+
+
+@pytest.mark.usefixtures("swarm_mode")
+def test_service_removed_inside_its_context_exits_cleanly(
+    docker_client: DockerClient,
+) -> None:
+    with docker_client.service.create("busybox", ["sleep", "infinity"]) as my_service:
+        assert my_service.exists()
+        my_service.remove()
+        assert not my_service.exists()
+    assert not my_service.exists()

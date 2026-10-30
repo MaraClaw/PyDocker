@@ -63,8 +63,9 @@ type ServiceListFilter = (
 class Service(ReloadableObjectFromJson[ServiceInspectResult]):
     """Reloadable Swarm service handle with context-exit removal.
 
-    Cleanup is attempted even if the body raises. If cleanup also fails, both
-    exceptions are preserved in an exception group.
+    Cleanup is attempted even if the body raises, and ignores a service that is
+    already gone. Other cleanup failures are preserved in an exception group
+    with any active body exception.
     """
 
     def __init__(
@@ -82,7 +83,10 @@ class Service(ReloadableObjectFromJson[ServiceInspectResult]):
         exc_tb: TracebackType | None,
     ) -> None:
         with resource_cleanup(exc_val, "Service body and cleanup both failed"):
-            self.remove()
+            try:
+                self.remove()
+            except NoSuchService:
+                return
 
     @override
     def _fetch_inspect_result_json(self, reference: str) -> dict[str, JsonValue]:

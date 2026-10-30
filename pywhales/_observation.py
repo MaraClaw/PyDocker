@@ -5,8 +5,8 @@ import time
 from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
-from threading import Event
+from dataclasses import dataclass, field
+from threading import Event, Lock
 
 from pywhales.exceptions import (
     ObservationCancelled,
@@ -18,10 +18,15 @@ from pywhales.inventory import InspectionPolicy
 
 @dataclass(slots=True)
 class _ResponseAccount:
-    """Track actual bytes consumed during one observation scope."""
+    """Track actual bytes consumed during one observation scope.
+
+    Workers running in copies of the scope's context share one account, so every
+    charge updates ``consumed`` and judges the limit under ``lock``.
+    """
 
     limit: int
     consumed: int = 0
+    lock: Lock = field(default_factory=Lock, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -49,16 +54,22 @@ class ObservationState:
         )
 
     def charge_response(self, size: int) -> None:
-        """Charge all enclosing scopes before reporting any overflow."""
-        exceeded = None
+        """Charge all enclosing scopes before reporting any overflow.
+
+        Safe for concurrent charges from threads sharing these accounts: each
+        account is updated and compared with its limit under its own lock, so no
+        charge is lost and the first account to overflow reports the total it
+        reached at that charge.
+        """
+        exceeded: tuple[int, int] | None = None
         for account in self.response_accounts:
-            account.consumed += size
-            if account.consumed > account.limit and exceeded is None:
-                exceeded = account
+            with account.lock:
+                account.consumed += size
+                consumed = account.consumed
+            if consumed > account.limit and exceeded is None:
+                exceeded = (account.limit, consumed)
         if exceeded is not None:
-            raise ObservationLimitError(
-                "total_response", exceeded.limit, exceeded.consumed
-            )
+            raise ObservationLimitError("total_response", *exceeded)
 
 
 _current_observation: ContextVar[ObservationState | None] = ContextVar(

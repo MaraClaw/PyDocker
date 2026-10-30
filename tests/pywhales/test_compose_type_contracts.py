@@ -4,10 +4,13 @@ The ty check analyzes assert_type calls in _check_* functions. These functions
 are not collected or executed by pytest and are not runtime Docker examples.
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from types import MappingProxyType
 from typing import assert_type
 
 from pywhales import DockerClient
+from pywhales.components.compose.cli_wrapper import ComposeLsFilter
+from pywhales.components.compose.models import ComposeProject
 from pywhales.utils import ProcessStream
 
 
@@ -115,3 +118,27 @@ def _check_compose_watch_contracts(client: DockerClient) -> None:
             assert_type(entered, ProcessStream)
             assert_type(next(entered), tuple[str, bytes])
             assert_type(entered.close(), None)
+
+
+def _check_compose_ls_filter_contracts(
+    client: DockerClient,
+    mapping: Mapping[str, str],
+    pairs: Iterable[ComposeLsFilter],
+) -> None:
+    assert_type(client.compose.ls(), list[ComposeProject])
+    assert_type(client.compose.ls(filters={"name": "web"}), list[ComposeProject])
+    assert_type(client.compose.ls(True, mapping), list[ComposeProject])
+    assert_type(
+        client.compose.ls(filters=MappingProxyType({"name": "web"})),
+        list[ComposeProject],
+    )
+    assert_type(
+        client.compose.ls(filters=[("name", "web"), ("name", "worker")]),
+        list[ComposeProject],
+    )
+    assert_type(client.compose.ls(filters=(("name", "web"),)), list[ComposeProject])
+    assert_type(client.compose.ls(filters=pairs), list[ComposeProject])
+    assert_type(
+        client.compose.ls(all=True, filters=(("name", name) for name in ["a"])),
+        list[ComposeProject],
+    )

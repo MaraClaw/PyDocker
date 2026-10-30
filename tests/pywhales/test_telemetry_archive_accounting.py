@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 from collections.abc import Buffer
 from contextlib import suppress
 from subprocess import PIPE, Popen
@@ -25,16 +26,15 @@ def test_default_archive_load_waits_for_backpressure_without_polling(
         ]
     )
 
-    def polling(seconds: float) -> None:
-        pytest.fail("default archive load must not poll on pipe backpressure")
-
-    monkeypatch.setattr(_archive_deadline, "sleep", polling)
+    naps: list[float] = []
+    monkeypatch.setattr(time, "sleep", naps.append)
 
     # When loading without a selected deadline.
     result = client.image.load(payload)
 
     # Then writes wait for readiness, not fixed-interval EAGAIN polling.
     assert result == [str(len(payload))]
+    assert naps == []
 
 
 @pytest.mark.parametrize("timeout", [None, 3.0])

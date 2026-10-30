@@ -2,12 +2,21 @@ import json
 import sys
 from dataclasses import asdict
 from threading import Event, Thread
+from time import monotonic
 from unittest.mock import patch
 
 import pytest
 
+from pywhales._observation import observation
 from pywhales.client_config import ClientConfig
-from pywhales.exceptions import DockerException, DockerTimeout
+from pywhales.exceptions import (
+    DockerException,
+    DockerTimeout,
+    ObservationCancelled,
+    ObservationLimitError,
+    ObservationTimeout,
+)
+from pywhales.inventory import InspectionPolicy
 from pywhales.telemetry import CompletionRecord, LaunchRecord, TelemetryRecord
 from pywhales.utils import MappedProcessStream, stream_stdout_and_stderr
 
@@ -332,3 +341,77 @@ def test_policy_snapshot_survives_mutation_during_stream_lifetime() -> None:
 
     assert completion(original).outcome == "success"
     assert fresh == []
+
+
+def scope_policy(argv: int = 65536) -> InspectionPolicy:
+    return InspectionPolicy(
+        max_references=1, max_argv_bytes=argv, max_response_bytes=1024
+    )
+
+
+def test_scoped_launch_rejection_never_reaches_the_observer() -> None:
+    records: list[TelemetryRecord] = []
+    cancel = Event()
+    with (
+        pytest.raises(ObservationCancelled),
+        observation(scope_policy(), cancel=cancel),
+    ):
+        cancel.set()
+        stream_stdout_and_stderr(command(records, "pass"))
+    with (
+        observation(scope_policy(argv=8)),
+        pytest.raises(ObservationLimitError),
+    ):
+        stream_stdout_and_stderr(command(records, "pass"))
+
+    assert records == []
+
+
+@pytest.mark.parametrize("stop", ["deadline", "cancel"])
+def test_scope_stop_finishes_telemetry_once_after_cleanup(stop: str) -> None:
+    records: list[TelemetryRecord] = []
+    cancel = Event()
+    with observation(
+        scope_policy(),
+        deadline=monotonic() + 0.4 if stop == "deadline" else None,
+        cancel=cancel,
+    ):
+        stream = stream_stdout_and_stderr(
+            command(records, "print('ready',flush=True); input()"), pipe_stdin=True
+        )
+    try:
+        assert next(stream) == ("stdout", b"ready\n")
+        if stop == "cancel":
+            cancel.set()
+        assert stream._released.wait(timeout=3)
+        assert len(records) == 1
+
+        with pytest.raises(
+            ObservationTimeout if stop == "deadline" else ObservationCancelled
+        ):
+            next(stream)
+        stream.close()
+        stream.close()
+
+        completed = completion(records)
+        assert completed.outcome == ("timeout" if stop == "deadline" else "failure")
+        assert completed.return_code == stream._process.returncode
+        assert completed.stdout_bytes == len(b"ready\n")
+        assert list(stream) == []
+        assert completion(records) is completed
+    finally:
+        stream.close()
+
+
+def test_close_before_a_scope_stop_finishes_telemetry_as_closed() -> None:
+    records: list[TelemetryRecord] = []
+    cancel = Event()
+    with observation(scope_policy(), cancel=cancel):
+        stream = stream_stdout_and_stderr(command(records, "input()"), pipe_stdin=True)
+
+    stream.close()
+    cancel.set()
+    stream.close()
+
+    assert list(stream) == []
+    assert completion(records).outcome == "closed"

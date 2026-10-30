@@ -1,13 +1,49 @@
 """Lazy, owned coordination of concurrent image transfer output."""
 
-from collections.abc import Callable, Generator, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextvars import Context, copy_context
+from multiprocessing.pool import ThreadPool
 from threading import Event, Lock
 from types import TracebackType
 from typing import Self, override
 
 from pywhales._stream_buffer import StreamBuffer
 from pywhales.utils import MappedProcessStream
+
+WORKERS = 4
+"""Most image transfers running at once, for blocking pools and stream groups."""
+
+
+def map_in_contexts[T, R](
+    function: Callable[[T], R], arguments: Iterable[T]
+) -> list[R]:
+    """Run ``function`` for each argument on a worker pool, in input order.
+
+    Every call enters its own copy of the caller's context, copied here in the
+    calling thread, so workers see the caller's observation scope and execution
+    settings like a single transfer does. A context can be entered by only one
+    thread at a time, so sharing one across workers would raise ``RuntimeError``.
+    The first failure terminates the pool, which drops queued calls; calls that
+    already run cannot be interrupted. On success the workers have exited.
+
+    Args:
+        function: Task applied to one argument on a worker thread.
+        arguments: Task inputs, consumed before any worker starts.
+
+    Returns:
+        The results in the order of ``arguments``.
+    """
+    tasks = [(copy_context(), argument) for argument in arguments]
+
+    def run_one(context: Context, argument: T) -> R:
+        return context.run(function, argument)
+
+    with ThreadPool(WORKERS) as pool:
+        results = pool.starmap(run_one, tasks)
+        pool.close()
+        pool.join()
+    return results
 
 
 class MultiImageStream(Iterator[tuple[str, bytes]]):
@@ -23,6 +59,11 @@ class MultiImageStream(Iterator[tuple[str, bytes]]):
     stop active and queued sibling work without waiting for consumption. The
     first recorded error is raised once by iteration, including after explicit
     close; context exit itself only closes the group.
+
+    The group snapshots the context it is created in, so every worker, whenever
+    it starts, runs in its own copy of that context: children launch under the
+    creator's observation scope, deadline, and tokens even if iteration begins
+    after the ``with`` block that created the group has exited.
     """
 
     def __init__(
@@ -44,6 +85,7 @@ class MultiImageStream(Iterator[tuple[str, bytes]]):
         """
         self._names = tuple(names)
         self._factory = factory
+        self._context = copy_context()
         self._lock = Lock()
         self._buffer_bytes = buffer_bytes
         self._queue = StreamBuffer(buffer_bytes)
@@ -61,9 +103,11 @@ class MultiImageStream(Iterator[tuple[str, bytes]]):
         try:
             with self._lock:
                 if not self._stopped and self._executor is None:
-                    self._executor = ThreadPoolExecutor(max_workers=4)
+                    self._executor = ThreadPoolExecutor(max_workers=WORKERS)
                     for name in self._names:
-                        future = self._executor.submit(self._consume, name)
+                        future = self._executor.submit(
+                            self._consume_in(self._context.copy()), name
+                        )
                         future.add_done_callback(self._worker_done)
                     if not self._names:
                         self._queue.finish()
@@ -71,6 +115,14 @@ class MultiImageStream(Iterator[tuple[str, bytes]]):
         finally:
             if not started:
                 self.close()
+
+    def _consume_in(self, context: Context) -> Callable[[str], None]:
+        """Return a task entering ``context``, which only that task's thread may do."""
+
+        def consume(name: str) -> None:
+            context.run(self._consume, name)
+
+        return consume
 
     def _consume(self, name: str) -> None:
         with self._lock:

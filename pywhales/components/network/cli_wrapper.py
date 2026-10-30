@@ -377,14 +377,15 @@ class NetworkCLI(DockerCLICaller):
         )
         run(full_cmd)
 
-    def remove(self, networks: ValidNetwork | Sequence[ValidNetwork]) -> None:
+    def remove(self, networks: ValidNetwork | Iterable[ValidNetwork]) -> None:
         """Remove one or more Docker networks.
 
         Args:
-            networks: Network names, IDs, or handles. An empty list is a no-op.
+            networks: Network names, IDs, or handles. An empty selection is a no-op.
         """
-        if networks == []:
+        selected = to_list(networks)
+        if not selected:
             return
         full_cmd = Command([*self.docker_cmd, "network", "remove"])
-        full_cmd += to_list(networks)
+        full_cmd += selected
         run(full_cmd)

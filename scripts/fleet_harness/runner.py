@@ -5,7 +5,7 @@ import json
 import math
 import platform
 from importlib.metadata import version
-from typing import Literal
+from typing import Literal, assert_never
 
 from scripts.fleet_contract.workload import Boundary
 
@@ -98,7 +98,13 @@ def run(manifest: RunnableManifest, plan: Plan) -> RunReport:
             for index in range(len(plan.steps) * plan.repetitions):
                 step = plan.steps[index % len(plan.steps)]
                 if driver.now >= end:
-                    reasons.append("duration_limit")
+                    match manifest.workload.termination:
+                        case "duration":
+                            pass
+                        case "operation_count":
+                            reasons.append("duration_limit")
+                        case unreachable:
+                            assert_never(unreachable)
                     break
                 resource = None
                 if step.asset is not None:
@@ -140,7 +146,6 @@ def run(manifest: RunnableManifest, plan: Plan) -> RunReport:
                 outcome = observed[0].outcome
                 failures += outcome != "succeeded"
                 unknown += outcome == "unknown"
-                driver.calls += 1
                 for budget in budgets.resources:
                     value = next(
                         metric.value
@@ -151,13 +156,22 @@ def run(manifest: RunnableManifest, plan: Plan) -> RunReport:
                         reasons.append("resource_metrics_unavailable")
                     elif value >= budget.early_stop:
                         reasons.append("resource_limit")
+                if unknown and unknown >= budgets.early_stop_unknown_count:
+                    reasons.append("unknown_limit")
+                if driver.now >= end:
+                    match manifest.workload.termination:
+                        case "duration":
+                            pass
+                        case "operation_count":
+                            reasons.append("duration_limit")
+                        case unreachable:
+                            assert_never(unreachable)
+                    break
                 if (
                     failures
                     and failures / submitted >= budgets.early_stop_error_fraction
                 ):
                     reasons.append("failure_limit")
-                if unknown and unknown >= budgets.early_stop_unknown_count:
-                    reasons.append("unknown_limit")
                 if reasons:
                     break
                 if manifest.workload.termination == "operation_count" and submitted >= (

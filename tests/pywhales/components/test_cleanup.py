@@ -17,7 +17,7 @@ from pywhales.components.plugin.cli_wrapper import Plugin
 from pywhales.components.secret.cli_wrapper import Secret
 from pywhales.components.service.cli_wrapper import Service
 from pywhales.components.volume.cli_wrapper import Volume
-from pywhales.exceptions import NoSuchService
+from pywhales.exceptions import NoSuchService, NoSuchVolume
 
 type CleanupResource = (
     Container
@@ -82,7 +82,8 @@ def test_cleanup_preserves_failures_when_resource_exits(
     body_error = body_error_type("body") if body_error_type is not None else None
     cleanup_error: BaseException | None
     if cleanup_error_type is NoSuchService:
-        cleanup_error = NoSuchService(["docker-origin", *removal_args, "resource"], 1)
+        unrelated_type = NoSuchVolume if resource_type is Service else NoSuchService
+        cleanup_error = unrelated_type(["docker-origin", *removal_args, "resource"], 1)
     else:
         cleanup_error = (
             cleanup_error_type("cleanup") if cleanup_error_type is not None else None

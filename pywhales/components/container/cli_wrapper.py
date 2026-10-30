@@ -297,23 +297,51 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
             self, tag, author, message, pause
         )
 
-    def copy_from(self, container_path: ValidPath, local_path: ValidPath) -> None:
+    def copy_from(
+        self,
+        container_path: ValidPath,
+        local_path: ValidPath,
+        *,
+        timeout: float | None = None,
+    ) -> None:
         """Copy a container path to the Python host's filesystem.
 
         Args:
             container_path: Source path inside this container.
             local_path: Destination path on the Python host, not the daemon host.
-        """
-        return ContainerCLI(self.client_config).copy((self, container_path), local_path)
+            timeout: Positive finite seconds from local copy CLI launch, or `None`
+                to inherit the configured default.
 
-    def copy_to(self, local_path: ValidPath, container_path: ValidPath) -> None:
+        Raises:
+            ValueError: `timeout` is not positive and finite.
+            DockerTimeout: The local copy CLI exceeds its deadline.
+        """
+        return ContainerCLI(self.client_config).copy(
+            (self, container_path), local_path, timeout=timeout
+        )
+
+    def copy_to(
+        self,
+        local_path: ValidPath,
+        container_path: ValidPath,
+        *,
+        timeout: float | None = None,
+    ) -> None:
         """Copy a local path into this container.
 
         Args:
             local_path: Source path on the Python host, not the daemon host.
             container_path: Destination path inside this container.
+            timeout: Positive finite seconds from local copy CLI launch, or `None`
+                to inherit the configured default.
+
+        Raises:
+            ValueError: `timeout` is not positive and finite.
+            DockerTimeout: The local copy CLI exceeds its deadline.
         """
-        return ContainerCLI(self.client_config).copy(local_path, (self, container_path))
+        return ContainerCLI(self.client_config).copy(
+            local_path, (self, container_path), timeout=timeout
+        )
 
     def diff(self) -> dict[str, str]:
         """Return filesystem change codes keyed by paths in this container.
@@ -425,13 +453,22 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         """
         return ContainerCLI(self.client_config).exists(self.id)
 
-    def export(self, output: ValidPath) -> None:
+    def export(self, output: ValidPath, *, timeout: float | None = None) -> None:
         """Export this container filesystem.
 
         See the [`docker.container.export`](../sub-commands/container.md) command for
         information about the arguments.
+
+        Args:
+            output: The path of the output tar archive.
+            timeout: Positive finite seconds from local export CLI launch, or `None`
+                to inherit the configured default.
+
+        Raises:
+            ValueError: `timeout` is not positive and finite.
+            DockerTimeout: The local export CLI exceeds its deadline.
         """
-        return ContainerCLI(self.client_config).export(self, output)
+        return ContainerCLI(self.client_config).export(self, output, timeout=timeout)
 
     def kill(self, signal: int | str | None = None) -> None:
         """Kill this container.
@@ -768,6 +805,8 @@ class ContainerCLI(DockerCLICaller):
         self,
         source: ValidPath | ContainerPath,
         destination: ValidPath | ContainerPath,
+        *,
+        timeout: float | None = None,
     ) -> None:
         """Copy files or folders between a container and the local filesystem.
 
@@ -781,7 +820,16 @@ class ContainerCLI(DockerCLICaller):
             destination: Local destination path on the Python host, or a
                 `(container_reference, path_in_container)` endpoint. Docker
                 requires exactly one container endpoint.
+            timeout: Positive finite seconds from local copy CLI launch, or `None`
+                to inherit the configured default. Validated before the CLI is
+                resolved or launched.
+
+        Raises:
+            ValueError: `timeout` is not positive and finite.
+            DockerTimeout: The local copy CLI exceeds its deadline and is killed
+                and reaped.
         """
+        validate_timeout(timeout)
         full_cmd = Command([*self.docker_cmd, "container", "cp"])
 
         if isinstance(source, tuple):
@@ -794,7 +842,7 @@ class ContainerCLI(DockerCLICaller):
         else:
             destination = str(destination)
 
-        run([*full_cmd, source, destination])
+        run([*full_cmd, source, destination], timeout=timeout)
 
     def create(
         self,
@@ -1284,7 +1332,13 @@ class ContainerCLI(DockerCLICaller):
         else:
             return True
 
-    def export(self, container: ValidContainer, output: ValidPath) -> None:
+    def export(
+        self,
+        container: ValidContainer,
+        output: ValidPath,
+        *,
+        timeout: float | None = None,
+    ) -> None:
         """Export a container's filesystem to a local tar archive.
 
         Alias: `docker.export(...)`
@@ -1293,10 +1347,17 @@ class ContainerCLI(DockerCLICaller):
             container: The container to export.
             output: The path of the output tar archive. Returning a generator of bytes
                 is not yet implemented.
+            timeout: Positive finite seconds from local export CLI launch, or `None`
+                to inherit the configured default. Validated before the CLI is
+                resolved or launched.
 
         Raises:
+            ValueError: `timeout` is not positive and finite.
             NoSuchContainer: The selected container does not exist.
+            DockerTimeout: The local export CLI exceeds its deadline and is killed
+                and reaped.
         """
+        validate_timeout(timeout)
         full_cmd = Command([*self.docker_cmd, "container", "export"])
         full_cmd.add_simple_arg("--output", output)
 
@@ -1306,7 +1367,7 @@ class ContainerCLI(DockerCLICaller):
             # we must return a generator of bytes
             raise NotImplementedError
         else:
-            run(full_cmd)
+            run(full_cmd, timeout=timeout)
 
     @overload
     def inspect(self, x: ValidContainer, /) -> Container: ...

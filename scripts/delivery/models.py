@@ -3,7 +3,9 @@
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from . import limits
 
 type Digest = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
 type Sha = Annotated[str, Field(pattern=r"^[a-f0-9]{40}$")]
@@ -132,18 +134,27 @@ class Bundle(Document):
 class Seal(Document):
     """Eligible tested package/site bytes from one complete attempt."""
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     producer: Identity
     jobs: dict[str, Positive]
     version: Version
+    notes: str
     distributions: Bundle
     site: Bundle
+
+    @field_validator("notes")
+    @classmethod
+    def sized(cls, value: str) -> str:
+        """Bound the release body at the document boundary, not only at sealing."""
+        if not value.strip() or len(value.encode()) > limits.NOTES_BYTES:
+            raise ValueError("release notes empty or over the size budget")
+        return value
 
 
 class Receipt(Document):
     """Publication evidence issued only after PyPI file confirmation."""
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     publisher: Identity
     seal: Seal
     seal_artifact: Bundle
@@ -212,3 +223,4 @@ class Release(APIModel):
     tag_name: str
     draft: bool
     prerelease: bool
+    body: str | None = None

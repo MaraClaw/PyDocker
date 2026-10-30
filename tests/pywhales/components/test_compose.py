@@ -1787,6 +1787,36 @@ def test_compose_ls_project_multiple_statuses() -> None:
     d.compose.down(timeout=1)
 
 
+def test_compose_ls_with_repeatable_name_filter_pairs() -> None:
+    names = [f"ls-{random_name()}" for _ in range(3)]
+    clients = [
+        DockerClient(
+            compose_files=[
+                PROJECT_ROOT / "tests/pywhales/components/dummy_compose.yml"
+            ],
+            compose_compatibility=True,
+            compose_project_name=name,
+        )
+        for name in names
+    ]
+    try:
+        for client in clients:
+            client.compose.up(["busybox"], detach=True)
+
+        # Repeated name filters are alternatives, so both selected projects match.
+        selected = docker.compose.ls(filters=[("name", names[0]), ("name", names[1])])
+        assert {project.name for project in selected} == set(names[:2])
+        generated = docker.compose.ls(
+            filters=(pair for pair in [("name", names[0]), ("name", names[2])])
+        )
+        assert {project.name for project in generated} == {names[0], names[2]}
+        mapped = docker.compose.ls(filters={"name": names[1]})
+        assert {project.name for project in mapped} == {names[1]}
+    finally:
+        for client in clients:
+            client.compose.down(timeout=1)
+
+
 def check_number_of_running_containers(
     docker_client: DockerClient, expected: int, countable_container_ids: Iterable[str]
 ) -> None:

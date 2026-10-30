@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from queue import Queue
 from subprocess import Popen
 from threading import Event
+from time import monotonic
 from types import GeneratorType
 from unittest.mock import patch
 
@@ -11,8 +12,15 @@ import pytest
 
 from pywhales import DockerClient
 from pywhales._archive_deadline import ArchiveDeadline
-from pywhales.exceptions import DockerTimeout
-from pywhales.telemetry import CompletionRecord, TelemetryRecord
+from pywhales._observation import ObservationState, observation
+from pywhales.exceptions import (
+    DockerTimeout,
+    ObservationCancelled,
+    ObservationLimitError,
+    ObservationTimeout,
+)
+from pywhales.inventory import InspectionPolicy
+from pywhales.telemetry import CompletionRecord, LaunchRecord, TelemetryRecord
 
 
 def test_unstarted_archive_save_close_has_no_launch_or_telemetry() -> None:
@@ -202,3 +210,324 @@ def test_stalled_archive_load_finishes_telemetry_only_when_producer_resumes() ->
     assert (completed.outcome, completed.stdin_bytes) == ("timeout", 8)
     assert not owner.thread.is_alive()
     assert owner.process.stdin is not None and owner.process.stdin.closed
+
+
+_FIRST_THEN_BLOCK = (
+    "import os,threading; os.write(1,b'first\\n'); threading.Event().wait()"
+)
+
+
+def scope_policy(argv: int = 65536) -> InspectionPolicy:
+    return InspectionPolicy(
+        max_references=1, max_argv_bytes=argv, max_response_bytes=1024
+    )
+
+
+def archive_client(
+    records: list[TelemetryRecord], code: str = _FIRST_THEN_BLOCK
+) -> DockerClient:
+    return DockerClient(
+        client_call=[sys.executable, "-c", code], telemetry_observer=records.append
+    )
+
+
+def capture_owners(owners: list[ArchiveDeadline]) -> type[ArchiveDeadline]:
+    """Return an ArchiveDeadline stand-in that records each owner it creates."""
+
+    class RecordingOwner(ArchiveDeadline):
+        def __init__(
+            self,
+            process: Popen[bytes],
+            command: list[str],
+            deadline: float | None,
+            *,
+            raw: bool,
+            observation: ObservationState | None = None,
+        ) -> None:
+            super().__init__(
+                process, command, deadline, raw=raw, observation=observation
+            )
+            owners.append(self)
+
+    return RecordingOwner
+
+
+def assert_owner_released(owner: ArchiveDeadline) -> None:
+    """Check the child was reaped, its pipes closed, and the accounting thread joined."""
+    assert owner.process.returncode is not None
+    assert not owner.thread.is_alive()
+    assert all(
+        pipe.closed
+        for pipe in (owner.process.stdin, owner.process.stdout, owner.process.stderr)
+        if pipe is not None
+    )
+
+
+def test_lazy_save_applies_the_scope_active_at_first_iteration_and_keeps_it() -> None:
+    records: list[TelemetryRecord] = []
+    owners: list[ArchiveDeadline] = []
+    cancel = Event()
+    client = archive_client(records)
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        patch(
+            "pywhales.components.image.cli_wrapper.ArchiveDeadline",
+            capture_owners(owners),
+        ),
+    ):
+        # Given a save created outside any scope and first iterated inside one.
+        archive = client.image.save("sample")
+        with observation(scope_policy(), cancel=cancel):
+            assert next(archive) == b"first\n"
+        (owner,) = owners
+        assert len(records) == 1
+
+        # When the token is set after that scope has exited.
+        cancel.set()
+
+        # Then the transfer still stops, is reaped, and completes telemetry once.
+        assert owner.released.wait(3)
+        with pytest.raises(ObservationCancelled):
+            next(archive)
+        assert list(archive) == []
+    assert_owner_released(owner)
+    assert len(records) == 2
+    completed = records[-1]
+    assert isinstance(completed, CompletionRecord)
+    assert (completed.outcome, completed.stdout_bytes) == ("failure", 6)
+
+
+def test_lazy_save_ignores_a_scope_that_only_surrounded_its_creation() -> None:
+    records: list[TelemetryRecord] = []
+    owners: list[ArchiveDeadline] = []
+    cancel = Event()
+    client = archive_client(
+        records, "import os; os.write(1,b'first\\n'); os.write(1,b'second\\n')"
+    )
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        patch(
+            "pywhales.components.image.cli_wrapper.ArchiveDeadline",
+            capture_owners(owners),
+        ),
+    ):
+        with observation(scope_policy(), cancel=cancel):
+            archive = client.image.save("sample")
+        cancel.set()
+
+        assert b"".join(archive) == b"first\nsecond\n"
+
+    (owner,) = owners
+    assert not owner.bounded
+    assert_owner_released(owner)
+    completed = records[-1]
+    assert isinstance(completed, CompletionRecord)
+    assert completed.outcome == "success"
+
+
+@pytest.mark.parametrize("operation", ["save", "load"])
+@pytest.mark.parametrize("stop", ["cancelled", "argv"])
+def test_archive_launch_is_rejected_before_input_telemetry_and_process(
+    operation: str, stop: str
+) -> None:
+    records: list[TelemetryRecord] = []
+    consumed: list[bool] = []
+    cancel = Event()
+    client = archive_client(records)
+
+    def chunks() -> Generator[bytes]:
+        consumed.append(True)
+        yield b"input"
+
+    def attempt() -> object:
+        if operation == "load":
+            return client.image.load(chunks())
+        return next(client.image.save("sample"))
+
+    expected = ObservationCancelled if stop == "cancelled" else ObservationLimitError
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        patch("pywhales.components.image.cli_wrapper.Popen") as launch,
+        pytest.raises(expected),
+        observation(scope_policy(argv=8 if stop == "argv" else 65536), cancel=cancel),
+    ):
+        if stop == "cancelled":
+            cancel.set()
+        attempt()
+
+    launch.assert_not_called()
+    assert records == [] and consumed == []
+
+
+@pytest.mark.parametrize("stop", ["deadline", "cancel"])
+def test_scope_stop_reaps_a_paused_save_and_finishes_telemetry_once(
+    stop: str,
+) -> None:
+    records: list[TelemetryRecord] = []
+    owners: list[ArchiveDeadline] = []
+    cancel = Event()
+    client = archive_client(records)
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        patch(
+            "pywhales.components.image.cli_wrapper.ArchiveDeadline",
+            capture_owners(owners),
+        ),
+    ):
+        archive = client.image.save("sample")
+        with observation(
+            scope_policy(),
+            deadline=monotonic() + 0.4 if stop == "deadline" else None,
+            cancel=cancel,
+        ):
+            assert next(archive) == b"first\n"
+        (owner,) = owners
+        if stop == "cancel":
+            cancel.set()
+
+        assert owner.released.wait(3)
+        assert len(records) == 1
+        with pytest.raises(
+            ObservationTimeout if stop == "deadline" else ObservationCancelled
+        ):
+            next(archive)
+        assert list(archive) == []
+
+    assert_owner_released(owner)
+    assert len(records) == 2
+    completed = records[-1]
+    assert isinstance(completed, CompletionRecord)
+    assert completed.outcome == ("timeout" if stop == "deadline" else "failure")
+    assert (completed.stdout_bytes, completed.return_code) == (
+        6,
+        owner.process.returncode,
+    )
+
+
+@pytest.mark.parametrize("stop", ["deadline", "cancel"])
+def test_early_save_close_inside_a_live_scope_cleans_up_and_closes(stop: str) -> None:
+    records: list[TelemetryRecord] = []
+    owners: list[ArchiveDeadline] = []
+    client = archive_client(records)
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        patch(
+            "pywhales.components.image.cli_wrapper.ArchiveDeadline",
+            capture_owners(owners),
+        ),
+    ):
+        archive = client.image.save("sample")
+        assert isinstance(archive, GeneratorType)
+        with observation(
+            scope_policy(),
+            deadline=monotonic() + 30 if stop == "deadline" else None,
+            cancel=Event(),
+        ):
+            assert next(archive) == b"first\n"
+            archive.close()
+            archive.close()
+
+    (owner,) = owners
+    assert_owner_released(owner)
+    assert len(records) == 2
+    completed = records[-1]
+    assert isinstance(completed, CompletionRecord)
+    assert completed.outcome == "closed"
+    assert list(archive) == []
+
+
+@pytest.mark.parametrize("scope_first", [True, False])
+def test_save_command_timeout_precedes_only_a_later_scope_deadline(
+    scope_first: bool,
+) -> None:
+    owners: list[ArchiveDeadline] = []
+    client = archive_client([])
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        patch(
+            "pywhales.components.image.cli_wrapper.ArchiveDeadline",
+            capture_owners(owners),
+        ),
+    ):
+        archive = client.image.save("sample", timeout=30 if scope_first else 0.4)
+        with observation(
+            scope_policy(), deadline=monotonic() + (0.4 if scope_first else 30)
+        ):
+            assert next(archive) == b"first\n"
+        (owner,) = owners
+        assert owner.released.wait(3)
+
+        with pytest.raises(ObservationTimeout if scope_first else DockerTimeout):
+            next(archive)
+
+    assert_owner_released(owner)
+
+
+def test_scope_cancel_reaps_a_load_while_its_producer_is_stalled() -> None:
+    records: list[TelemetryRecord] = []
+    owners: list[ArchiveDeadline] = []
+    cancel = Event()
+    client = archive_client(records, "import threading; threading.Event().wait()")
+
+    def chunks() -> Generator[bytes]:
+        yield b"accepted"
+        cancel.set()
+        assert owners[0].released.wait(3)
+        yield b""
+        raise AssertionError("producer advanced after cancellation")
+
+    with (
+        patch(
+            "pywhales.components.image.cli_wrapper.ArchiveDeadline",
+            capture_owners(owners),
+        ),
+        pytest.raises(ObservationCancelled),
+        observation(scope_policy(), cancel=cancel),
+    ):
+        client.image.load(chunks())
+
+    (owner,) = owners
+    assert_owner_released(owner)
+    assert len(records) == 2
+    completed = records[-1]
+    assert isinstance(completed, CompletionRecord)
+    assert (completed.outcome, completed.stdin_bytes) == ("failure", 8)
+
+
+def test_scope_deadline_interrupts_a_load_with_a_saturated_stdin_pipe() -> None:
+    owners: list[ArchiveDeadline] = []
+    client = archive_client([], "import time; time.sleep(60)")
+    with (
+        patch(
+            "pywhales.components.image.cli_wrapper.ArchiveDeadline",
+            capture_owners(owners),
+        ),
+        pytest.raises(ObservationTimeout),
+        observation(scope_policy(), deadline=monotonic() + 0.4),
+    ):
+        client.image.load(b"x" * (2 * 1024 * 1024))
+
+    (owner,) = owners
+    assert_owner_released(owner)
+
+
+def test_path_load_inside_a_scope_stops_when_the_scope_is_cancelled() -> None:
+    cancel = Event()
+
+    def observe(record: TelemetryRecord) -> None:
+        if isinstance(record, LaunchRecord):
+            cancel.set()
+
+    client = DockerClient(
+        client_call=[
+            sys.executable,
+            "-c",
+            "import threading; print('Loaded image: x', flush=True); threading.Event().wait()",
+        ],
+        telemetry_observer=observe,
+    )
+    with (
+        pytest.raises(ObservationCancelled),
+        observation(scope_policy(), cancel=cancel),
+    ):
+        client.image.load("archive.tar", quiet=True)

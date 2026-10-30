@@ -1,12 +1,21 @@
 import json
+import math
+from collections.abc import Callable, Iterable, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from subprocess import CompletedProcess
+from typing import Literal
 from unittest.mock import patch
 
 import pytest
+from pytest_mock import MockerFixture
 
-from pywhales import DockerClient, Volume
+from pywhales import Container, DockerClient, Image, Volume
+from pywhales._execution_policy import get_execution_policy
+from pywhales.components.buildx.cli_wrapper import BuildxCLI
+from pywhales.components.container.cli_wrapper import ContainerCLI
+from pywhales.components.image.cli_wrapper import ImageCLI
+from pywhales.components.volume import cli_wrapper as volume_cli
 from pywhales.components.volume.models import VolumeInspectResult
 from pywhales.exceptions import (
     DockerException,
@@ -98,6 +107,372 @@ def test_volume_cleanup_propagates_unrelated_cli_failures(
     assert raised.value.return_code == 17
     assert raised.value.stdout == "output"
     assert raised.value.stderr == stderr.decode()
+
+
+class _Interrupted(BaseException):
+    pass
+
+
+type HelperStep = Literal["build", "create", "copy", "remove_container", "remove_image"]
+type Launch = tuple[HelperStep, float | None, dict[str, object]]
+
+
+def _command_failure(label: str) -> DockerException:
+    return DockerException([label], 1, b"", label.encode())
+
+
+def _patch_helpers(
+    mocker: MockerFixture,
+    client: DockerClient,
+    failures: dict[HelperStep, BaseException],
+) -> list[Launch]:
+    """Replace helper launches, recording each step and the scoped default deadline."""
+    config = client.client_config
+    config._client_call_with_path = ["docker-test"]
+    launches: list[Launch] = []
+
+    def record(step: HelperStep, **kwargs: object) -> None:
+        scoped = get_execution_policy(config.docker_cmd).default_timeout
+        launches.append((step, scoped, kwargs))
+        if step in failures:
+            raise failures[step]
+
+    def build(self: object, context: object, **kwargs: object) -> Image:
+        record("build", **kwargs)
+        return Image(config, "image-id", is_immutable_id=True)
+
+    def create(self: object, image: object, **kwargs: object) -> Container:
+        record("create", **kwargs)
+        return Container(config, "container-id", is_immutable_id=True)
+
+    def copy(
+        self: object,
+        source: object,
+        destination: object,
+        *,
+        timeout: float | None = None,
+    ) -> None:
+        record("copy", source=source, destination=destination, timeout=timeout)
+
+    def remove_container(self: object, containers: object, **kwargs: object) -> None:
+        record("remove_container", target=containers, **kwargs)
+
+    def remove_image(self: object, x: object, **kwargs: object) -> None:
+        record("remove_image", target=x, **kwargs)
+
+    mocker.patch.object(BuildxCLI, "build", build)
+    mocker.patch.object(ContainerCLI, "create", create)
+    mocker.patch.object(ContainerCLI, "copy", copy)
+    mocker.patch.object(ContainerCLI, "remove", remove_container)
+    mocker.patch.object(ImageCLI, "remove", remove_image)
+    return launches
+
+
+def _steps(launches: Sequence[Launch]) -> list[HelperStep]:
+    return [step for step, _, _ in launches]
+
+
+def _helper_names(launches: Sequence[Launch]) -> tuple[object, object]:
+    by_step = {step: kwargs for step, _, kwargs in launches}
+    return by_step["create"]["name"], by_step["build"]["tags"]
+
+
+@pytest.mark.parametrize("timeout", [None, 2.5])
+@pytest.mark.parametrize("to_volume", [False, True], ids=["from-volume", "to-volume"])
+def test_volume_copy_forwards_timeout_to_every_launch(
+    mocker: MockerFixture, to_volume: bool, timeout: float | None
+) -> None:
+    client = DockerClient()
+    launches = _patch_helpers(mocker, client, {})
+    endpoints: tuple[object, object] = (
+        ("local", ("data", "sub")) if to_volume else (("data", "sub"), "local")
+    )
+
+    if timeout is None:
+        client.volume.copy(*endpoints)
+    else:
+        client.volume.copy(*endpoints, timeout=timeout)
+
+    assert _steps(launches) == [
+        "build",
+        "create",
+        "copy",
+        "remove_container",
+        "remove_image",
+    ]
+    container_name, image_name = _helper_names(launches)
+    by_step = {step: kwargs for step, _, kwargs in launches}
+    assert by_step["build"]["timeout"] == timeout
+    assert by_step["copy"]["timeout"] == timeout
+    assert by_step["remove_container"]["target"] == container_name
+    assert by_step["remove_image"]["target"] == image_name
+    assert by_step["create"]["volumes"] == [("data", Path("/volume"))]
+    assert {scoped for _, scoped, _ in launches} == {timeout}
+    assert get_execution_policy(client.client_config.docker_cmd).default_timeout is None
+
+
+@pytest.mark.parametrize("timeout", [True, 0, 0.0, -1.0, math.nan, math.inf])
+@pytest.mark.parametrize("operation", ["copy", "clone", "handle_clone"])
+def test_volume_transfer_rejects_invalid_timeout_before_any_launch(
+    mocker: MockerFixture,
+    operation: Literal["copy", "clone", "handle_clone"],
+    timeout: float,
+) -> None:
+    client = DockerClient()
+    launches = _patch_helpers(mocker, client, {})
+    run = mocker.patch.object(volume_cli, "run")
+
+    with pytest.raises(ValueError, match="timeout"):
+        match operation:
+            case "copy":
+                client.volume.copy(("data", "."), "local", timeout=timeout)
+            case "clone":
+                client.volume.clone("data", timeout=timeout)
+            case "handle_clone":
+                Volume(client.client_config, "data", is_immutable_id=True).clone(
+                    timeout=timeout
+                )
+
+    assert launches == []
+    run.assert_not_called()
+
+
+def test_volume_copy_without_a_volume_endpoint_launches_nothing(
+    mocker: MockerFixture,
+) -> None:
+    client = DockerClient()
+    launches = _patch_helpers(mocker, client, {})
+
+    with pytest.raises(ValueError, match="tuple"):
+        client.volume.copy("here", "there")
+
+    assert launches == []
+
+
+@pytest.mark.parametrize(
+    ("failing", "removed"),
+    [
+        pytest.param("build", ["remove_image"], id="build"),
+        pytest.param("create", ["remove_container", "remove_image"], id="create"),
+        pytest.param("copy", ["remove_container", "remove_image"], id="copy"),
+    ],
+)
+@pytest.mark.parametrize("error_type", [DockerException, _Interrupted])
+def test_volume_copy_removes_helpers_by_chosen_names_after_failure(
+    mocker: MockerFixture,
+    failing: Literal["build", "create", "copy"],
+    removed: list[HelperStep],
+    error_type: type[BaseException],
+) -> None:
+    client = DockerClient()
+    failure = (
+        _command_failure("body") if error_type is DockerException else error_type()
+    )
+    launches = _patch_helpers(mocker, client, {failing: failure})
+
+    with pytest.raises(error_type) as raised:
+        client.volume.copy(("data", "."), "local", timeout=4.0)
+
+    assert raised.value is failure
+    attempted = _steps(launches)
+    assert attempted[-len(removed) :] == removed
+    by_step = {step: kwargs for step, _, kwargs in launches}
+    if "create" in by_step:
+        assert by_step["remove_container"]["target"] == by_step["create"]["name"]
+    assert by_step["remove_image"]["target"] == by_step["build"]["tags"]
+    assert "remove_container" in by_step or failing == "build"
+    assert {scoped for _, scoped, _ in launches} == {4.0}
+
+
+def test_volume_copy_ignores_missing_helpers_after_failure(
+    mocker: MockerFixture,
+) -> None:
+    client = DockerClient()
+    failure = _command_failure("body")
+    launches = _patch_helpers(
+        mocker,
+        client,
+        {
+            "copy": failure,
+            "remove_container": NoSuchContainer(["rm"], 1, b"", b"No such container"),
+            "remove_image": NoSuchImage(["rmi"], 1, b"", b"No such image"),
+        },
+    )
+
+    with pytest.raises(DockerException) as raised:
+        client.volume.copy(("data", "."), "local")
+
+    assert raised.value is failure
+    assert _steps(launches)[-2:] == ["remove_container", "remove_image"]
+
+
+def test_volume_copy_ignores_missing_helpers_after_success(
+    mocker: MockerFixture,
+) -> None:
+    client = DockerClient()
+    launches = _patch_helpers(
+        mocker,
+        client,
+        {
+            "remove_container": NoSuchContainer(["rm"], 1, b"", b"No such container"),
+            "remove_image": NoSuchImage(["rmi"], 1, b"", b"No such image"),
+        },
+    )
+
+    client.volume.copy(("data", "."), "local")
+
+    assert _steps(launches)[-2:] == ["remove_container", "remove_image"]
+
+
+def test_volume_copy_attempts_image_removal_after_container_removal_fails(
+    mocker: MockerFixture,
+) -> None:
+    client = DockerClient()
+    container_failure = _command_failure("container")
+    launches = _patch_helpers(mocker, client, {"remove_container": container_failure})
+
+    with pytest.raises(DockerException) as raised:
+        client.volume.copy(("data", "."), "local")
+
+    assert raised.value is container_failure
+    assert _steps(launches)[-2:] == ["remove_container", "remove_image"]
+
+
+def test_volume_copy_keeps_cleanup_failures_when_copy_succeeded(
+    mocker: MockerFixture,
+) -> None:
+    client = DockerClient()
+    container_failure = _command_failure("container")
+    image_failure = _command_failure("image")
+    launches = _patch_helpers(
+        mocker,
+        client,
+        {"remove_container": container_failure, "remove_image": image_failure},
+    )
+
+    with pytest.raises(BaseExceptionGroup) as raised:
+        client.volume.copy(("data", "."), "local")
+
+    assert raised.value.exceptions == (container_failure, image_failure)
+    assert _steps(launches)[-2:] == ["remove_container", "remove_image"]
+
+
+@pytest.mark.parametrize("error_type", [DockerException, _Interrupted])
+def test_volume_copy_keeps_body_and_both_removal_failures(
+    mocker: MockerFixture, error_type: type[BaseException]
+) -> None:
+    client = DockerClient()
+    body = _command_failure("body") if error_type is DockerException else error_type()
+    container_failure = _command_failure("container")
+    image_failure = _command_failure("image")
+    launches = _patch_helpers(
+        mocker,
+        client,
+        {
+            "copy": body,
+            "remove_container": container_failure,
+            "remove_image": image_failure,
+        },
+    )
+
+    with pytest.raises(BaseExceptionGroup) as raised:
+        client.volume.copy(("data", "."), "local")
+
+    outer = raised.value
+    assert len(outer.exceptions) == 2
+    inner, last = outer.exceptions
+    assert last is image_failure
+    assert isinstance(inner, BaseExceptionGroup)
+    assert inner.exceptions == (body, container_failure)
+    assert _steps(launches)[-2:] == ["remove_container", "remove_image"]
+
+
+def test_volume_copy_keeps_body_and_image_removal_failure(
+    mocker: MockerFixture,
+) -> None:
+    client = DockerClient()
+    body = _command_failure("body")
+    image_failure = _command_failure("image")
+    _patch_helpers(mocker, client, {"build": body, "remove_image": image_failure})
+
+    with pytest.raises(BaseExceptionGroup) as raised:
+        client.volume.copy(("data", "."), "local")
+
+    assert raised.value.exceptions == (body, image_failure)
+
+
+def _patch_clone(
+    mocker: MockerFixture, client: DockerClient, copy_failure: BaseException | None
+) -> tuple[list[tuple[list[str], float | None]], list[dict[str, object]]]:
+    """Record volume launches with their scoped deadline, and stub out copies."""
+    config = client.client_config
+    config._client_call_with_path = ["docker-test"]
+    launches: list[tuple[list[str], float | None]] = []
+    copies: list[dict[str, object]] = []
+
+    def run(command: Sequence[object]) -> str:
+        scoped = get_execution_policy(command).default_timeout
+        launches.append(([str(part) for part in command], scoped))
+        return "destination" if "create" in command else '[{"Name": "destination"}]'
+
+    def copy(
+        self: object, source: object, destination: object, **kwargs: object
+    ) -> None:
+        copies.append(
+            {"source": source, "destination": destination, **kwargs}
+            | {"scoped": get_execution_policy(config.docker_cmd).default_timeout}
+        )
+        if copy_failure is not None and len(copies) == 2:
+            raise copy_failure
+
+    mocker.patch.object(volume_cli, "run", run)
+    mocker.patch.object(volume_cli.VolumeCLI, "copy", copy)
+    return launches, copies
+
+
+@pytest.mark.parametrize("timeout", [None, 3.5])
+@pytest.mark.parametrize("via_handle", [False, True], ids=["cli", "handle"])
+def test_volume_clone_bounds_creation_inspection_and_both_copies(
+    mocker: MockerFixture, via_handle: bool, timeout: float | None
+) -> None:
+    client = DockerClient()
+    launches, copies = _patch_clone(mocker, client, None)
+    source = Volume(client.client_config, "source", is_immutable_id=True)
+
+    if via_handle:
+        result = source.clone("destination", timeout=timeout)
+    else:
+        result = client.volume.clone(source, "destination", timeout=timeout)
+
+    assert [command[1:3] for command, _ in launches] == [
+        ["volume", "create"],
+        ["volume", "inspect"],
+    ]
+    assert {scoped for _, scoped in launches} == {timeout}
+    assert [copy["timeout"] for copy in copies] == [timeout, timeout]
+    assert {copy["scoped"] for copy in copies} == {timeout}
+    assert copies[0]["source"] == (source, ".")
+    assert copies[1]["destination"] == (result, "")
+    assert result.client_config is client.client_config
+    assert result.name == "destination"
+
+
+@pytest.mark.parametrize("error_type", [DockerException, _Interrupted])
+def test_volume_clone_keeps_destination_volume_when_copy_fails(
+    mocker: MockerFixture, error_type: type[BaseException]
+) -> None:
+    client = DockerClient()
+    failure = (
+        _command_failure("copy") if error_type is DockerException else error_type()
+    )
+    launches, copies = _patch_clone(mocker, client, failure)
+
+    with pytest.raises(error_type) as raised:
+        client.volume.clone("source", "destination", timeout=1.5)
+
+    assert raised.value is failure
+    assert len(copies) == 2
+    assert all(command[1:3] != ["volume", "remove"] for command, _ in launches)
 
 
 @pytest.mark.parametrize("json_file", get_all_jsons("volumes"))
@@ -332,3 +707,41 @@ def test_volume_remove_empty_list(ctr_client: DockerClient) -> None:
         all_volumes = set(ctr_client.volume.list())
         ctr_client.volume.remove([])
         assert all_volumes == set(ctr_client.volume.list())
+
+
+EMPTY_SELECTIONS = [
+    pytest.param(list, id="list"),
+    pytest.param(tuple, id="tuple"),
+    pytest.param(lambda: (item for item in ()), id="generator"),
+]
+SINGLE_SELECTIONS = [
+    pytest.param(lambda: "alpha", id="str"),
+    pytest.param(lambda: ["alpha"], id="list"),
+    pytest.param(lambda: (item for item in ["alpha"]), id="generator"),
+]
+
+
+@pytest.mark.parametrize("make_empty", EMPTY_SELECTIONS)
+def test_volume_remove_empty_selection_skips_cli(
+    make_empty: Callable[[], Iterable[str]],
+) -> None:
+    client = DockerClient(client_call=["not-installed"])
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch("subprocess.run", side_effect=AssertionError("subprocess")),
+    ):
+        client.volume.remove(make_empty())
+
+
+@pytest.mark.parametrize("make_selection", SINGLE_SELECTIONS)
+def test_volume_remove_single_selection_builds_argv_once(
+    make_selection: Callable[[], str | Iterable[str]],
+) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    with patch(
+        "subprocess.run", return_value=CompletedProcess([], 0, b"", b"")
+    ) as command:
+        client.volume.remove(make_selection())
+    command.assert_called_once()
+    assert command.call_args.args[0] == ["docker-test", "volume", "remove", "alpha"]

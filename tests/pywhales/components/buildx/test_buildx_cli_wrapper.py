@@ -883,6 +883,37 @@ def test_prune_all_empty() -> None:
 
 
 @pytest.mark.usefixtures("with_docker_driver")
+@pytest.mark.usefixtures("prune_all")
+@pytest.mark.parametrize(
+    "filters",
+    [
+        {"until": "1000000h"},
+        [("until", "1000000h")],
+        [("until", "1000000h"), ("type", "regular")],
+        (pair for pair in [("until", "1000000h")]),
+    ],
+    ids=["mapping", "pairs", "pairs-two-keys", "generator"],
+)
+def test_prune_accepts_mapping_and_filter_pairs(
+    filters: dict[str, str] | Iterable[tuple[str, str]],
+) -> None:
+    logs = list(docker.buildx.prune(all=True, filters=filters, stream_logs=True))
+    assert logs == ["Total:\t0B\n"]
+
+
+@pytest.mark.usefixtures("with_docker_driver")
+@pytest.mark.parametrize("stream_logs", [False, True])
+def test_prune_repeated_keys_are_rejected_by_the_cli(stream_logs: bool) -> None:
+    # Repeated keys are forwarded unchanged; buildx reports conflicting until values.
+    filters = [("until", "24h"), ("until", "48h")]
+    with pytest.raises(DockerException):
+        if stream_logs:
+            list(docker.buildx.prune(filters=filters, stream_logs=True))
+        else:
+            docker.buildx.prune(filters=filters)
+
+
+@pytest.mark.usefixtures("with_docker_driver")
 def test_prune(tmp_path: Path) -> None:
     (tmp_path / "Dockerfile").write_text(dockerfile_content1)
 

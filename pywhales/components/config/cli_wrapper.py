@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import builtins
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType, TracebackType
-from typing import Self, assert_never, overload, override
+from typing import Literal, Self, assert_never, overload, override
 
 from pydantic import JsonValue
 
@@ -25,14 +25,28 @@ from pywhales.components.config.models import (
     ConfigSpec,
     DockerObjectVersion,
 )
-from pywhales.utils import custom_parse_object_as, format_mapping_for_cli, run, to_list
+from pywhales.exceptions import NoSuchConfig
+from pywhales.utils import (
+    custom_parse_object_as,
+    format_filters_for_cli,
+    format_mapping_for_cli,
+    run,
+    to_list,
+)
+
+type ConfigListFilter = (
+    tuple[Literal["id"], str]
+    | tuple[Literal["label"], str]
+    | tuple[Literal["name"], str]
+)
 
 
 class Config(ReloadableObjectFromJson[ConfigInspectResult]):
     """Reloadable Swarm config handle using its originating client settings.
 
-    A context manager attempts removal on exit, including when its body fails.
-    If both body and cleanup fail, both exceptions are preserved in a group.
+    A context manager attempts removal on exit, including when its body fails,
+    and ignores a config that is already gone. Other cleanup failures are grouped
+    with any active body exception.
     """
 
     def __init__(
@@ -50,7 +64,10 @@ class Config(ReloadableObjectFromJson[ConfigInspectResult]):
         exc_tb: TracebackType | None,
     ) -> None:
         with resource_cleanup(exc_val, "Config body and cleanup both failed"):
-            self.remove()
+            try:
+                self.remove()
+            except NoSuchConfig:
+                return
 
     @override
     def _fetch_inspect_result_json(self, reference: str) -> dict[str, JsonValue]:
@@ -69,6 +86,10 @@ class Config(ReloadableObjectFromJson[ConfigInspectResult]):
         A context manager attempts this removal even if its body raises.
         """
         ConfigCLI(self.client_config).remove(self)
+
+    def exists(self) -> bool:
+        """Return whether this config can still be inspected in the Swarm."""
+        return ConfigCLI(self.client_config).exists(self.id)
 
     @property
     def id(self) -> str:
@@ -124,6 +145,23 @@ class ConfigCLI(DockerCLICaller):
         full_cmd += [name, file]
         return Config(self.client_config, run(full_cmd), is_immutable_id=True)
 
+    def exists(self, x: str) -> bool:
+        """Return whether a config can be inspected.
+
+        Args:
+            x: Config name or ID to inspect.
+
+        Returns:
+            False when Docker reports NoSuchConfig; True on successful inspection.
+            Other inspection failures propagate, including NotASwarmManager.
+        """
+        try:
+            self.inspect(x)
+        except NoSuchConfig:
+            return False
+        else:
+            return True
+
     @overload
     def inspect(self, x: str) -> Config: ...
 
@@ -166,33 +204,44 @@ class ConfigCLI(DockerCLICaller):
                 assert_never(unreachable)
 
     def list(
-        self, filters: Mapping[str, str] = MappingProxyType({})
+        self,
+        filters: Mapping[str, str] | Iterable[ConfigListFilter] = MappingProxyType({}),
     ) -> builtins.list[Config]:
         """List configs available in the Swarm.
 
         Args:
-            filters: Docker filter names and values; the default selects all configs.
+            filters: Docker filter names and values, either as a mapping or as
+                an iterable of ``(key, value)`` pairs. Pairs keep their order
+                and repeated keys, and an iterator is read once. The documented
+                keys are `id`, `label`, and `name`. The default selects all
+                configs. For example, `filters={"name": "app"}` or
+                `filters=[("label", "tier=web"), ("label", "team=core")]`.
 
         Returns:
             Config handles in CLI output order.
+
+        Raises:
+            TypeError: If filters is a string, bytes, or an iterable containing
+                anything but ``(key, value)`` tuples of strings. Raised before
+                the Docker executable is looked up.
         """
+        filter_args = format_filters_for_cli(filters)
         full_cmd = Command([*self.docker_cmd, "config", "list", "--quiet"])
-        full_cmd.add_args_iterable_or_single(
-            "--filter", format_mapping_for_cli(filters)
-        )
+        full_cmd.add_args_iterable_or_single("--filter", filter_args)
         output = run(full_cmd)
         ids = output.splitlines()
         return [Config(self.client_config, id_, is_immutable_id=True) for id_ in ids]
 
-    def remove(self, x: ValidConfig | Sequence[ValidConfig]) -> None:
+    def remove(self, x: ValidConfig | Iterable[ValidConfig]) -> None:
         """Remove one or more configs.
 
         Args:
             x: Config names, IDs, or handles.
-                An empty list means the function call does nothing.
+                An empty selection means the function call does nothing.
         """
-        full_cmd = Command([*self.docker_cmd, "config", "rm"])
-        if x == []:
+        configs = to_list(x)
+        if not configs:
             return
-        full_cmd += to_list(x)
+        full_cmd = Command([*self.docker_cmd, "config", "rm"])
+        full_cmd += configs
         run(full_cmd)

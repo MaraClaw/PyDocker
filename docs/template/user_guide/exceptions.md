@@ -12,6 +12,23 @@ Those are the child classes:
 * `NoSuchService`
 * `NotASwarmManager`
 * `NoSuchVolume`
+* `NoSuchConfig`
+* `NoSuchSecret`
+* `NoSuchPlugin`
+* `NoSuchContext`
+
+A class is chosen from the text docker wrote to stderr. A line has to begin with the
+resource kind's own phrase, such as `No such secret: x` or `config x not found`,
+optionally after `Error response from daemon: ` or `Error: `. The name in the
+message and file paths never decide the class, so a secret called `network-x` is
+still a `NoSuchSecret`. Output of your own application that `run` or `exec`
+forwards on stderr can begin a line with one of those phrases and be misclassified;
+PyWhales does nothing to prevent that.
+
+Config, secret, plugin, context, and service handles have an `exists()` method that
+returns `False` only for their own `NoSuch...` class. Other failures, including
+`NotASwarmManager`, propagate. A config, secret, plugin, or service that was removed
+inside its `with` block is not an error when the block exits.
 
 All exceptions will have these 4 attributes:
 

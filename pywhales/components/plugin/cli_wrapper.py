@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import builtins
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from types import MappingProxyType, TracebackType
 from typing import Self, overload, override
 
@@ -23,6 +23,7 @@ from pywhales.components.plugin.models import (
     PluginInspectResult,
     PluginSettings,
 )
+from pywhales.exceptions import NoSuchPlugin
 from pywhales.utils import (
     ValidPath,
     custom_parse_object_as,
@@ -35,8 +36,9 @@ from pywhales.utils import (
 class Plugin(ReloadableObjectFromJson[PluginInspectResult]):
     """Reloadable daemon plugin handle with forced context-exit removal.
 
-    Context-manager cleanup is attempted even if the body raises. If removal
-    also fails, both failures are preserved in an exception group.
+    Context-manager cleanup is attempted even if the body raises, and ignores a
+    plugin that is already gone. Other removal failures are grouped with any
+    active body exception.
     """
 
     def __init__(
@@ -54,7 +56,10 @@ class Plugin(ReloadableObjectFromJson[PluginInspectResult]):
         exc_tb: TracebackType | None,
     ) -> None:
         with resource_cleanup(exc_val, "Plugin body and cleanup both failed"):
-            self.remove(force=True)
+            try:
+                self.remove(force=True)
+            except NoSuchPlugin:
+                return
 
     @override
     def _fetch_inspect_result_json(self, reference: str) -> dict[str, JsonValue]:
@@ -128,6 +133,10 @@ class Plugin(ReloadableObjectFromJson[PluginInspectResult]):
         """Remove this plugin, optionally forcing removal of an active plugin."""
         self._docker_plugin.remove(self, force=force)
 
+    def exists(self) -> bool:
+        """Return whether this plugin can still be inspected on the daemon."""
+        return self._docker_plugin.exists(self.id)
+
     def set(self, configuration: dict[str, str]) -> None:
         """Set this plugin's configuration from key-value settings."""
         self._docker_plugin.set(self, configuration)
@@ -196,6 +205,23 @@ class PluginCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--timeout", timeout)
         full_cmd.append(plugin)
         run(full_cmd)
+
+    def exists(self, x: str) -> bool:
+        """Return whether a plugin can be inspected.
+
+        Args:
+            x: Plugin name or ID to inspect.
+
+        Returns:
+            False when Docker reports NoSuchPlugin; True on successful inspection.
+            Other inspection failures propagate.
+        """
+        try:
+            self.inspect(x)
+        except NoSuchPlugin:
+            return False
+        else:
+            return True
 
     @overload
     def inspect(self, x: str) -> Plugin: ...
@@ -320,19 +346,20 @@ class PluginCLI(DockerCLICaller):
         run(full_cmd, timeout=timeout)
 
     def remove(
-        self, x: ValidPlugin | Sequence[ValidPlugin], force: bool = False
+        self, x: ValidPlugin | Iterable[ValidPlugin], force: bool = False
     ) -> None:
         """Remove one or more plugins.
 
         Args:
-            x: Plugin names, IDs, or handles. An empty list is a no-op.
+            x: Plugin names, IDs, or handles. An empty selection is a no-op.
             force: Force the removal of this plugin.
         """
+        plugins = to_list(x)
+        if not plugins:
+            return
         full_cmd = Command([*self.docker_cmd, "plugin", "remove"])
         full_cmd.add_flag("--force", force)
-        if x == []:
-            return
-        full_cmd += to_list(x)
+        full_cmd += plugins
         run(full_cmd)
 
     def set(self, plugin: ValidPlugin, configuration: dict[str, str]) -> None:

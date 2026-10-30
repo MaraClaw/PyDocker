@@ -9,12 +9,13 @@ import contextlib
 import json
 import sys
 import time
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextvars import ContextVar
 from pathlib import Path
 from queue import Queue
 from subprocess import CompletedProcess, Popen
-from threading import Barrier, Event, Thread, current_thread
+from threading import Barrier, Event, Thread, current_thread, get_ident
 from types import GeneratorType
 from typing import Literal, assert_never, override
 from unittest.mock import ANY, MagicMock, Mock, patch
@@ -23,7 +24,10 @@ import pytest
 
 from pywhales import DockerClient, Image, docker
 from pywhales._archive_deadline import ArchiveDeadline
+from pywhales._execution_policy import get_execution_policy
+from pywhales._observation import ObservationState, get_observation, observation
 from pywhales.client_config import Command, ParsingError
+from pywhales.components.image.cli_wrapper import ImageCLI
 from pywhales.components.image.models import ImageInspectResult
 from pywhales.components.image.streams import MultiImageStream
 from pywhales.exceptions import (
@@ -33,7 +37,9 @@ from pywhales.exceptions import (
     NoSuchImage,
     NoSuchNetwork,
     NoSuchVolume,
+    ObservationCancelled,
 )
+from pywhales.inventory import InspectionPolicy
 from pywhales.test_utils import get_all_jsons, random_name
 from pywhales.utils import MappedProcessStream, ProcessStream, stream_stdout_and_stderr
 
@@ -654,6 +660,211 @@ def test_direct_archive_rejects_invalid_selected_default_before_launch(
         else:
             client.image.load(b"input")
     launch.assert_not_called()
+
+
+type _ArchiveOperation = Literal[
+    "save-path", "save-lazy", "handle-save", "load-path", "load-bytes"
+]
+
+_ARCHIVE_CALLS: dict[
+    _ArchiveOperation, Callable[[DockerClient, Path, float | None], object]
+] = {
+    "save-path": lambda client, tmp, timeout: client.image.save(
+        "sample", tmp / "archive.tar", timeout=timeout
+    ),
+    "save-lazy": lambda client, tmp, timeout: client.image.save(
+        "sample", timeout=timeout
+    ),
+    "handle-save": lambda client, tmp, timeout: Image(
+        client.client_config, "sample", is_immutable_id=True
+    ).save(tmp / "archive.tar", timeout=timeout),
+    "load-path": lambda client, tmp, timeout: client.image.load(
+        tmp / "archive.tar", quiet=True, timeout=timeout
+    ),
+    "load-bytes": lambda client, tmp, timeout: client.image.load(
+        b"input", timeout=timeout
+    ),
+}
+
+_ARCHIVE_RESULTS: dict[_ArchiveOperation, object] = {
+    "save-path": None,
+    "save-lazy": b"Loaded image: sample\n",
+    "handle-save": None,
+    "load-path": ["sample"],
+    "load-bytes": ["sample"],
+}
+
+
+def _delayed_archive_client(
+    delay: float, default_timeout: float | None
+) -> DockerClient:
+    """Return a client whose CLI is a Python child that prints after `delay` seconds."""
+    return DockerClient(
+        client_call=[
+            sys.executable,
+            "-c",
+            "import sys, time; time.sleep(float(sys.argv[1])); "
+            "print('Loaded image: sample', flush=True)",
+            str(delay),
+        ],
+        default_timeout=default_timeout,
+    )
+
+
+def _complete_archive_call(result: object) -> object:
+    """Consume a lazy archive generator into bytes; return other results unchanged."""
+    if isinstance(result, GeneratorType):
+        return b"".join(result)
+    return result
+
+
+@pytest.mark.parametrize("operation", list(_ARCHIVE_CALLS))
+@pytest.mark.parametrize(
+    "timeout", [True, 0, -1.0, float("nan"), float("inf")], ids=str
+)
+def test_archive_invalid_timeout_rejected_before_inspection_and_launch(
+    operation: _ArchiveOperation, timeout: float, tmp_path: Path
+) -> None:
+    client = DockerClient(client_call=["pywhales-missing-archive-cli"])
+    with (
+        patch.object(ImageCLI, "inspect") as inspect,
+        patch("pywhales.components.image.cli_wrapper.Popen") as popen,
+        patch("pywhales.components.image.cli_wrapper.run") as run_command,
+        patch(
+            "pywhales.components.image.cli_wrapper.stream_stdout_and_stderr"
+        ) as stream,
+        pytest.raises(ValueError, match="timeout"),
+    ):
+        _ARCHIVE_CALLS[operation](client, tmp_path, timeout)
+    for launched in (inspect, popen, run_command, stream):
+        launched.assert_not_called()
+
+
+def test_archive_invalid_timeout_does_not_consume_load_input() -> None:
+    consumed: list[bool] = []
+
+    def chunks() -> Generator[bytes]:
+        consumed.append(True)
+        yield b"input"
+
+    client = DockerClient(client_call=["pywhales-missing-archive-cli"])
+    with pytest.raises(ValueError, match="timeout"):
+        client.image.load(chunks(), timeout=0)
+    assert consumed == []
+
+
+@pytest.mark.parametrize("operation", ["save-path", "handle-save"])
+@pytest.mark.parametrize("timeout", [None, 7.5])
+def test_archive_path_save_forwards_timeout_to_run(
+    operation: _ArchiveOperation, timeout: float | None, tmp_path: Path
+) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    with (
+        patch.object(ImageCLI, "inspect", return_value=[]),
+        patch("pywhales.components.image.cli_wrapper.run") as run_command,
+    ):
+        assert _ARCHIVE_CALLS[operation](client, tmp_path, timeout) is None
+    run_command.assert_called_once()
+    assert run_command.call_args.kwargs == {"timeout": timeout}
+
+
+@pytest.mark.parametrize("timeout", [None, 7.5])
+def test_archive_path_load_forwards_timeout_to_stream(
+    timeout: float | None, tmp_path: Path
+) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    with patch(
+        "pywhales.components.image.cli_wrapper.stream_stdout_and_stderr",
+        return_value=iter(()),
+    ) as stream:
+        assert client.image.load(tmp_path / "archive.tar", timeout=timeout) == []
+    stream.assert_called_once()
+    assert stream.call_args.kwargs == {"timeout": timeout}
+
+
+@pytest.mark.parametrize("operation", list(_ARCHIVE_CALLS))
+def test_archive_explicit_timeout_shortens_default_deadline(
+    operation: _ArchiveOperation, tmp_path: Path
+) -> None:
+    client = _delayed_archive_client(delay=5, default_timeout=None)
+    with (
+        patch.object(ImageCLI, "inspect", return_value=[]),
+        pytest.raises(DockerTimeout),
+    ):
+        _complete_archive_call(_ARCHIVE_CALLS[operation](client, tmp_path, 0.3))
+
+
+@pytest.mark.parametrize("operation", list(_ARCHIVE_CALLS))
+def test_archive_explicit_timeout_extends_default_deadline(
+    operation: _ArchiveOperation, tmp_path: Path
+) -> None:
+    client = _delayed_archive_client(delay=0.8, default_timeout=0.3)
+    with patch.object(ImageCLI, "inspect", return_value=[]):
+        result = _complete_archive_call(_ARCHIVE_CALLS[operation](client, tmp_path, 10))
+    assert result == _ARCHIVE_RESULTS[operation]
+
+
+@pytest.mark.parametrize("operation", ["save-lazy", "load-bytes"])
+def test_archive_explicit_timeout_replaces_invalid_selected_default(
+    operation: _ArchiveOperation, tmp_path: Path
+) -> None:
+    client = _delayed_archive_client(delay=0, default_timeout=None)
+    client.client_config.default_timeout = 0
+    with patch.object(ImageCLI, "inspect", return_value=[]):
+        result = _complete_archive_call(_ARCHIVE_CALLS[operation](client, tmp_path, 10))
+    assert result == _ARCHIVE_RESULTS[operation]
+
+
+def test_archive_lazy_save_explicit_timeout_starts_at_first_iteration() -> None:
+    client = _delayed_archive_client(delay=0, default_timeout=None)
+    with patch.object(ImageCLI, "inspect", return_value=[]):
+        archive = client.image.save("sample", timeout=0.4)
+        time.sleep(0.6)
+        assert b"".join(archive) == b"Loaded image: sample\n"
+
+
+def test_archive_save_explicit_timeout_reaps_paused_consumer() -> None:
+    owners: Queue[ArchiveDeadline] = Queue()
+    client = DockerClient(
+        client_call=[
+            sys.executable,
+            "-c",
+            "import os,time; os.write(1,b'\\x00\\xffdata'); time.sleep(60)",
+        ],
+        default_timeout=60,
+    )
+
+    def make_owner(
+        process: Popen[bytes], command: list[str], deadline: float, *, raw: bool
+    ) -> ArchiveDeadline:
+        owner = ArchiveDeadline(process, command, deadline, raw=raw)
+        owners.put(owner)
+        return owner
+
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        patch("pywhales.components.image.cli_wrapper.ArchiveDeadline", make_owner),
+    ):
+        archive = client.image.save("sample", timeout=0.3)
+        assert next(archive) == b"\x00\xffdata"
+        owner = owners.get(timeout=3)
+        assert owner.released.wait(3)
+        assert owner.process.returncode is not None
+        assert owner.process.stdout is not None and owner.process.stdout.closed
+        with pytest.raises(DockerTimeout):
+            next(archive)
+        assert list(archive) == []
+
+
+def test_archive_load_explicit_timeout_interrupts_saturated_stdin_pipe() -> None:
+    client = DockerClient(
+        client_call=[sys.executable, "-c", "import time; time.sleep(60)"],
+        default_timeout=60,
+    )
+    with pytest.raises(DockerTimeout):
+        client.image.load(b"x" * (2 * 1024 * 1024), timeout=0.2)
 
 
 def test_archive_path_load_uses_each_client_environment(
@@ -2344,3 +2555,372 @@ def test_copy_to_pull(container_mock: Mock) -> None:
     )
 
     container_cli_mock.create.assert_called_with(test_image_name, pull=test_pull_flag)
+
+
+def _image_copy_launches(
+    client: DockerClient,
+    launches: list[tuple[tuple[str, str], float | None, float | None]],
+    fail_on: tuple[str, str] | None = None,
+) -> Callable[..., str]:
+    """Return a fake `run` recording each launch's subcommand and timeouts.
+
+    Each record is the Docker subcommand, the default deadline in the launch's
+    policy snapshot, and the explicit `timeout` argument. Container inspect
+    reports a running container so that cleanup also launches stop and rm.
+    """
+    inspect_json = json.dumps([json.loads(get_all_jsons("containers")[0].read_text())])
+    outputs = {
+        ("create", ""): "tmp-container",
+        ("container", "inspect"): inspect_json,
+        ("container", "commit"): "sha256:committed",
+    }
+
+    def fake_run(
+        full_cmd: Command, *args: object, timeout: float | None = None, **kwargs: object
+    ) -> str:
+        subcommand = (
+            ("create", "")
+            if str(full_cmd[1]) == "create"
+            else (str(full_cmd[1]), str(full_cmd[2]))
+        )
+        policy = get_execution_policy(full_cmd)
+        launches.append((subcommand, policy.default_timeout, timeout))
+        if subcommand == fail_on:
+            raise DockerException([str(part) for part in full_cmd], 1)
+        return outputs.get(subcommand, "")
+
+    return fake_run
+
+
+def _copy_client(default_timeout: float | None) -> DockerClient:
+    client = DockerClient(default_timeout=default_timeout)
+    client.client_config._client_call_with_path = ["docker-test"]
+    return client
+
+
+@pytest.mark.parametrize("copy_to", [False, True], ids=["copy_from", "copy_to"])
+@pytest.mark.parametrize("via_handle", [False, True], ids=["cli", "handle"])
+@pytest.mark.parametrize(
+    "timeout", [True, 0, -1.0, float("nan"), float("inf")], ids=str
+)
+def test_image_copy_invalid_timeout_rejected_before_inspection_and_create(
+    copy_to: bool, via_handle: bool, timeout: float
+) -> None:
+    client = _copy_client(default_timeout=3)
+    handle = Image(client.client_config, "sha256:base", is_immutable_id=True)
+    with (
+        patch("pywhales.components.image.cli_wrapper.ContainerCLI") as container_cli,
+        patch.object(ImageCLI, "inspect") as inspect,
+        pytest.raises(ValueError, match="timeout"),
+    ):
+        if copy_to and via_handle:
+            handle.copy_to("local", "/in-image", timeout=timeout)
+        elif copy_to:
+            client.image.copy_to(handle, "local", "/in-image", timeout=timeout)
+        elif via_handle:
+            handle.copy_from("/in-image", "local", timeout=timeout)
+        else:
+            client.image.copy_from(handle, "/in-image", "local", timeout=timeout)
+    container_cli.assert_not_called()
+    inspect.assert_not_called()
+
+
+@pytest.mark.parametrize("via_handle", [False, True], ids=["cli", "handle"])
+@pytest.mark.parametrize("timeout", [None, 7.5])
+def test_image_copy_forwards_timeout_to_container_copy_and_keeps_pull(
+    via_handle: bool, timeout: float | None
+) -> None:
+    client = _copy_client(default_timeout=3)
+    handle = Image(client.client_config, "sha256:base", is_immutable_id=True)
+    with patch("pywhales.components.image.cli_wrapper.ContainerCLI") as container_cli:
+        created = container_cli.return_value.create
+        tmp_container = created.return_value.__enter__.return_value
+        if via_handle:
+            handle.copy_from("/a", "dest", "always", timeout=timeout)
+            committed = handle.copy_to("src", "/b", "tag", "never", timeout=timeout)
+        else:
+            client.image.copy_from(handle, "/a", "dest", "always", timeout=timeout)
+            committed = client.image.copy_to(
+                handle, "src", "/b", "tag", "never", timeout=timeout
+            )
+    assert [call.kwargs for call in created.call_args_list] == [
+        {"pull": "always"},
+        {"pull": "never"},
+    ]
+    tmp_container.copy_from.assert_called_once_with("/a", "dest", timeout=timeout)
+    tmp_container.copy_to.assert_called_once_with("src", "/b", timeout=timeout)
+    tmp_container.commit.assert_called_once_with(tag="tag")
+    assert committed is tmp_container.commit.return_value
+
+
+@pytest.mark.parametrize("copy_to", [False, True], ids=["copy_from", "copy_to"])
+def test_image_copy_bounds_every_implicit_launch_with_override(copy_to: bool) -> None:
+    client = _copy_client(default_timeout=3)
+    base = Image(client.client_config, "sha256:base", is_immutable_id=True)
+    launches: list[tuple[tuple[str, str], float | None, float | None]] = []
+    with patch(
+        "pywhales.components.container.cli_wrapper.run",
+        _image_copy_launches(client, launches),
+    ):
+        if copy_to:
+            committed = base.copy_to("local", "/in-image", timeout=7.5)
+            assert committed.client_config is client.client_config
+        else:
+            base.copy_from("/in-image", "local", timeout=7.5)
+    expected = ["", "cp", "inspect", "stop", "rm"]
+    if copy_to:
+        expected.insert(2, "commit")
+    assert [subcommand[1] for subcommand, _, _ in launches] == expected
+    assert {default for _, default, _ in launches} == {7.5}
+    assert [
+        explicit for subcommand, _, explicit in launches if subcommand[1] == "cp"
+    ] == [7.5]
+    assert client.client_config.default_timeout == 3
+    assert get_execution_policy(client.docker_cmd).default_timeout == 3
+
+
+def test_image_copy_without_timeout_keeps_configured_default() -> None:
+    client = _copy_client(default_timeout=3)
+    base = Image(client.client_config, "sha256:base", is_immutable_id=True)
+    launches: list[tuple[tuple[str, str], float | None, float | None]] = []
+    with patch(
+        "pywhales.components.container.cli_wrapper.run",
+        _image_copy_launches(client, launches),
+    ):
+        base.copy_from("/in-image", "local")
+    assert launches
+    assert {default for _, default, _ in launches} == {3}
+    assert {explicit for _, _, explicit in launches} == {None}
+
+
+@pytest.mark.parametrize("copy_to", [False, True], ids=["copy_from", "copy_to"])
+def test_image_copy_failure_still_removes_container_within_override(
+    copy_to: bool,
+) -> None:
+    client = _copy_client(default_timeout=3)
+    base = Image(client.client_config, "sha256:base", is_immutable_id=True)
+    launches: list[tuple[tuple[str, str], float | None, float | None]] = []
+    with (
+        patch(
+            "pywhales.components.container.cli_wrapper.run",
+            _image_copy_launches(client, launches, fail_on=("container", "cp")),
+        ),
+        pytest.raises(DockerException),
+    ):
+        if copy_to:
+            base.copy_to("local", "/in-image", timeout=7.5)
+        else:
+            base.copy_from("/in-image", "local", timeout=7.5)
+    assert [subcommand[1] for subcommand, _, _ in launches][-1] == "rm"
+    assert {default for _, default, _ in launches} == {7.5}
+    assert get_execution_policy(client.docker_cmd).default_timeout == 3
+
+
+@pytest.mark.parametrize("path_output", [False, True], ids=["lazy", "path"])
+def test_image_save_bounds_eager_inspection_with_override(path_output: bool) -> None:
+    client = _copy_client(default_timeout=3)
+    effective: list[float | None] = []
+
+    def inspect(*args: object, **kwargs: object) -> list[Image]:
+        effective.append(get_execution_policy(client.docker_cmd).default_timeout)
+        return []
+
+    with (
+        patch.object(ImageCLI, "inspect", side_effect=inspect),
+        patch("pywhales.components.image.cli_wrapper.run"),
+    ):
+        archive = client.image.save(
+            "sample", "archive.tar" if path_output else None, timeout=7.5
+        )
+        client.image.save("sample", "archive.tar", timeout=None)
+        if not path_output:
+            assert isinstance(archive, GeneratorType)
+            archive.close()
+    assert effective == [7.5, 3]
+    assert get_execution_policy(client.docker_cmd).default_timeout == 3
+
+
+def test_image_save_scope_is_not_held_while_generator_is_suspended() -> None:
+    client = DockerClient(
+        client_call=[
+            sys.executable,
+            "-c",
+            "import time; print('a', flush=True); time.sleep(0.3); print('b', flush=True)",
+        ],
+        default_timeout=3,
+    )
+    with patch.object(ImageCLI, "inspect", return_value=[]):
+        archive = client.image.save("sample", timeout=7.5)
+        assert isinstance(archive, GeneratorType)
+        assert get_execution_policy(client.docker_cmd).default_timeout == 3
+        with contextlib.closing(archive):
+            assert next(archive) == b"a\n"
+            assert get_execution_policy(client.docker_cmd).default_timeout == 3
+            assert b"".join(archive) == b"b\n"
+
+
+EMPTY_SELECTIONS = [
+    pytest.param(list, id="list"),
+    pytest.param(tuple, id="tuple"),
+    pytest.param(lambda: (item for item in ()), id="generator"),
+]
+SINGLE_SELECTIONS = [
+    pytest.param(lambda: "alpha", id="str"),
+    pytest.param(lambda: ["alpha"], id="list"),
+    pytest.param(lambda: (item for item in ["alpha"]), id="generator"),
+]
+
+
+def _scope_policy() -> InspectionPolicy:
+    return InspectionPolicy(
+        max_references=1, max_argv_bytes=65536, max_response_bytes=1024
+    )
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+@pytest.mark.parametrize(
+    "images", ["one", ["one"], ["one", "one"], ["one", "two"], list("abcdefg")]
+)
+def test_unquiet_transfer_in_a_scope_raises_the_same_error_for_one_or_many(
+    operation: Literal["pull", "push"], images: str | list[str]
+) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    method = client.image.pull if operation == "pull" else client.image.push
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        patch("pywhales.utils.Popen", side_effect=AssertionError("launched")),
+        patch("subprocess.Popen", side_effect=AssertionError("launched")),
+        observation(_scope_policy()),
+        pytest.raises(ValueError, match="Observation requires captured output"),
+    ):
+        method(images, quiet=False)
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+def test_pool_tasks_each_run_in_a_fresh_copy_of_the_callers_context(
+    operation: Literal["pull", "push"],
+) -> None:
+    names = [f"image-{number}" for number in range(8)]
+    caller: ContextVar[str] = ContextVar("caller", default="unset")
+    seen: list[tuple[ObservationState | None, str, int]] = []
+    ready = Barrier(4)
+
+    def fake_run(full_cmd: Command, *args: object, **kwargs: object) -> str:
+        command = [str(part) for part in full_cmd]
+        if command[1:3] == ["image", "inspect"]:
+            return json.dumps([{"Id": "sha256:" + command[-1]}])
+        seen.append((get_observation(), caller.get(), get_ident()))
+        caller.set(f"leaked-by-{command[-1]}")
+        if len(seen) <= 4:
+            # Four tasks overlap, so workers are distinct and then get reused.
+            ready.wait(timeout=3)
+        return ""
+
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    caller.set("caller")
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        patch("pywhales.components.image.cli_wrapper.run", side_effect=fake_run),
+        observation(_scope_policy()) as state,
+    ):
+        if operation == "pull":
+            client.image.pull(names, quiet=True)
+        else:
+            client.image.push(names, quiet=True)
+
+    assert len(seen) == len(names)
+    assert all(scope is state for scope, _, _ in seen)
+    assert {value for _, value, _ in seen} == {"caller"}
+    assert 1 < len({ident for _, _, ident in seen}) <= 4
+    assert caller.get() == "caller"
+
+
+def test_multi_image_children_launch_in_the_scope_that_created_the_group(
+    image_commands: _ImageCommands,
+) -> None:
+    names = ["one", "two", "three", "four", "five"]
+    cancel = Event()
+    with observation(_scope_policy(), cancel=cancel) as state:
+        stream = image_commands.stream("pull", names)
+    try:
+        # The group is first consumed after its scope has exited.
+        next(stream)
+        for _ in range(4):
+            image_commands.started.get(timeout=3)
+        image_commands.finish("one")
+        image_commands.started.get(timeout=3)
+        assert set(image_commands.children) == set(names)
+        assert all(
+            child._observation is state for child in image_commands.children.values()
+        )
+
+        cancel.set()
+
+        with pytest.raises(ObservationCancelled):
+            list(stream)
+        for child in image_commands.children.values():
+            _assert_image_process_released(child)
+    finally:
+        image_commands.release_children()
+        stream.close()
+
+
+def test_multi_image_group_created_outside_a_scope_stays_unscoped(
+    image_commands: _ImageCommands,
+) -> None:
+    stream = image_commands.stream("pull", ["one", "two"])
+    cancel = Event()
+    try:
+        with (
+            pytest.raises(ObservationCancelled),
+            observation(_scope_policy(), cancel=cancel),
+        ):
+            cancel.set()
+            next(stream)
+            for _ in range(2):
+                image_commands.started.get(timeout=3)
+        assert all(
+            child._observation is None for child in image_commands.children.values()
+        )
+    finally:
+        image_commands.release_children()
+        stream.close()
+
+
+@pytest.mark.parametrize("make_empty", EMPTY_SELECTIONS)
+def test_image_remove_empty_selection_skips_cli(
+    make_empty: Callable[[], Iterable[str]],
+) -> None:
+    client = DockerClient(client_call=["not-installed"])
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch("subprocess.run", side_effect=AssertionError("subprocess")),
+    ):
+        client.image.remove(make_empty(), force=True, prune=False)
+
+
+@pytest.mark.parametrize("make_selection", SINGLE_SELECTIONS)
+@pytest.mark.parametrize(
+    ("kwargs", "flags"),
+    [
+        ({}, []),
+        ({"force": True}, ["--force"]),
+        ({"prune": False}, ["--no-prune"]),
+        ({"force": True, "prune": False}, ["--force", "--no-prune"]),
+    ],
+)
+def test_image_remove_single_selection_keeps_flags(
+    kwargs: dict[str, bool],
+    flags: list[str],
+    make_selection: Callable[[], str | Iterable[str]],
+) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    with patch(
+        "subprocess.run", return_value=CompletedProcess([], 0, b"", b"")
+    ) as command:
+        client.image.remove(make_selection(), **kwargs)
+    command.assert_called_once()
+    assert command.call_args.args[0] == ["docker-test", "image", "rm", *flags, "alpha"]

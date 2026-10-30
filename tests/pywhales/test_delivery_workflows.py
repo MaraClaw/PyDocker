@@ -12,6 +12,7 @@ import sys
 import tarfile
 import threading
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -38,15 +39,17 @@ from scripts.delivery.models import (
     Job,
     Jobs,
     Pull,
+    Receipt,
     Release,
     Repository,
     Run,
     Seal,
     Workflow,
 )
+from scripts.delivery.notes import section
 from scripts.delivery.pages import verify_pages_tar
 from scripts.delivery.publication import confirm, prepare
-from scripts.delivery.releases import release
+from scripts.delivery.releases import release, released
 from scripts.delivery.trust import CHECKS, PUBLISH_JOB, SEAL_JOB, identity
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -54,6 +57,8 @@ WHEEL = "pywhales-0.6.1-py3-none-any.whl"
 SDIST = "pywhales-0.6.1.tar.gz"
 BASE_URL = "https://api.github.com/repos/owner/repo/"
 PYPI = "https://pypi.org/pypi/pywhales/0.6.1/json"
+NOTES = "### Added\n\n- Sealed release notes."
+CHANGELOG = f"# Changelog\n\n## 0.6.1\n\n{NOTES}\n\n## 0.6.0\n\n- Earlier release.\n"
 
 
 def zipped(files: dict[str, bytes], *, compression: int = zipfile.ZIP_STORED) -> bytes:
@@ -62,6 +67,14 @@ def zipped(files: dict[str, bytes], *, compression: int = zipfile.ZIP_STORED) ->
         for filename, data in files.items():
             archive.writestr(filename, data)
     return result.getvalue()
+
+
+def checkout(
+    root: Path, changelog: str | bytes = CHANGELOG, version: str = "0.6.1"
+) -> None:
+    (root / "pyproject.toml").write_text(f'[project]\nversion = "{version}"\n')
+    data = changelog.encode() if isinstance(changelog, str) else changelog
+    (root / "CHANGELOG.md").write_bytes(data)
 
 
 def distributions() -> dict[str, bytes]:
@@ -159,6 +172,7 @@ class Service(Transport):
             producer=identity(self.source),
             jobs={job.name: job.id for job in self.jobs},
             version="0.6.1",
+            notes=NOTES,
             distributions=describe(dist, self.material),
             site=describe(site, {"index.html": b"exact tested site", ".nojekyll": b""}),
         )
@@ -269,14 +283,17 @@ class Service(Transport):
         )
         self.set_artifacts((artifact,), 200)
 
-    def released(self, sha: str | None = None) -> None:
+    def tagged(self, sha: str | None = None) -> None:
         self.put(
             "git/ref/tags/v0.6.1",
             GitRef(object=GitObject(type="commit", sha=sha or self.source.head_sha)),
         )
+
+    def released(self, sha: str | None = None, body: str | None = NOTES) -> None:
+        self.tagged(sha)
         self.put(
             "releases/tags/v0.6.1",
-            Release(id=1, tag_name="v0.6.1", draft=False, prerelease=False),
+            Release(id=1, tag_name="v0.6.1", draft=False, prerelease=False, body=body),
         )
 
 
@@ -296,6 +313,15 @@ def service(monkeypatch: pytest.MonkeyPatch) -> Service:
     monkeypatch.setattr(cli, "Curl", lambda: instance)
     monkeypatch.setattr(publication.time, "sleep", lambda _seconds: None)
     return instance
+
+
+def uploaded(service: Service, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_SHA", service.source.head_sha)
+    for kind, artifact in zip(("DIST", "SITE"), service.artifacts()[:2], strict=True):
+        monkeypatch.setenv(f"{kind}_ARTIFACT_ID", str(artifact.id))
+        monkeypatch.setenv(
+            f"{kind}_ARTIFACT_DIGEST", artifact.digest.removeprefix("sha256:")
+        )
 
 
 def invoke(monkeypatch: pytest.MonkeyPatch, *arguments: str) -> int:
@@ -525,7 +551,15 @@ def test_create_and_concurrent_release_verify_exact_final_tag(
             )
             return Response(422 if race else 201, b"{}")
         if method == "POST" and url == BASE_URL + "releases":
-            assert body is not None and json.loads(body)["draft"] is True
+            assert body is not None
+            assert json.loads(body) == {
+                "tag_name": "v0.6.1",
+                "name": "v0.6.1",
+                "target_commitish": service.source.head_sha,
+                "body": NOTES,
+                "draft": True,
+                "prerelease": False,
+            }
             service.released()
             service.put(
                 "releases/tags/v0.6.1",
@@ -538,6 +572,8 @@ def test_create_and_concurrent_release_verify_exact_final_tag(
                 .encode(),
             )
         if method == "PATCH" and url == BASE_URL + "releases/1":
+            assert body is not None
+            assert json.loads(body) == {"body": NOTES, "draft": False}
             service.released()
             return Response(200, b"{}")
         return original(method, url, body)
@@ -549,6 +585,211 @@ def test_create_and_concurrent_release_verify_exact_final_tag(
 
     service.api = GitHub(Race(), "owner/repo", 1)
     release(service.api, document)
+
+
+class ReleaseAPI(Transport):
+    """Stateful GitHub release endpoints; other requests use the shared service."""
+
+    def __init__(
+        self,
+        service: Service,
+        current: Release | None = None,
+        *,
+        hidden: bool = False,
+        stored: Callable[[str], str] = str,
+    ) -> None:
+        self.service = service
+        self.current = current
+        self.hidden = hidden
+        self.stored = stored
+        self.writes: list[tuple[str, dict[str, JsonValue]]] = []
+
+    @override
+    def request(self, method: str, url: str, body: bytes | None = None) -> Response:
+        match method, url.removeprefix(BASE_URL):
+            case "GET", "releases/tags/v0.6.1":
+                if self.current and not self.current.draft and not self.hidden:
+                    return Response(200, self.current.model_dump_json().encode())
+                return Response(404, b"{}")
+            case "GET", "releases?per_page=100&page=1":
+                visible = [self.current] if self.current and not self.hidden else []
+                return Response(
+                    200,
+                    json.dumps(
+                        [item.model_dump(mode="json") for item in visible]
+                    ).encode(),
+                )
+            case "POST", "releases":
+                assert body is not None
+                payload = json.loads(body)
+                self.writes.append((method, payload))
+                if self.current is not None:
+                    self.hidden = False
+                    return Response(422, b"{}")
+                self.current = Release(
+                    id=1,
+                    tag_name=payload["tag_name"],
+                    draft=payload["draft"],
+                    prerelease=payload["prerelease"],
+                    body=payload["body"],
+                )
+                return Response(201, self.current.model_dump_json().encode())
+            case "PATCH", "releases/1":
+                assert body is not None and self.current is not None
+                payload = json.loads(body)
+                self.writes.append((method, payload))
+                self.current = self.current.model_copy(
+                    update={
+                        "draft": payload["draft"],
+                        "body": self.stored(payload["body"]),
+                    }
+                )
+                return Response(200, self.current.model_dump_json().encode())
+        return self.service.request(method, url, body)
+
+    def github(self) -> GitHub:
+        return GitHub(self, "owner/repo", 1)
+
+
+def draft(body: str | None = "Generated notes", *, prerelease: bool = False) -> Release:
+    return Release(
+        id=1, tag_name="v0.6.1", draft=True, prerelease=prerelease, body=body
+    )
+
+
+def sealed_release(service: Service) -> Receipt:
+    service.receipted()
+    service.tagged()
+    return receipt(service.api, 200)
+
+
+CREATED = {
+    "tag_name": "v0.6.1",
+    "name": "v0.6.1",
+    "target_commitish": "a" * 40,
+    "body": NOTES,
+    "draft": True,
+    "prerelease": False,
+}
+PUBLISHED = {"body": NOTES, "draft": False}
+
+
+@pytest.mark.parametrize("start", ["absent", "raced-draft", "visible-draft"])
+def test_release_publishes_sealed_notes_with_one_patch(
+    service: Service, start: str
+) -> None:
+    document = sealed_release(service)
+    fake = ReleaseAPI(
+        service,
+        None if start == "absent" else draft(),
+        hidden=start == "raced-draft",
+    )
+    release(fake.github(), document)
+    assert (
+        fake.writes
+        == {
+            "absent": [("POST", CREATED), ("PATCH", PUBLISHED)],
+            "raced-draft": [("POST", CREATED), ("PATCH", PUBLISHED)],
+            "visible-draft": [("PATCH", PUBLISHED)],
+        }[start]
+    )
+    assert fake.current == Release(
+        id=1, tag_name="v0.6.1", draft=False, prerelease=False, body=NOTES
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        NOTES,
+        NOTES.replace("\n", "\r\n") + "\r\n",
+        "\n".join(f"{line}  " for line in NOTES.split("\n")) + "\n\n",
+    ],
+    ids=["exact", "crlf", "trailing-whitespace"],
+)
+def test_published_release_with_matching_body_is_not_patched(
+    service: Service, body: str
+) -> None:
+    document = sealed_release(service)
+    published = Release(
+        id=1, tag_name="v0.6.1", draft=False, prerelease=False, body=body
+    )
+    fake = ReleaseAPI(service, published)
+    release(fake.github(), document)
+    assert fake.writes == []
+    assert fake.current == published
+
+
+@pytest.mark.parametrize(
+    "body",
+    [None, "", "Generated notes", NOTES + "\n\nFull Changelog: ..."],
+    ids=["null", "empty", "generated", "appended"],
+)
+def test_published_release_with_other_body_is_rejected_untouched(
+    service: Service, body: str | None
+) -> None:
+    document = sealed_release(service)
+    published = Release(
+        id=1, tag_name="v0.6.1", draft=False, prerelease=False, body=body
+    )
+    fake = ReleaseAPI(service, published)
+    with pytest.raises(Rejected, match="release body mismatch"):
+        release(fake.github(), document)
+    assert fake.writes == []
+    assert fake.current == published
+
+
+@pytest.mark.parametrize(
+    ("fault", "reason"),
+    [("prerelease", "release state"), ("tag", "tag commit mismatch")],
+)
+def test_draft_is_not_patched_before_tag_and_state_checks(
+    service: Service, fault: str, reason: str
+) -> None:
+    document = sealed_release(service)
+    fake = ReleaseAPI(service, draft(prerelease=fault == "prerelease"))
+    if fault == "tag":
+        service.tagged("c" * 40)
+    with pytest.raises(Rejected, match=reason):
+        release(fake.github(), document)
+    assert fake.writes == []
+
+
+@pytest.mark.parametrize("start", ["absent", "visible-draft"])
+def test_read_back_rejects_a_body_that_differs_after_publication(
+    service: Service, start: str
+) -> None:
+    document = sealed_release(service)
+    fake = ReleaseAPI(
+        service,
+        None if start == "absent" else draft(),
+        stored=lambda body: body + "\n\nGenerated by GitHub",
+    )
+    with pytest.raises(Rejected, match="release body mismatch"):
+        release(fake.github(), document)
+    assert [method for method, _payload in fake.writes].count("PATCH") == 1
+
+
+def test_read_back_accepts_line_ending_and_trailing_whitespace_drift(
+    service: Service,
+) -> None:
+    document = sealed_release(service)
+    fake = ReleaseAPI(
+        service, draft(), stored=lambda body: body.replace("\n", "\r\n") + "  \r\n"
+    )
+    release(fake.github(), document)
+    assert fake.writes == [("PATCH", PUBLISHED)]
+
+
+@pytest.mark.parametrize("body", [None, "", "Hand-edited notes"])
+def test_released_never_compares_release_bodies(
+    service: Service, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str | None
+) -> None:
+    document = sealed_release(service)
+    service.released(body=body)
+    released(service.api, document)
+    site = tmp_path / "site"
+    assert invoke(monkeypatch, "pages", "--run-id", "200", "--output", str(site)) == 0
 
 
 def test_annotated_tag_is_resolved_not_trusted_by_name(service: Service) -> None:
@@ -585,17 +826,209 @@ def test_trigger_attempt_must_match_even_with_valid_material(
 def test_sealer_checks_actual_uploader_ids_and_digests(
     service: Service, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("GITHUB_SHA", service.source.head_sha)
-    (tmp_path / "pyproject.toml").write_text('[project]\nversion = "0.6.1"\n')
-    for kind, artifact in zip(("DIST", "SITE"), service.artifacts()[:2], strict=True):
-        monkeypatch.setenv(f"{kind}_ARTIFACT_ID", str(artifact.id))
-        monkeypatch.setenv(
-            f"{kind}_ARTIFACT_DIGEST", artifact.digest.removeprefix("sha256:")
-        )
+    checkout(tmp_path)
+    uploaded(service, monkeypatch)
     assert seal(service.api, 100, tmp_path) == service.tested
     monkeypatch.setenv("DIST_ARTIFACT_ID", "987")
     with pytest.raises(Rejected, match="uploader output"):
         seal(service.api, 100, tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("changelog", "reason"),
+    [
+        ("# Changelog\n\n## 0.6.0\n\n- Earlier release.\n", "missing"),
+        (
+            "## 0.6.10\n\n- a\n\n## 0.6.1 (draft)\n\n- b\n\n### 0.6.1\n\n- c\n\n"
+            "##0.6.1\n- d\n\n## 0.6x1\n\n- e\n",
+            "missing",
+        ),
+        ("## 0.6.1\n\n   \n\n## 0.6.0\n\n- Earlier release.\n", "empty"),
+        ("## 0.6.1\n", "empty"),
+        (CHANGELOG + "\n## 0.6.1\n\n- Again.\n", "duplicated"),
+    ],
+    ids=["absent", "near-misses", "empty", "empty-at-end", "duplicated"],
+)
+def test_sealer_rejects_missing_empty_and_duplicated_notes(
+    service: Service,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changelog: str,
+    reason: str,
+) -> None:
+    checkout(tmp_path, changelog)
+    uploaded(service, monkeypatch)
+    with pytest.raises(Rejected, match=f"release notes section {reason}"):
+        seal(service.api, 100, tmp_path)
+
+
+def test_sealer_extracts_exact_section_from_crlf_changelog(
+    service: Service, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    changelog = (
+        "# Changelog\r\n\r\n## 0.6.10\r\n\r\n- Decoy.\r\n\r\n## 0.6.1\r\n\r\n\r\n"
+        "### Added\r\n\r\n- One.\r\n\r\n#### Detail\r\n\r\n### Fixed\r\n\r\n- Two.\r\n"
+        "\r\n\r\n## Unreleased\r\n\r\n- Later.\r\n"
+    )
+    checkout(tmp_path, changelog)
+    uploaded(service, monkeypatch)
+    assert seal(service.api, 100, tmp_path).notes == (
+        "### Added\n\n- One.\n\n#### Detail\n\n### Fixed\n\n- Two."
+    )
+
+
+def test_sealer_rejects_changelog_that_is_not_utf8(
+    service: Service, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkout(tmp_path, b"## 0.6.1\n\n- Caf\xe9.\n")
+    uploaded(service, monkeypatch)
+    with pytest.raises(Rejected, match="not UTF-8"):
+        seal(service.api, 100, tmp_path)
+
+
+def test_sealer_requires_a_changelog_file(
+    service: Service, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkout(tmp_path)
+    (tmp_path / "CHANGELOG.md").unlink()
+    uploaded(service, monkeypatch)
+    with pytest.raises(FileNotFoundError):
+        seal(service.api, 100, tmp_path)
+
+
+@pytest.mark.parametrize("excess", [False, True])
+def test_sealer_bounds_notes_in_utf8_bytes_not_characters(
+    service: Service,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    excess: bool,
+) -> None:
+    notes = "é" * 10
+    checkout(tmp_path, f"## 0.6.1\n\n{notes}\n")
+    uploaded(service, monkeypatch)
+    monkeypatch.setattr(limits, "NOTES_BYTES", len(notes.encode()) - int(excess))
+    if excess:
+        with pytest.raises(Rejected, match="release notes size budget"):
+            seal(service.api, 100, tmp_path)
+    else:
+        assert seal(service.api, 100, tmp_path).notes == notes
+
+
+@pytest.mark.parametrize("excess", [False, True])
+def test_sealer_independently_bounds_changelog_file(
+    service: Service,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    excess: bool,
+) -> None:
+    checkout(tmp_path)
+    monkeypatch.setattr(
+        limits, "CHANGELOG_BYTES", len(CHANGELOG.encode()) - int(excess)
+    )
+    uploaded(service, monkeypatch)
+    if excess:
+        with pytest.raises(Rejected, match="input byte budget exceeded"):
+            seal(service.api, 100, tmp_path)
+    else:
+        assert seal(service.api, 100, tmp_path) == service.tested
+
+
+def test_notes_budget_stays_inside_github_body_limit() -> None:
+    assert 0 < limits.NOTES_BYTES <= 125_000
+
+
+@pytest.mark.parametrize(
+    ("heading", "found"),
+    [
+        ("## 0.7.0rc1", True),
+        ("## 0.7.0rc10", False),
+        ("## 0.7.0rc1 (draft)", False),
+        ("## 0.7.0rc1 ", False),
+        ("### 0.7.0rc1", False),
+        ("##0.7.0rc1", False),
+        ("## 0.7x0rc1", False),
+    ],
+)
+def test_notes_heading_is_matched_exactly_without_patterns(
+    heading: str, found: bool
+) -> None:
+    text = f"# Changelog\n\n{heading}\n\n- Body.\n"
+    if found:
+        assert section(text, "0.7.0rc1") == "- Body."
+    else:
+        with pytest.raises(Rejected, match="section missing"):
+            section(text, "0.7.0rc1")
+
+
+@pytest.mark.parametrize(
+    ("changes", "removed"),
+    [
+        ({"schema_version": 1}, ()),
+        ({"schema_version": 1}, ("notes",)),
+        ({}, ("notes",)),
+        ({"notes": ""}, ()),
+        ({"notes": " \n"}, ()),
+        ({"notes": "x" * (limits.NOTES_BYTES + 1)}, ()),
+    ],
+)
+def test_seal_documents_require_schema_version_2_and_bounded_notes(
+    service: Service, changes: dict[str, JsonValue], removed: tuple[str, ...]
+) -> None:
+    data = json.loads(service.tested.model_dump_json()) | changes
+    for key in removed:
+        del data[key]
+    with pytest.raises(ValidationError):
+        Seal.model_validate_json(json.dumps(data))
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_receipt_documents_reject_schema_version_1(
+    service: Service, nested: bool
+) -> None:
+    service.receipted()
+    data = json.loads(confirm(service.api, 100).model_dump_json())
+    assert data["schema_version"] == 2 and data["seal"]["schema_version"] == 2
+    if nested:
+        data["seal"]["schema_version"] = 1
+    else:
+        data["schema_version"] = 1
+    with pytest.raises(ValidationError):
+        Receipt.model_validate_json(json.dumps(data))
+
+
+def test_consumers_reject_version_1_seal_and_receipt_artifacts(
+    service: Service,
+) -> None:
+    service.receipted()
+    document = confirm(service.api, 100)
+    old_receipt = json.loads(document.model_dump_json()) | {"schema_version": 1}
+    service.set_artifacts(
+        (
+            service.artifact(
+                4,
+                "receipt",
+                service.publisher,
+                {"receipt.json": json.dumps(old_receipt).encode()},
+            ),
+        ),
+        200,
+    )
+    with pytest.raises(ValidationError):
+        receipt(service.api, 200)
+
+    old_seal = json.loads(service.tested.model_dump_json()) | {"schema_version": 1}
+    dist, site, _seal = service.artifacts()
+    service.set_artifacts(
+        (
+            dist,
+            site,
+            service.artifact(
+                3, "seal", service.source, {"seal.json": json.dumps(old_seal).encode()}
+            ),
+        )
+    )
+    with pytest.raises(ValidationError):
+        producer(service.api, 100)
 
 
 @pytest.mark.parametrize(
@@ -1471,14 +1904,10 @@ def test_sealer_independently_bounds_project_configuration(
     excess: bool,
 ) -> None:
     project = ('[project]\nversion = "0.6.1"\n# ' + "é" * 64 + "\n").encode()
+    checkout(tmp_path)
     (tmp_path / "pyproject.toml").write_bytes(project)
     monkeypatch.setattr(limits, "PROJECT_BYTES", len(project) - int(excess))
-    monkeypatch.setenv("GITHUB_SHA", service.source.head_sha)
-    for kind, artifact in zip(("DIST", "SITE"), service.artifacts()[:2], strict=True):
-        monkeypatch.setenv(f"{kind}_ARTIFACT_ID", str(artifact.id))
-        monkeypatch.setenv(
-            f"{kind}_ARTIFACT_DIGEST", artifact.digest.removeprefix("sha256:")
-        )
+    uploaded(service, monkeypatch)
 
     if excess:
         with pytest.raises(Rejected, match="input byte budget exceeded"):

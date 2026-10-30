@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
@@ -8,7 +9,13 @@ import pytest
 from pywhales import Config, DockerClient
 from pywhales.client_config import ParsingError
 from pywhales.components.config.models import ConfigInspectResult
-from pywhales.exceptions import DockerException
+from pywhales.exceptions import (
+    DockerException,
+    NoSuchSecret,
+    NoSuchService,
+    NotASwarmManager,
+)
+from pywhales.test_utils import random_name
 
 
 def test_batch_inspect_matches_config_references_and_hydrates_cache() -> None:
@@ -174,6 +181,49 @@ def test_labels_config(docker_client: DockerClient, tmp_path: Path) -> None:
 
 
 @pytest.mark.usefixtures("swarm_mode")
+def test_list_configs_with_repeated_name_filter_pairs(
+    docker_client: DockerClient, tmp_path: Path
+) -> None:
+    config_file = tmp_path / "config.conf"
+    config_file.write_text("hello world")
+    prefix = random_name()
+    with (
+        docker_client.config.create(f"{prefix}_a", config_file) as conf_a,
+        docker_client.config.create(f"{prefix}_b", config_file) as conf_b,
+        docker_client.config.create(f"{prefix}_c", config_file) as conf_c,
+    ):
+        # Repeated name filters are alternatives, so both selected configs match.
+        listed = docker_client.config.list(
+            filters=[("name", f"{prefix}_a"), ("name", f"{prefix}_b")]
+        )
+        assert {conf.id for conf in listed} == {conf_a.id, conf_b.id}
+        assert conf_c.id not in {conf.id for conf in listed}
+        # A generator is accepted and the Mapping form selects the same config.
+        listed = docker_client.config.list(
+            filters=(pair for pair in [("name", f"{prefix}_c")])
+        )
+        assert [conf.id for conf in listed] == [conf_c.id]
+        listed = docker_client.config.list(filters={"name": f"{prefix}_c"})
+        assert [conf.id for conf in listed] == [conf_c.id]
+
+
+@pytest.mark.usefixtures("swarm_mode")
+def test_list_configs_with_label_pair_filters(
+    docker_client: DockerClient, tmp_path: Path
+) -> None:
+    config_file = tmp_path / "config.conf"
+    config_file.write_text("hello world")
+    with docker_client.config.create(
+        "my_conf", config_file, labels={"dodo": "dada", "tier": "web"}
+    ) as my_conf:
+        assert docker_client.config.list(filters=[("label", "dodo=dada")]) == [my_conf]
+        assert docker_client.config.list(
+            filters=[("label", "dodo=dada"), ("label", "tier=web")]
+        ) == [my_conf]
+        assert docker_client.config.list(filters=[("label", "dodo=dadu")]) == []
+
+
+@pytest.mark.usefixtures("swarm_mode")
 def test_remove_empty_config_list(docker_client: DockerClient, tmp_path: Path) -> None:
     config_file = tmp_path / "config.conf"
     config_file.write_text("hello world")
@@ -181,3 +231,186 @@ def test_remove_empty_config_list(docker_client: DockerClient, tmp_path: Path) -
         assert docker_client.config.list() == [my_conf]
         docker_client.config.remove([])
         assert docker_client.config.list() == [my_conf]
+
+
+EMPTY_SELECTIONS = [
+    pytest.param(list, id="list"),
+    pytest.param(tuple, id="tuple"),
+    pytest.param(lambda: (item for item in ()), id="generator"),
+]
+SINGLE_SELECTIONS = [
+    pytest.param(lambda: "alpha", id="str"),
+    pytest.param(lambda: ["alpha"], id="list"),
+    pytest.param(lambda: (item for item in ["alpha"]), id="generator"),
+]
+
+
+@pytest.mark.parametrize("make_empty", EMPTY_SELECTIONS)
+def test_config_remove_empty_selection_skips_cli(
+    make_empty: Callable[[], Iterable[str]],
+) -> None:
+    client = DockerClient(client_call=["not-installed"])
+    with (
+        patch("shutil.which", side_effect=AssertionError("executable lookup")),
+        patch("subprocess.run", side_effect=AssertionError("subprocess")),
+    ):
+        client.config.remove(make_empty())
+
+
+@pytest.mark.parametrize("make_selection", SINGLE_SELECTIONS)
+def test_config_remove_single_selection_builds_argv_once(
+    make_selection: Callable[[], str | Iterable[str]],
+) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    with patch(
+        "subprocess.run", return_value=CompletedProcess([], 0, b"", b"")
+    ) as command:
+        client.config.remove(make_selection())
+    command.assert_called_once()
+    assert command.call_args.args[0] == ["docker-test", "config", "rm", "alpha"]
+
+
+NOT_A_MANAGER = (
+    b"Error response from daemon: This node is not a swarm manager. "
+    b'Use "docker swarm init" or "docker swarm join" to connect this node to swarm '
+    b"and try again."
+)
+CONFIG_MISSING = b"Error response from daemon: config resource not found"
+CONFIG_JSON = b'[{"ID":"resource","Spec":{"Name":"named"}}]'
+# Each failure below is not this config's own not-found error.
+OTHER_FAILURES = [
+    pytest.param(b"permission denied", DockerException, id="command-failure"),
+    pytest.param(NOT_A_MANAGER, NotASwarmManager, id="not-a-swarm-manager"),
+    pytest.param(
+        b"Error response from daemon: secret resource not found",
+        NoSuchSecret,
+        id="secret-not-found",
+    ),
+    pytest.param(
+        b"Error response from daemon: service resource not found",
+        NoSuchService,
+        id="service-not-found",
+    ),
+]
+
+
+def _config() -> tuple[DockerClient, Config]:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    return client, Config(client.client_config, "resource", is_immutable_id=True)
+
+
+@pytest.mark.parametrize("missing", [False, True], ids=["removed", "already-missing"])
+def test_config_cleanup_ignores_only_a_missing_config(missing: bool) -> None:
+    _, config = _config()
+    response = CompletedProcess(
+        [], 1 if missing else 0, b"", CONFIG_MISSING if missing else b""
+    )
+    with patch("subprocess.run", return_value=response) as command, config:
+        pass
+    command.assert_called_once()
+    assert command.call_args.args[0] == ["docker-test", "config", "rm", "resource"]
+
+
+@pytest.mark.parametrize(("stderr", "error_type"), OTHER_FAILURES)
+def test_config_cleanup_propagates_other_removal_failures(
+    stderr: bytes, error_type: type[DockerException]
+) -> None:
+    _, config = _config()
+    response = CompletedProcess([], 17, b"output", stderr)
+    with (
+        patch("subprocess.run", return_value=response) as command,
+        pytest.raises(DockerException) as raised,
+        config,
+    ):
+        pass
+    command.assert_called_once()
+    assert type(raised.value) is error_type
+    assert raised.value.return_code == 17
+    assert raised.value.stderr == stderr.decode()
+
+
+@pytest.mark.parametrize(("stderr", "error_type"), OTHER_FAILURES)
+def test_config_cleanup_failure_joins_the_body_error(
+    stderr: bytes, error_type: type[DockerException]
+) -> None:
+    _, config = _config()
+    body = RuntimeError("body")
+    response = CompletedProcess([], 17, b"", stderr)
+    with (
+        patch("subprocess.run", return_value=response),
+        pytest.raises(BaseExceptionGroup) as raised,
+        config,
+    ):
+        raise body
+    assert raised.value.message == "Config body and cleanup both failed"
+    assert raised.value.exceptions[0] is body
+    assert type(raised.value.exceptions[1]) is error_type
+
+
+def test_config_missing_at_cleanup_leaves_the_body_error_alone() -> None:
+    _, config = _config()
+    body = RuntimeError("body")
+    response = CompletedProcess([], 1, b"", CONFIG_MISSING)
+    with (
+        patch("subprocess.run", return_value=response),
+        pytest.raises(RuntimeError) as raised,
+        config,
+    ):
+        raise body
+    assert raised.value is body
+
+
+def _exists(client: DockerClient, config: Config, *, as_handle: bool) -> bool:
+    return config.exists() if as_handle else client.config.exists("resource")
+
+
+@pytest.mark.parametrize("as_handle", [False, True], ids=["cli", "handle"])
+def test_config_exists_is_true_after_inspect(as_handle: bool) -> None:
+    client, config = _config()
+    response = CompletedProcess([], 0, CONFIG_JSON, b"")
+    with patch("subprocess.run", return_value=response) as command:
+        found = _exists(client, config, as_handle=as_handle)
+    assert found is True
+    command.assert_called_once()
+    assert command.call_args.args[0] == ["docker-test", "config", "inspect", "resource"]
+
+
+@pytest.mark.parametrize("as_handle", [False, True], ids=["cli", "handle"])
+def test_config_exists_is_false_for_a_missing_config(as_handle: bool) -> None:
+    client, config = _config()
+    response = CompletedProcess([], 1, b"", CONFIG_MISSING)
+    with patch("subprocess.run", return_value=response):
+        found = _exists(client, config, as_handle=as_handle)
+    assert found is False
+
+
+@pytest.mark.parametrize("as_handle", [False, True], ids=["cli", "handle"])
+@pytest.mark.parametrize(("stderr", "error_type"), OTHER_FAILURES)
+def test_config_exists_propagates_other_failures(
+    as_handle: bool, stderr: bytes, error_type: type[DockerException]
+) -> None:
+    client, config = _config()
+    response = CompletedProcess([], 1, b"", stderr)
+    with (
+        patch("subprocess.run", return_value=response),
+        pytest.raises(DockerException) as raised,
+    ):
+        _exists(client, config, as_handle=as_handle)
+    assert type(raised.value) is error_type
+
+
+@pytest.mark.usefixtures("swarm_mode")
+def test_config_removed_inside_its_context_exits_cleanly(
+    docker_client: DockerClient, tmp_path: Path
+) -> None:
+    config_file = tmp_path / "config.conf"
+    config_file.write_text("hello world")
+    with docker_client.config.create("removed_in_context", config_file) as my_conf:
+        assert my_conf.exists()
+        assert docker_client.config.exists("removed_in_context")
+        my_conf.remove()
+        assert not my_conf.exists()
+    assert not my_conf.exists()
+    assert not docker_client.config.exists("removed_in_context")

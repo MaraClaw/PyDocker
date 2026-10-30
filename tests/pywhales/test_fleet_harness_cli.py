@@ -11,7 +11,13 @@ import pytest
 from scripts.fleet_harness.__main__ import main
 from scripts.fleet_harness.experiment import Comparison, Experiment
 from scripts.fleet_harness.runner import run
-from tests.pywhales.test_fleet_harness import FIXTURES, manifest, plan
+from tests.pywhales.test_fleet_harness import (
+    FIXTURES,
+    duration_manifest,
+    duration_plan,
+    manifest,
+    plan,
+)
 from tests.pywhales.test_transport_experiment import semantics
 
 
@@ -44,6 +50,11 @@ def test_run_cli_when_docker_is_absent_writes_simulated_cleanup_report(
     assert result.returncode == 0 and report["simulation"] is True
     assert report["status"] == "completed" and report["outcomes"]["succeeded"] == 3
     assert report["cleanup"]["removed"] == report["ledger"]
+    assert (
+        report["provider_calls"]
+        == 4
+        == report["command_count"] + len(report["cleanup"]["attempted"])
+    )
     assert report["environment"]["docker_engine"] is None
     assert "private-example-connection" not in result.stdout
 
@@ -183,3 +194,56 @@ def test_decision_cli_when_private_connection_reference_is_imported_withholds_it
         evidence["environment"]["platform"]["endpoints"][0]["connection_ref"]
         == "withheld"
     )
+
+
+def test_run_cli_when_duration_finishes_reports_completed_without_docker(
+    tmp_path: Path,
+) -> None:
+    # Given validated duration input and a clipped final submission.
+    declaration = tmp_path / "duration.json"
+    declaration.write_text(duration_manifest().model_dump_json())
+    recipe = tmp_path / "plan.json"
+    recipe.write_text(duration_plan(12.0, 2).model_dump_json())
+
+    # When the actual CLI executes with Docker absent from PATH.
+    output = invoke(
+        ["run", "--manifest", str(declaration), "--input", str(recipe)], tmp_path
+    )
+
+    # Then the JSON artifact reports a full duration without hiding its timeout.
+    report = json.loads(output.stdout)
+    assert output.returncode == 0 and report["status"] == "completed"
+    assert report["reasons"] == [] and report["load_elapsed_seconds"] == 20.0
+    assert report["outcomes"]["timed_out"] == 1
+    assert report["provider_calls"] == report["command_count"] == 2
+
+
+@pytest.mark.parametrize("route", ["cli", "candidate"])
+@pytest.mark.parametrize("defect", ["provider_calls", "status"])
+def test_decision_cli_when_imported_report_is_incoherent_rejects_without_launches(
+    route: str, defect: str, tmp_path: Path
+) -> None:
+    # Given an imported comparison with incorrect accounting or status reasons.
+    result = run(manifest(), plan())
+    comparison = Comparison(
+        cli=result,
+        candidate=result,
+        cli_contract=semantics(),
+        candidate_contract=semantics(),
+    )
+    raw = json.loads(Experiment(comparison=comparison).model_dump_json())
+    for report in (raw["comparison"]["cli"], raw["comparison"]["candidate"]):
+        report["provider_calls"] = 4
+    raw["comparison"][route][defect] = 5 if defect == "provider_calls" else "stopped"
+    path = tmp_path / "incoherent.json"
+    path.write_text(json.dumps(raw))
+
+    # When the actual decide CLI loads the nested report.
+    output = invoke(["decide", "--input", str(path)], tmp_path)
+
+    # Then validation rejects before any candidate launch and emits safe errors.
+    assert output.returncode == 2
+    assert json.loads(output.stdout)["candidate_launches"] == 0
+    assert {error["code"] for error in json.loads(output.stderr)["errors"]} == {
+        "invalid"
+    }

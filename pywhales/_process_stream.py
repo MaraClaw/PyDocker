@@ -1,7 +1,9 @@
 """Process-backed output iteration, deadlines, and local CLI cleanup.
 
-Reader threads and a watchdog keep running independently of stream consumption.
-Cleanup controls only the local process, not daemon-managed resources.
+Reader threads, a child-reaping thread, and a watchdog keep running independently
+of stream consumption. On POSIX they wait on readiness: no timer runs while idle,
+and every stop path wakes the readers through the stop latch. Cleanup controls
+only the local process, not daemon-managed resources.
 """
 
 from __future__ import annotations
@@ -13,16 +15,29 @@ from subprocess import Popen
 from threading import Event, Thread
 from time import monotonic
 from types import TracebackType
-from typing import IO, Self, override
+from typing import IO, TYPE_CHECKING, Self, override
 
+from pywhales._readiness import (
+    CANCEL_CHECK,
+    WakeLatch,
+    bounded_wait,
+    reap,
+    unwind_launch,
+    wait_ready,
+)
 from pywhales._stream_buffer import StreamBuffer
 from pywhales.exceptions import (
     DockerException,
     DockerTimeout,
+    ObservationCancelled,
+    ObservationTimeout,
     get_docker_exception_type,
 )
 from pywhales.telemetry import Outcome
 from pywhales.telemetry._lifecycle import ExecutionTelemetry
+
+if TYPE_CHECKING:
+    from pywhales._observation import ObservationState
 
 
 class ProcessStream(Iterator[tuple[str, bytes]]):
@@ -35,6 +50,12 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
     local CLI and waits for cleanup, never removing daemon-managed resources.
     Recorded terminal errors are delivered once through iteration or clean
     context exit, without replacing an exception from the context body.
+
+    A stream launched inside an observation keeps that scope's deadline and
+    cancel tokens after the scope exits. When one trips first, the local CLI is
+    killed and reaped and iteration raises ``ObservationTimeout`` or
+    ``ObservationCancelled``. A command deadline wins only when it is strictly
+    earlier than the scope's, and a cancel token wins over both.
 
     Attributes:
         stdin: Writable child input pipe when launch requested one; otherwise
@@ -50,6 +71,7 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         buffer_bytes: int | None = None,
         raw_diagnostics: bool = False,
         telemetry: ExecutionTelemetry | None = None,
+        observation: ObservationState | None = None,
     ) -> None:
         """Take ownership of a launched process and start readers and a watchdog.
 
@@ -65,6 +87,9 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
                 captured-output values. Raw exception attributes remain available
                 regardless and must be treated as confidential.
             telemetry: Optional launch state completed by consumption or closure.
+            observation: Scope snapshotted at launch, or ``None`` outside one. Its
+                deadline and cancel tokens are enforced for the stream's whole
+                life, whether or not the scope is still active.
         """
         self._process = process
         self._full_cmd = full_cmd
@@ -74,32 +99,60 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         self._raw_diagnostics = raw_diagnostics
         self._telemetry = telemetry
         self._telemetry_outcome: Outcome | None = None
+        self._observation = (
+            observation
+            if observation is not None
+            and (observation.deadline is not None or observation.cancel_tokens)
+            else None
+        )
+        self._scope_error: ObservationCancelled | ObservationTimeout | None = None
         self._read_bytes = {"stdout": 0, "stderr": 0}
         self._queue = StreamBuffer(buffer_bytes)
-        self._stop = Event()
         self._released = Event()
         self._closed = False
         self._expired = False
+        self._exited = False
         self._error: OSError | BufferError | DockerException | None = None
         self._failure_callback: (
             Callable[[OSError | BufferError | DockerException], None] | None
         ) = None
         self._timeout_stdout: bytes | None = None
         self._remaining_readers = 2
+        self._live_readers = 2
         self._stderr = bytearray()
         self._pending = {"stdout": bytearray(), "stderr": bytearray()}
         self._pending_bytes = {"stdout": 0, "stderr": 0}
         self._inflight = {"stdout": b"", "stderr": b""}
         assert process.stdout is not None
         assert process.stderr is not None
-        self._threads = tuple(
-            Thread(target=self._read_pipe, args=(pipe, name), daemon=True)
-            for pipe, name in ((process.stdout, "stdout"), (process.stderr, "stderr"))
-        )
-        for thread in self._threads:
-            thread.start()
-        self._watchdog = Thread(target=self._monitor, daemon=True)
-        self._watchdog.start()
+        stop: WakeLatch | None = None
+        started: list[Thread] = []
+        try:
+            stop = self._stop = WakeLatch()
+            self._threads = tuple(
+                Thread(target=self._read_pipe, args=(pipe, name), daemon=True)
+                for pipe, name in (
+                    (process.stdout, "stdout"),
+                    (process.stderr, "stderr"),
+                )
+            )
+            self._reaper = Thread(
+                target=reap, args=(process, self._publish_exit), daemon=True
+            )
+            self._watchdog = Thread(target=self._monitor, daemon=True)
+            for thread in (*self._threads, self._reaper, self._watchdog):
+                thread.start()
+                started.append(thread)
+        except BaseException:
+            self._queue.close()
+            unwind_launch(process, stop, started)
+            raise
+
+    def _publish_exit(self) -> None:
+        """Record child exit and wake the watchdog and any waiting consumer."""
+        with self._queue.condition:
+            self._exited = True
+            self._queue.condition.notify_all()
 
     def _on_failure(
         self, callback: Callable[[OSError | BufferError | DockerException], None]
@@ -141,7 +194,7 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
     def _notify_exit_failure(self) -> None:
         """Notify a registered owner if the child has exited unsuccessfully."""
         with self._queue.condition:
-            exit_code = self._process.poll()
+            exit_code = self._process.returncode if self._exited else None
             if exit_code is None or exit_code == 0 or self._failure_callback is None:
                 return
             stderr = bytes(self._stderr)
@@ -180,7 +233,7 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
                                 self._read_bytes[name] += len(chunk)
                             offset = 0
                     except BlockingIOError:
-                        self._stop.wait(0.01)
+                        wait_ready(pipe.fileno(), latch=self._stop)
                         continue
                     if not chunk:
                         if pending:
@@ -222,6 +275,7 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
                     self._timeout_stdout += chunk[offset:]
                 pending.clear()
                 self._pending_bytes[name] = 0
+                self._live_readers -= 1
             self._queue.finish()
 
     def _publish(self, name: str, record: bytes) -> bool:
@@ -255,16 +309,30 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
             raise BufferError(f"{category} exceeds buffer_bytes={self._buffer_bytes}")
 
     def _expire(self) -> None:
-        """Record expiry of a still-running child while the queue lock is held.
+        """Record the first stop of a running stream while the queue lock is held.
 
-        Capture queued and unfinished stdout before closing the queue. Natural
-        child exit is not converted into a timeout during post-exit draining.
+        Mirror the captured path's precedence: a set cancel token, then a
+        command deadline strictly earlier than the scope's (only while the child
+        runs), then the scope deadline. Capture queued and unfinished stdout
+        before closing the queue for a command deadline. Natural child exit is
+        not converted into a command timeout during post-exit draining, but a
+        scope keeps applying until the stream is delivered.
         """
-        if (
-            not self._stop.is_set()
-            and self._deadline is not None
-            and monotonic() >= self._deadline
-            and self._process.poll() is None
+        if self._stop.is_set():
+            return
+        scope = self._observation
+        now = monotonic()
+        if scope is not None and any(token.is_set() for token in scope.cancel_tokens):
+            self._scope_error = ObservationCancelled()
+        elif (
+            self._deadline is not None
+            and now >= self._deadline
+            and not self._exited
+            and (
+                scope is None
+                or scope.deadline is None
+                or self._deadline < scope.deadline
+            )
         ):
             self._expired = True
             self._timeout_stdout = (
@@ -272,37 +340,71 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
                 + self._inflight["stdout"]
                 + self._pending["stdout"]
             )
-            self._stop.set()
-            self._queue.close()
+        elif scope is not None and scope.deadline is not None and now >= scope.deadline:
+            self._scope_error = ObservationTimeout()
+        else:
+            return
+        self._stop.set()
+        self._queue.close()
+
+    def _check_scope(self) -> None:
+        """Stop the stream now if its observation was cancelled or has expired."""
+        if self._observation is not None:
+            with self._queue.condition:
+                self._expire()
+
+    def _wake_in(self) -> float | None:
+        """Return the wait until the next deadline or cancel check, if any.
+
+        A real deadline is the only timer besides the bounded cancel-token check;
+        without either, wait for a notification from the queue.
+        """
+        ends = []
+        if self._deadline is not None and not self._exited:
+            ends.append(self._deadline)
+        scope = self._observation
+        if scope is not None and scope.deadline is not None:
+            ends.append(scope.deadline)
+        wait = bounded_wait(min(ends) - monotonic()) if ends else None
+        if scope is not None and scope.cancel_tokens:
+            wait = CANCEL_CHECK if wait is None else min(wait, CANCEL_CHECK)
+        return wait
 
     def _monitor(self) -> None:
-        """Enforce the deadline and reap the child independently of iteration.
+        """Enforce deadlines and scope, and reap the child independently of iteration.
 
-        Kill a running child when stopped, join readers, and close piped stdin
+        Sleep until stop, child exit, or the next deadline or cancel check, never
+        on a fixed interval. Kill a running child when stopped, join the child
+        reaper, and then, for an observed stream, keep the scope in force until
+        the readers finish. Join the readers, close piped stdin, then close the
+        stop latch's wake descriptor, which no thread waits on any longer,
         before signalling that owned resources have been released.
         """
         try:
             with self._queue.condition:
-                while not self._stop.is_set() and self._process.poll() is None:
+                while not self._stop.is_set() and not self._exited:
                     self._expire()
                     if not self._stop.is_set():
-                        remaining = (
-                            0.01
-                            if self._deadline is None
-                            else max(0, min(0.01, self._deadline - monotonic()))
-                        )
-                        self._queue.condition.wait(remaining)
-            if self._stop.is_set() and self._process.poll() is None:
+                        self._queue.condition.wait(self._wake_in())
+                exited = self._exited
+            if self._stop.is_set() and not exited:
                 with suppress(ProcessLookupError):
                     self._process.kill()
-            self._process.wait()
+            self._reaper.join()
             self._notify_exit_failure()
+            if self._observation is not None:
+                with self._queue.condition:
+                    while not self._stop.is_set() and self._live_readers:
+                        self._expire()
+                        if not self._stop.is_set():
+                            self._queue.condition.wait(self._wake_in())
             for thread in self._threads:
                 thread.join()
             if self.stdin is not None and not self.stdin.closed:
                 os.set_blocking(self.stdin.fileno(), False)
                 with suppress(BrokenPipeError, BlockingIOError):
                     self.stdin.close()
+            self._stop.close()
         finally:
             self._released.set()
 
@@ -311,6 +413,8 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
 
         Raises:
             DockerTimeout: If the launch deadline expired while the child ran.
+            ObservationCancelled: If an observation token was set.
+            ObservationTimeout: If the observation deadline expired.
             DockerException: If a subprocess failure was recorded.
             BufferError: If retained output exceeded an individual byte limit.
             OSError: If a pipe reader recorded an operating-system failure.
@@ -321,10 +425,12 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
             self._error = None
             expired = self._expired
             self._expired = False
+            scope_error = self._scope_error
+            self._scope_error = None
             if self._telemetry_outcome is None:
-                if expired:
+                if expired or isinstance(scope_error, ObservationTimeout):
                     self._telemetry_outcome = "timeout"
-                elif error is not None:
+                elif error is not None or scope_error is not None:
                     self._telemetry_outcome = "failure"
         self._complete_telemetry()
         if expired:
@@ -335,6 +441,8 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
                 bytes(self._stderr),
                 raw_diagnostics=self._raw_diagnostics,
             )
+        if scope_error is not None:
+            raise scope_error
         if error is not None:
             raise error
 
@@ -364,10 +472,13 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
                 no remaining recorded failure.
             DockerException: If the child exits unsuccessfully.
             DockerTimeout: If the running child exceeded its launch deadline.
+            ObservationCancelled: If the launch-time observation was cancelled.
+            ObservationTimeout: If the launch-time observation deadline expired.
             BufferError: If a record or retained stderr exceeded its byte limit.
             OSError: If a pipe read failed.
         """
         while True:
+            self._check_scope()
             if self._stop.is_set():
                 self._raise_error()
                 raise StopIteration
@@ -380,6 +491,7 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
             self._remaining_readers -= 1
             if not self._remaining_readers:
                 break
+        self._check_scope()
         self._raise_error()
         with self._queue.condition:
             if self._stop.is_set():
@@ -413,8 +525,9 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
                 self._telemetry_outcome = (
                     "timeout"
                     if self._expired
+                    or isinstance(self._scope_error, ObservationTimeout)
                     else "failure"
-                    if self._error is not None
+                    if self._error is not None or self._scope_error is not None
                     else "closed"
                 )
             self._closed = True

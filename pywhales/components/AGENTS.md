@@ -28,6 +28,10 @@ The 18 groups are `buildx`, `compose`, `config`, `container`, `context`, `image`
 - Use `_cleanup.py::resource_cleanup` in resource `__exit__` methods. It catches
   `BaseException` from cleanup and, when the body also failed, preserves both errors
   in a `BaseExceptionGroup`. Don't swallow either failure or narrow the catch.
+  Container, Image, Volume, Network, Config, Secret, Plugin, and Service nest a `try` inside it that
+  returns on only their own `NoSuch*` error; every other removal failure still reaches `resource_cleanup`.
+  Config, Secret, Plugin, Context, and Service handles expose `exists()`, which is `False` only for
+  that own error, so `NotASwarmManager` and other failures propagate.
 - Config, Node, Secret, and Service inspect use `_swarm_inspect.py::parse_swarm_inspect_results`.
   Resolve reordered responses by exact ID, then exact name (hostname for nodes), then
   unique ID prefix. Validate identities, ambiguity, snapshot consistency, and requested

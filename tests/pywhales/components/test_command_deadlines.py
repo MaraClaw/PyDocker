@@ -1,11 +1,13 @@
 """Deadline execution contracts against a temporary Python CLI driver.
 
 Commands launch real local Python children rather than Docker. The driver records
-argv, supplies inspection fixtures, and optionally blocks so tests can observe
-timeout delivery, captured output, and process cleanup.
+argv and PIDs, supplies inspection fixtures, and optionally blocks or fails the
+launches selected by argv prefix so tests can observe timeout delivery, captured
+output, and process cleanup.
 """
 
 import json
+import os
 import sys
 from collections.abc import Iterable
 from pathlib import Path
@@ -18,7 +20,7 @@ from pywhales import Container, DockerClient, Image, utils
 from pywhales.components.buildx.cli_wrapper import BakeResult
 from pywhales.components.compose.models import ComposeEvent
 from pywhales.components.system.models import DockerEvent
-from pywhales.exceptions import DockerTimeout
+from pywhales.exceptions import DockerException, DockerTimeout
 from pywhales.utils import MappedProcessStream, ProcessStream
 
 type Operation = Literal["run", "execute", "instance", "compose", "build", "bake"]
@@ -51,6 +53,20 @@ record = Path(sys.argv[1])
 args = sys.argv[2:]
 with record.open('a') as output:
     output.write(json.dumps(args) + '\\n')
+with record.with_name('pids.jsonl').open('a') as output:
+    output.write(json.dumps([os.getpid(), args]) + '\\n')
+
+
+def selected(name):
+    prefix = os.environ.get(name, '').split()
+    return bool(prefix) and args[:len(prefix)] == prefix
+
+
+if selected('PYWHALES_TEST_BLOCK_ON'):
+    threading.Event().wait(60)
+if selected('PYWHALES_TEST_FAIL_ON'):
+    print('induced failure', file=sys.stderr)
+    sys.exit(3)
 if args[:2] == ['buildx', 'inspect']:
     print('Name: selected')
 elif args[:2] == ['buildx', 'ls']:
@@ -60,7 +76,7 @@ elif args[:2] == ['image', 'inspect']:
 elif args[:2] == ['manifest', 'inspect']:
     print('{}')
 elif args[:2] == ['container', 'inspect']:
-    print('[{"Id":"container-id"}]')
+    print('[{"Id":"container-id","HostConfig":{"AutoRemove":false},"State":{"Running":false}}]')
 elif args[:2] == ['service', 'inspect']:
     print('[{"ID":"service-id","Spec":{"Name":"workload"}}]')
 else:
@@ -623,3 +639,220 @@ def test_transfer_stream_deadline_preserves_shape(
         with result:
             lines = list(result)
         assert lines == [("built", b"container-id\n")]
+
+
+COPY_BUDGETS = [
+    pytest.param(0.4, 600.0, id="explicit-overrides-default"),
+    pytest.param(None, 0.4, id="inherits-default"),
+]
+
+
+def launched(tmp_path: Path) -> list[list[str]]:
+    """Return the argv of every driver launch so far, in launch order."""
+    record = tmp_path / "launches.jsonl"
+    return [json.loads(line) for line in record.read_text().splitlines()]
+
+
+def assert_reaped(tmp_path: Path, prefix: list[str]) -> None:
+    """Check each driver child whose argv starts with prefix is gone, not a zombie."""
+    children: list[tuple[int, list[str]]] = [
+        json.loads(line) for line in (tmp_path / "pids.jsonl").read_text().splitlines()
+    ]
+    pids = [pid for pid, args in children if args[: len(prefix)] == prefix]
+    assert pids
+    for pid in pids:
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+
+
+def copy_timeouts(
+    client: DockerClient, monkeypatch: pytest.MonkeyPatch, default: float, block: str
+) -> None:
+    """Configure the client default and block the driver launches matching block."""
+    client.client_config.default_timeout = default
+    monkeypatch.setenv("PYWHALES_TEST_BLOCK_ON", block)
+
+
+type ContainerTransfer = Literal["copy", "export", "copy_from", "copy_to"]
+CONTAINER_TRANSFERS: tuple[ContainerTransfer, ...] = (
+    "copy",
+    "export",
+    "copy_from",
+    "copy_to",
+)
+
+
+@pytest.mark.parametrize(("timeout", "default"), COPY_BUDGETS)
+@pytest.mark.parametrize("operation", CONTAINER_TRANSFERS)
+def test_container_transfer_timeout_reaps_local_child(
+    client: DockerClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: ContainerTransfer,
+    timeout: float | None,
+    default: float,
+) -> None:
+    destination = tmp_path / "out"
+    handle = Container(client.client_config, "workload", is_immutable_id=True)
+    blocked = ["container", "export" if operation == "export" else "cp"]
+    copy_timeouts(client, monkeypatch, default, " ".join(blocked))
+
+    with pytest.raises(DockerTimeout):
+        match operation:
+            case "copy":
+                client.copy(("workload", "/data"), destination, timeout=timeout)
+            case "export":
+                client.export("workload", destination, timeout=timeout)
+            case "copy_from":
+                handle.copy_from("/data", destination, timeout=timeout)
+            case "copy_to":
+                handle.copy_to(destination, "/data", timeout=timeout)
+            case unreachable:
+                assert_never(unreachable)
+
+    assert [args[:2] for args in launched(tmp_path)] == [blocked]
+    assert_reaped(tmp_path, blocked)
+    assert client.client_config.default_timeout == default
+
+
+type ImageCopy = Literal["copy_from", "copy_to"]
+IMAGE_COPIES: tuple[ImageCopy, ...] = ("copy_from", "copy_to")
+
+
+def image_copy(
+    client: DockerClient, operation: ImageCopy, timeout: float | None
+) -> object:
+    """Run an image copy helper by its string reference, with its implicit launches."""
+    match operation:
+        case "copy_from":
+            return client.image.copy_from("built", "/data", "out", timeout=timeout)
+        case "copy_to":
+            return client.image.copy_to("built", "local", "/data", timeout=timeout)
+        case unreachable:
+            assert_never(unreachable)
+
+
+@pytest.mark.parametrize(("timeout", "default"), COPY_BUDGETS)
+@pytest.mark.parametrize("step", ["inspect", "pull"])
+@pytest.mark.parametrize("operation", IMAGE_COPIES)
+def test_image_copy_preflight_timeout_precedes_container_create(
+    client: DockerClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: ImageCopy,
+    step: Literal["inspect", "pull"],
+    timeout: float | None,
+    default: float,
+) -> None:
+    if step == "pull":
+        monkeypatch.setenv("PYWHALES_TEST_FAIL_ON", "image inspect")
+    copy_timeouts(client, monkeypatch, default, f"image {step}")
+
+    with pytest.raises(DockerTimeout):
+        image_copy(client, operation, timeout)
+
+    launches = launched(tmp_path)
+    assert launches[-1][:2] == ["image", step]
+    assert all(args[0] == "image" for args in launches)
+    assert_reaped(tmp_path, ["image", step])
+    assert client.client_config.default_timeout == default
+
+
+@pytest.mark.parametrize("body_fails", [False, True])
+@pytest.mark.parametrize(("timeout", "default"), COPY_BUDGETS)
+@pytest.mark.parametrize("operation", IMAGE_COPIES)
+def test_image_copy_cleanup_timeout_keeps_body_failure(
+    client: DockerClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: ImageCopy,
+    timeout: float | None,
+    default: float,
+    body_fails: bool,
+) -> None:
+    if body_fails:
+        monkeypatch.setenv("PYWHALES_TEST_FAIL_ON", "container cp")
+    copy_timeouts(client, monkeypatch, default, "container rm")
+
+    if body_fails:
+        with pytest.raises(BaseExceptionGroup) as raised:
+            image_copy(client, operation, timeout)
+        body, cleanup = raised.value.exceptions
+        assert isinstance(body, DockerException)
+        assert not isinstance(body, DockerTimeout)
+        assert isinstance(cleanup, DockerTimeout)
+    else:
+        with pytest.raises(DockerTimeout):
+            image_copy(client, operation, timeout)
+
+    assert launched(tmp_path)[-1][:2] == ["container", "rm"]
+    assert_reaped(tmp_path, ["container", "rm"])
+
+
+@pytest.fixture
+def scratch_names(monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
+    """Pin the helper image and container names a volume copy generates."""
+    names = iter(("scratch-image", "scratch-container"))
+    monkeypatch.setattr(
+        "pywhales.components.volume.cli_wrapper.random_name", lambda: next(names)
+    )
+    return ("scratch-image", "scratch-container")
+
+
+@pytest.mark.parametrize(("timeout", "default"), COPY_BUDGETS)
+def test_volume_copy_build_preflight_timeout_removes_scratch_image(
+    client: DockerClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scratch_names: tuple[str, str],
+    timeout: float | None,
+    default: float,
+) -> None:
+    image_name, _ = scratch_names
+    copy_timeouts(client, monkeypatch, default, "buildx inspect")
+
+    with pytest.raises(DockerTimeout):
+        client.volume.copy(("data", "."), tmp_path / "out", timeout=timeout)
+
+    launches = launched(tmp_path)
+    assert all(args[0] != "container" for args in launches)
+    assert launches[-1][:2] == ["image", "rm"]
+    assert image_name in launches[-1]
+    assert_reaped(tmp_path, ["buildx", "inspect"])
+    assert client.client_config.default_timeout == default
+
+
+@pytest.mark.parametrize("body_fails", [False, True])
+@pytest.mark.parametrize(("timeout", "default"), COPY_BUDGETS)
+def test_volume_copy_cleanup_timeout_still_removes_scratch_image(
+    client: DockerClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scratch_names: tuple[str, str],
+    timeout: float | None,
+    default: float,
+    body_fails: bool,
+) -> None:
+    image_name, container_name = scratch_names
+    if body_fails:
+        monkeypatch.setenv("PYWHALES_TEST_FAIL_ON", "container cp")
+    copy_timeouts(client, monkeypatch, default, "container rm")
+
+    if body_fails:
+        with pytest.raises(BaseExceptionGroup) as raised:
+            client.volume.copy(("data", "."), tmp_path / "out", timeout=timeout)
+        body, cleanup = raised.value.exceptions
+        assert isinstance(body, DockerException)
+        assert not isinstance(body, DockerTimeout)
+        assert isinstance(cleanup, DockerTimeout)
+    else:
+        with pytest.raises(DockerTimeout):
+            client.volume.copy(("data", "."), tmp_path / "out", timeout=timeout)
+
+    removals = [args for args in launched(tmp_path) if args[1] in ("rm", "remove")]
+    assert [(args[:2], args[-1]) for args in removals] == [
+        (["container", "rm"], container_name),
+        (["image", "rm"], image_name),
+    ]
+    assert_reaped(tmp_path, ["container", "rm"])
+    assert client.client_config.default_timeout == default

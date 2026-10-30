@@ -2,8 +2,9 @@
 
 import datetime
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from types import MappingProxyType
+from typing import Literal
 
 from pywhales.client_config import Command, DockerCLICaller
 from pywhales.components.system.models import (
@@ -13,10 +14,17 @@ from pywhales.components.system.models import (
 )
 from pywhales.utils import (
     MappedProcessStream,
-    format_mapping_for_cli,
+    format_filters_for_cli,
     format_time_arg,
     run,
     stream_stdout_and_stderr,
+)
+
+type SystemEventsFilter = tuple[str, str]
+type SystemPruneFilter = (
+    tuple[Literal["until"], str]
+    | tuple[Literal["label"], str]
+    | tuple[Literal["label!"], str]
 )
 
 
@@ -73,7 +81,9 @@ class SystemCLI(DockerCLICaller):
         self,
         since: datetime.datetime | datetime.timedelta | None = None,
         until: datetime.datetime | datetime.timedelta | None = None,
-        filters: Mapping[str, str] = MappingProxyType({}),
+        filters: Mapping[str, str] | Iterable[SystemEventsFilter] = MappingProxyType(
+            {}
+        ),
         *,
         timeout: float | None = None,
     ) -> MappedProcessStream[DockerEvent]:
@@ -88,7 +98,11 @@ class SystemCLI(DockerCLICaller):
         Args:
             since: Lower event time bound, or None to omit it.
             until: Upper event time bound, or None to keep the subscription open.
-            filters: Docker event filter names and values; the default adds none.
+            filters: Docker event filter names and values, either as a mapping
+                or as an iterable of ``(key, value)`` pairs. Pairs keep their
+                order and repeated keys, and an iterator is read once. The
+                default adds none. For example, `filters={"type": "container"}`
+                or `filters=[("event", "start"), ("event", "die")]`.
             timeout: Positive finite seconds for the local CLI, or None for no
                 deadline. Timing starts at launch and continues while iteration
                 pauses. Expiry kills and reaps the CLI while preserving captured
@@ -100,6 +114,9 @@ class SystemCLI(DockerCLICaller):
             buffer budget and retains transport ownership through mapping.
 
         Raises:
+            TypeError: If filters is a string, bytes, or an iterable containing
+                anything but ``(key, value)`` tuples of strings. Raised before
+                the Docker executable is looked up or the CLI starts.
             ValueError: If timeout is a Boolean or is neither None nor a positive
                 finite number of seconds.
             DockerTimeout: If the CLI exceeds its deadline, delivered during
@@ -107,6 +124,7 @@ class SystemCLI(DockerCLICaller):
             BufferError: If a record or retained stderr history exceeds the
                 configured stream buffer budget.
         """
+        filter_args = format_filters_for_cli(filters)
         full_cmd = Command(
             [
                 *self.docker_cmd,
@@ -118,9 +136,7 @@ class SystemCLI(DockerCLICaller):
         )
         full_cmd.add_simple_arg("--since", format_time_arg(since))
         full_cmd.add_simple_arg("--until", format_time_arg(until))
-        full_cmd.add_args_iterable_or_single(
-            "--filter", format_mapping_for_cli(filters)
-        )
+        full_cmd.add_args_iterable_or_single("--filter", filter_args)
         stream = stream_stdout_and_stderr(full_cmd, timeout=timeout)
         return MappedProcessStream(
             stream,
@@ -146,7 +162,7 @@ class SystemCLI(DockerCLICaller):
         self,
         all: bool = False,
         volumes: bool = False,
-        filters: Mapping[str, str] = MappingProxyType({}),
+        filters: Mapping[str, str] | Iterable[SystemPruneFilter] = MappingProxyType({}),
     ) -> None:
         """Remove unused Docker data without a confirmation prompt.
 
@@ -154,13 +170,21 @@ class SystemCLI(DockerCLICaller):
             all: Remove all unused images not just dangling ones
             volumes: Prune volumes
             filters: See the [Docker documentation page about filtering
-                ](https://docs.docker.com/engine/reference/commandline/system_prune/#filtering).
-                For example, `filters=dict(until="24h")`.
+                ](https://docs.docker.com/reference/cli/docker/system/prune/#filter).
+                Pass a mapping, for example `filters=dict(until="24h")`, or an
+                iterable of ``(key, value)`` pairs, for example
+                `filters=[("label!", "keep"), ("label!", "protect")]`. Pairs
+                keep their order and repeated keys, and an iterator is read
+                once. The documented keys are `until`, `label`, and `label!`.
+
+        Raises:
+            TypeError: If filters is a string, bytes, or an iterable containing
+                anything but ``(key, value)`` tuples of strings. Raised before
+                the Docker executable is looked up.
         """
+        filter_args = format_filters_for_cli(filters)
         full_cmd = Command([*self.docker_cmd, "system", "prune", "--force"])
         full_cmd.add_flag("--all", all)
         full_cmd.add_flag("--volumes", volumes)
-        full_cmd.add_args_iterable_or_single(
-            "--filter", format_mapping_for_cli(filters)
-        )
+        full_cmd.add_args_iterable_or_single("--filter", filter_args)
         run(full_cmd)

@@ -72,8 +72,16 @@ deadline raises `ObservationTimeout`; a set `cancel` event raises
 exists; some limits reject before launch. Nothing rolls back daemon-side work,
 and the regular, selected-launch
 `DockerTimeout` from `default_timeout`/`timeout=` is unaffected and can still
-fire independently. Aggregate response budgets apply within observation scopes
-and the bounded inventory call. Snapshots aren't daemon transactions or total
+fire independently. Streams and archive transfers (log and progress streams,
+`load`, `save`) started inside a scope check cancellation and the argv and
+environment limits before launch, keep the scope's deadline and tokens after the
+`with` block exits, and kill and reap the local CLI before raising
+`ObservationTimeout` or `ObservationCancelled`; a lazy `save` binds the scope
+active at its first iteration, and streamed or archive payload bytes are not
+charged to response budgets. Multi-image `pull`/`push` run each task in a copy
+of the calling context, so `pull(quiet=False)` inside a scope raises the same
+`ValueError` for one image or many. Aggregate response budgets apply within
+observation scopes and the bounded inventory call. Snapshots aren't daemon transactions or total
 memory caps. Bulk reload stages every group before updating any input cache,
 but publication isn't atomic to concurrent readers.
 

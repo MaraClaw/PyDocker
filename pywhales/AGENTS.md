@@ -7,7 +7,10 @@
 - `_inspect_validation.py`: whole-response validation for context, plugin, and task batches.
 - `utils.py`: `run()`, stream factories/adapters, CLI value conversion, and JSON aliases.
 - `_process_stream.py`: process ownership and watchdog; `_stream_buffer.py`: queue accounting.
-- `exceptions.py`: captured command details and stderr-based exception selection.
+- `_readiness.py`: wake latch, readiness wait, and child-exit helpers shared by pipe workers, capture, and archives.
+- `exceptions.py`: captured command details and stderr-based exception selection. Kinds are an ordered
+  table of line-start patterns; add a kind there, not as a substring test. Names and context paths
+  can't pick a kind. Application stderr forwarded by `run`/`exec` can still be misclassified, by design.
 
 ## Commands And Configuration
 
@@ -59,11 +62,25 @@
   Natural child exit leaves post-exit pipe draining unchanged.
 - Expiry kills and reaps the local CLI before raising `DockerTimeout`, retaining captured output.
   Natural nonzero exits keep stderr-selected `DockerException` types rather than becoming timeouts.
+- Inside `observation()`, a stream or archive launch snapshots the scope once, at launch (a lazy
+  `save` at its first iteration). `_scoped_launch.py` runs the captured path's preflight before
+  `Popen` and telemetry: cancellation, argv and environment limits, and `E2BIG` mapping. The watchdog
+  or `ArchiveDeadline` kills and reaps the CLI on a set token or scope deadline and keeps applying
+  the snapshot after the `with` block exits. Precedence mirrors `_bounded_capture.py`: token, then a
+  command deadline strictly earlier than the scope's (only while the child runs), then the scope.
+  Tokens add only the bounded `CANCEL_CHECK` wait; streamed and archive payloads aren't charged to
+  response accounts.
 - A bare loop `break` doesn't close an owned stream. Use its context manager or call `close()`
   when stopping early, including before the first iteration. Closing cancels only the local CLI,
   not containers, services, or other daemon-managed resources.
 - `close()` is idempotent and waits for process/thread cleanup. Preserve recorded terminal errors
   for one delivery through iteration or clean context exit; don't replace an active body exception.
+- POSIX pipe workers wait on readiness, not timers: stream readers, the stdin writer, and bounded capture
+  block on the pipe plus a `WakeLatch`, and a reaper thread publishes child exit instead of `poll()` loops.
+  Only a real deadline (its remaining time), a cancel token (bounded 50 ms check), or Windows pipes
+  (bounded slices) may time a wait. Every stop path must `set()` the latch; `close()` it only after the
+  threads waiting on it are joined. `ArchiveDeadline` waits under its pipe lock for at most the remaining
+  deadline, so expiry never closes a pipe beneath a wait.
 
 ## Buffer And Error Invariants
 

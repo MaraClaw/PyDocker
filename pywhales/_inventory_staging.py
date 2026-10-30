@@ -20,6 +20,10 @@ from pywhales.components._swarm_inspect import (
     SwarmInspectResult,
     associate_swarm_inspect_results,
 )
+from pywhales.components.config.models import ConfigInspectResult
+from pywhales.components.node.models import NodeInspectResult
+from pywhales.components.secret.models import SecretInspectResult
+from pywhales.components.service.models import ServiceInspectResult
 from pywhales.exceptions import ObservationLimitError
 from pywhales.inventory import (
     InspectionPolicy,
@@ -89,9 +93,19 @@ def _normalize(items: Sequence[InventoryRequest | InventoryResource]) -> list[_G
 
 def _prefix(group: _Group, arguments: Sequence[object]) -> list[str]:
     command = [str(argument) for argument in arguments]
+    if group.kind == "builder":
+        return [*command, "buildx", "ls", "--format", "{{json . }}"]
     if group.kind == "task":
         return [*command, "inspect", "--type", "task"]
     return [*command, group.kind, "inspect"]
+
+
+def _argv(
+    group: _Group, prefix: list[str], entries: Sequence[_Occurrence]
+) -> list[str]:
+    if group.kind == "builder":
+        return prefix
+    return [*prefix, *(entry.reference for entry in entries)]
 
 
 def _chunks(
@@ -100,6 +114,8 @@ def _chunks(
     environment: Mapping[str, str],
     policy: InspectionPolicy,
 ) -> list[list[_Occurrence]]:
+    if group.kind == "builder":
+        return [group.occurrences]
     chunks: list[list[_Occurrence]] = []
     chunk: list[_Occurrence] = []
     for occurrence in group.occurrences:
@@ -154,8 +170,13 @@ def _stage(
                 raise ObservationLimitError("environment", None, None) from None
             prefix = _prefix(group, command)
             environment = finalize_environment(environment, prefix)
-            for occurrence in group.occurrences:
-                check_launch([*prefix, occurrence.reference], environment, state.policy)
+            if group.kind == "builder":
+                check_launch(prefix, environment, state.policy)
+            else:
+                for occurrence in group.occurrences:
+                    check_launch(
+                        [*prefix, occurrence.reference], environment, state.policy
+                    )
             plans.append(
                 (
                     group,
@@ -173,11 +194,7 @@ def _stage(
             group_ids: list[str] = []
             for chunk in chunks:
                 check_observation(state)
-                check_launch(
-                    [*prefix, *(entry.reference for entry in chunk)],
-                    environment,
-                    state.policy,
-                )
+                check_launch(_argv(group, prefix, chunk), environment, state.policy)
                 request = [
                     make_resource(group.kind, group.config, entry.reference)
                     for entry in chunk
@@ -212,7 +229,13 @@ def _stage(
                     aliases[entry.reference] = identity
                     snapshots[identity] = payload
                     group_ids.append(identity)
-                    if isinstance(payload, SwarmInspectResult.__value__):
+                    if isinstance(
+                        payload,
+                        ConfigInspectResult
+                        | NodeInspectResult
+                        | SecretInspectResult
+                        | ServiceInspectResult,
+                    ):
                         swarm_models.append(payload)
                     records[entry.index] = InventoryRecord(
                         kind=group.kind,

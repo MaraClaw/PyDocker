@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from pywhales import (
+    Builder,
     Config,
     Container,
     Context,
@@ -21,12 +22,14 @@ from pywhales import (
 from pywhales.client_config import (
     ClientConfig,
     ParsingError,
+    ReloadableObject,
     ReloadableObjectFromJson,
     bulk_reload,
 )
 from pywhales.exceptions import DockerException
 
 RESOURCE_TYPES = [
+    Builder,
     Container,
     Image,
     Network,
@@ -40,7 +43,8 @@ RESOURCE_TYPES = [
     Context,
 ]
 type SupportedResource = (
-    Container
+    Builder
+    | Container
     | Image
     | Network
     | Volume
@@ -66,15 +70,19 @@ def test_bulk_reload_dispatches_each_supported_kind(
     kind = resource_type.__name__.lower()
     suffix = ["inspect", "--type", "task"] if kind == "task" else [kind, "inspect"]
     prefix = ["docker-test", "--wrapper", "--host", "inventory-host"]
+    output = json.dumps([snapshot]).encode()
+    expected = [*prefix, *suffix, "identity"]
+    if resource_type is Builder:
+        output = json.dumps(snapshot).encode() + b"\n"
+        expected = [*prefix, "buildx", "ls", "--format", "{{json . }}"]
     with patch(
-        "subprocess.run",
-        return_value=CompletedProcess([], 0, json.dumps([snapshot]).encode(), b""),
+        "subprocess.run", return_value=CompletedProcess([], 0, output, b"")
     ) as command:
         bulk_reload([resource])
     assert resource._inspect_result is not None
     assert resource._last_refreshed_time > datetime.min
     command.assert_called_once()
-    assert command.call_args.args[0] == [*prefix, *suffix, "identity"]
+    assert command.call_args.args[0] == expected
 
 
 def test_bulk_reload_groups_by_exact_config_identity_and_kind() -> None:
@@ -105,7 +113,9 @@ def test_bulk_reload_groups_by_exact_config_identity_and_kind() -> None:
 
 
 @pytest.mark.parametrize("failure", ["cli", "shape", "count", "model", "identity"])
-@pytest.mark.parametrize("resource_type", RESOURCE_TYPES)
+@pytest.mark.parametrize(
+    "resource_type", [kind for kind in RESOURCE_TYPES if kind is not Builder]
+)
 def test_bulk_reload_later_group_failure_preserves_every_snapshot_and_timestamp(
     failure: str, resource_type: type[SupportedResource]
 ) -> None:
@@ -259,7 +269,10 @@ class UnsupportedResource(ReloadableObjectFromJson[object]):
     pass
 
 
-def test_bulk_reload_unsupported_kind_rejects_all_input_before_lookup() -> None:
+@pytest.mark.parametrize("valid_type", [Context, Builder])
+def test_bulk_reload_unsupported_kind_rejects_all_input_before_lookup(
+    valid_type: type[Context | Builder],
+) -> None:
     config = ClientConfig()
     resource = UnsupportedResource(config, "id", "unsupported", is_immutable_id=True)
     with (
@@ -267,6 +280,104 @@ def test_bulk_reload_unsupported_kind_rejects_all_input_before_lookup() -> None:
         patch("subprocess.run") as command,
         pytest.raises(TypeError),
     ):
-        bulk_reload([Context(config, "valid", is_immutable_id=True), resource])
+        bulk_reload([valid_type(config, "valid", is_immutable_id=True), resource])
     lookup.assert_not_called()
     command.assert_not_called()
+
+
+def _builder_line(name: str | None, **fields: object) -> bytes:
+    return json.dumps({"Name": name, "Driver": "docker", **fields}).encode() + b"\n"
+
+
+def test_bulk_reload_builders_publish_once_with_one_listing_per_config() -> None:
+    config = ClientConfig(_client_call_with_path=["docker-test"])
+    other_config = ClientConfig(_client_call_with_path=["docker-test"])
+    first = Builder(config, "same", is_immutable_id=True)
+    sibling = Builder(config, "same", is_immutable_id=True)
+    other = Builder(other_config, "other", is_immutable_id=True)
+    node_rows = _builder_line("same", Nodes=[{"Name": "same0"}]) * 2
+    with (
+        patch(
+            "subprocess.run",
+            side_effect=[
+                CompletedProcess([], 0, node_rows + _builder_line("extra"), b""),
+                CompletedProcess([], 0, _builder_line("other"), b""),
+            ],
+        ) as command,
+        patch.object(
+            first, "_set_inspect_result", wraps=first._set_inspect_result
+        ) as publish_first,
+        patch.object(
+            sibling, "_set_inspect_result", wraps=sibling._set_inspect_result
+        ) as publish_sibling,
+        patch.object(
+            ReloadableObject,
+            "_get_inspect_result",
+            side_effect=AssertionError("freshness accessor"),
+        ),
+    ):
+        bulk_reload([first, other, first, sibling])
+    assert command.call_count == 2
+    assert [call.args[0][1:] for call in command.call_args_list] == [
+        ["buildx", "ls", "--format", "{{json . }}"]
+    ] * 2
+    publish_first.assert_called_once()
+    publish_sibling.assert_called_once()
+    assert first._inspect_result == sibling._inspect_result
+    assert first._inspect_result is not sibling._inspect_result
+    assert first._inspect_result is not None
+    assert first._inspect_result.nodes is not None
+    assert other._inspect_result is not None
+
+
+@pytest.mark.parametrize(
+    "listing",
+    [
+        _builder_line("other"),
+        _builder_line("same") + _builder_line("same", Dynamic=True),
+        _builder_line("same") + _builder_line(None),
+        _builder_line("same") + b"{not json\n",
+        b"",
+    ],
+)
+@pytest.mark.parametrize("builder_first", [True, False])
+def test_bulk_reload_builder_failure_preserves_mixed_kind_caches(
+    listing: bytes, builder_first: bool
+) -> None:
+    config = ClientConfig(_client_call_with_path=["docker-test"])
+    other_config = ClientConfig(_client_call_with_path=["docker-test"])
+    builder = Builder(config, "same", is_immutable_id=True)
+    context = Context(other_config, "ctx", is_immutable_id=True)
+    context._set_inspect_result(context._parse_inspect_result({"Name": "ctx"}))
+    before = [
+        (resource._inspect_result, resource._last_refreshed_time)
+        for resource in (builder, context)
+    ]
+    ok = CompletedProcess([], 0, b'[{"Name": "ctx", "Metadata": {"v": 1}}]', b"")
+    bad = CompletedProcess([], 0, listing, b"")
+    resources = [builder, context] if builder_first else [context, builder]
+    responses = [bad, ok] if builder_first else [ok, bad]
+    with (
+        patch("subprocess.run", side_effect=responses),
+        pytest.raises(ParsingError),
+    ):
+        bulk_reload(resources)
+    assert [
+        (resource._inspect_result, resource._last_refreshed_time)
+        for resource in (builder, context)
+    ] == before
+
+
+@pytest.mark.parametrize("raw", [False, True])
+def test_bulk_reload_builder_errors_follow_diagnostic_policy(raw: bool) -> None:
+    config = ClientConfig(_client_call_with_path=["docker-test"], raw_diagnostics=raw)
+    builder = Builder(config, "secret-builder", is_immutable_id=True)
+    with (
+        patch(
+            "subprocess.run",
+            return_value=CompletedProcess([], 0, _builder_line("other"), b""),
+        ),
+        pytest.raises(ParsingError) as error,
+    ):
+        bulk_reload([builder])
+    assert ("secret-builder" in str(error.value)) is raw

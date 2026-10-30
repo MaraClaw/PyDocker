@@ -10,6 +10,8 @@ from datetime import datetime
 from typing import Literal, get_args
 
 from pywhales.client_config import ClientConfig
+from pywhales.components.buildx.cli_wrapper import Builder
+from pywhales.components.buildx.models import BuilderInspectResult
 from pywhales.components.config.cli_wrapper import Config
 from pywhales.components.config.models import ConfigInspectResult
 from pywhales.components.container.cli_wrapper import Container
@@ -45,6 +47,7 @@ type InventoryKind = Literal[
     "task",
     "plugin",
     "context",
+    "builder",
 ]
 type InventoryResource = (
     Container
@@ -58,6 +61,7 @@ type InventoryResource = (
     | Task
     | Plugin
     | Context
+    | Builder
 )
 type InventoryPayload = (
     ContainerInspectResult
@@ -71,6 +75,7 @@ type InventoryPayload = (
     | TaskInspectResult
     | PluginInspectResult
     | ContextInspectResult
+    | BuilderInspectResult
 )
 
 

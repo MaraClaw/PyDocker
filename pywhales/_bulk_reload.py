@@ -8,7 +8,8 @@ from collections.abc import Callable, Sequence
 from functools import partial
 from typing import TYPE_CHECKING, assert_never
 
-from pywhales.client_config import ParsingError, ReloadableObjectFromJson
+from pywhales.client_config import ClientConfig, ParsingError, ReloadableObject
+from pywhales.components.buildx.cli_wrapper import Builder, list_builder_snapshots
 from pywhales.components.config.cli_wrapper import Config, ConfigCLI
 from pywhales.components.container.cli_wrapper import Container, ContainerCLI
 from pywhales.components.context.cli_wrapper import Context, ContextCLI
@@ -36,6 +37,7 @@ type SupportedResource = (
     | Task
     | Plugin
     | Context
+    | Builder
 )
 
 
@@ -55,6 +57,35 @@ def _identity(resource: SupportedResource) -> str:
     if identity is None or identity == "":
         raise ParsingError("Missing immutable inspect identity")
     return identity
+
+
+def _inspect_builders(config: ClientConfig, names: Sequence[str]) -> list[Builder]:
+    """Resolve builder names from one strictly parsed listing, in request order.
+
+    Builders have no batch inspect command, so no name reaches argv. Names match
+    exactly, and every duplicate request gets its own detached handle.
+
+    Args:
+        config: Originating config shared by the whole group.
+        names: Requested builder names.
+
+    Returns:
+        Newly hydrated handles, one per requested name.
+
+    Raises:
+        ParsingError: If the listing is invalid or lacks a requested name.
+    """
+    snapshots = list_builder_snapshots(config)
+    builders: list[Builder] = []
+    for name in names:
+        snapshot = snapshots.get(name)
+        if snapshot is None:
+            detail = f" {name!r}" if config.raw_diagnostics else ""
+            raise ParsingError(f"Builder{detail} is absent from the builder listing")
+        builder = Builder(config, name, is_immutable_id=True)
+        builder._set_inspect_result(snapshot.model_copy(deep=True))
+        builders.append(builder)
+    return builders
 
 
 def _inspect_group(
@@ -94,13 +125,15 @@ def _inspect_group(
             return PluginCLI(config).inspect(references)
         case Context():
             return ContextCLI(config).inspect(references)
+        case Builder():
+            return _inspect_builders(config, references)
         case unreachable:
             assert_never(unreachable)
 
 
 def _publication[InspectResultT, ReferenceT: str | None](
-    original: ReloadableObjectFromJson[InspectResultT, ReferenceT],
-    staged: ReloadableObjectFromJson[InspectResultT, ReferenceT],
+    original: ReloadableObject[InspectResultT, ReferenceT],
+    staged: ReloadableObject[InspectResultT, ReferenceT],
 ) -> Callable[[], None]:
     """Prepare a cache update after verifying a staged snapshot's identity.
 
@@ -164,6 +197,8 @@ def _prepare_publication(
             return _publication(target, inspected)
         case Context() as target, Context() as inspected:
             return _publication(target, inspected)
+        case Builder() as target, Builder() as inspected:
+            return _publication(target, inspected)
         case _:
             raise TypeError("Inspect returned an unexpected resource kind")
 
@@ -182,7 +217,8 @@ def bulk_reload(
 
     Args:
         docker_objects: Container, image, network, volume, node, service, config,
-            secret, task, plugin, or context handles. Empty input is a no-op.
+            secret, task, plugin, context, or builder handles. Empty input is a
+            no-op. Each builder group runs one listing and sends no names to argv.
         policy: Optional inspection limits, intersected with an active observation.
 
     Raises:
@@ -208,7 +244,8 @@ def bulk_reload(
             | Secret
             | Task
             | Plugin
-            | Context,
+            | Context
+            | Builder,
         ):
             raise TypeError("Unsupported resource kind for bulk reload")
         _identity(resource)

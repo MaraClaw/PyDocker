@@ -29,6 +29,7 @@ from pywhales.client_config import (
     ClientConfig,
     Command,
     DockerCLICaller,
+    ParsingError,
     ReloadableObject,
 )
 from pywhales.components._cleanup import resource_cleanup
@@ -133,6 +134,54 @@ class Builder(ReloadableObject[BuilderInspectResult]):
 
 
 ValidBuilder = str | Builder
+
+
+def parse_builder_listing(
+    output: str, *, raw_diagnostics: bool = False
+) -> dict[str, BuilderInspectResult]:
+    """Parse a whole builder listing into snapshots keyed by exact builder name.
+
+    Only byte-identical lines collapse, because the template also renders node
+    rows. The listing is validated completely before any snapshot is returned.
+    Safe mode withholds names and doesn't chain input-bearing parse errors.
+
+    Args:
+        output: Captured line-delimited JSON from `buildx ls --format "{{json . }}"`.
+        raw_diagnostics: Whether to include names and chain the raw parse error.
+
+    Returns:
+        Snapshots in listing order, each under its nonempty name.
+
+    Raises:
+        ParsingError: If any line is not a builder object, has a null or empty
+            name, or shares a name with a different line.
+    """
+    snapshots: dict[str, BuilderInspectResult] = {}
+    for line in dict.fromkeys(output.splitlines()):
+        try:
+            snapshot = BuilderInspectResult.model_validate_json(line, strict=True)
+        except ValueError as err:
+            if raw_diagnostics:
+                raise ParsingError("Invalid builder listing line") from err
+            raise ParsingError("Invalid builder listing line") from None
+        name = snapshot.name
+        if name is None or name == "":
+            raise ParsingError("Builder listing entry has no name")
+        if name in snapshots:
+            detail = f" for {name!r}" if raw_diagnostics else ""
+            raise ParsingError(f"Conflicting builder listing entries{detail}")
+        snapshots[name] = snapshot
+    return snapshots
+
+
+def list_builder_snapshots(
+    client_config: ClientConfig,
+) -> dict[str, BuilderInspectResult]:
+    """Run one builder listing and strictly parse it; no names enter argv."""
+    output = run(
+        Command([*client_config.docker_cmd, "buildx", "ls", "--format", "{{json . }}"])
+    )
+    return parse_builder_listing(output, raw_diagnostics=client_config.raw_diagnostics)
 
 
 class BuildxCLI(DockerCLICaller):

@@ -6,7 +6,10 @@ from unittest.mock import patch
 
 import pytest
 
+from pywhales._inventory_dispatch import make_resource, resource_kind
 from pywhales.client_config import ClientConfig
+from pywhales.components.buildx.cli_wrapper import Builder
+from pywhales.components.buildx.models import BuilderInspectResult
 from pywhales.components.network.models import NetworkInspectResult
 from pywhales.inventory import (
     InspectionPolicy,
@@ -76,4 +79,31 @@ def test_network_record_uses_network_inspect_model() -> None:
     record = InventoryRecord(kind="network", id="id", payload=model)
     snapshot = InventorySnapshot(records=(record,), started_at=now, finished_at=now)
     assert NetworkInspectResult in get_args(InventoryPayload.__value__)
+    assert snapshot.records[0].payload is model
+
+
+def test_builder_is_an_inventory_kind_resource_and_payload() -> None:
+    assert "builder" in get_args(InventoryKind.__value__)
+    assert Builder in get_args(InventoryResource.__value__)
+    assert BuilderInspectResult in get_args(InventoryPayload.__value__)
+    request = InventoryRequest(
+        kind="builder", references=("ci",), client_config=ClientConfig()
+    )
+    assert request.kind == "builder"
+
+
+@pytest.mark.parametrize("kind", get_args(InventoryKind.__value__))
+def test_every_kind_round_trips_through_dispatch(kind: InventoryKind) -> None:
+    config = ClientConfig()
+    resource = make_resource(kind, config, "identity")
+    assert resource_kind(resource) == kind
+    assert type(resource) in get_args(InventoryResource.__value__)
+    assert resource.client_config is config
+
+
+def test_builder_record_uses_builder_inspect_model() -> None:
+    model = BuilderInspectResult.model_validate({"Name": "ci", "Driver": "docker"})
+    now = datetime.now(UTC)
+    record = InventoryRecord(kind="builder", id="ci", payload=model)
+    snapshot = InventorySnapshot(records=(record,), started_at=now, finished_at=now)
     assert snapshot.records[0].payload is model

@@ -1,4 +1,5 @@
 import json
+import logging
 import subprocess
 import sys
 import time
@@ -15,12 +16,15 @@ from pywhales import DockerClient
 from pywhales._observation import ObservationState
 from pywhales.convergence import (
     Cancelled,
+    ComposeService,
+    ComposeTarget,
     Deadline,
     DeadlineDetail,
     Failure,
     ServiceTarget,
     StackTarget,
     Success,
+    capture_compose,
     capture_service,
     wait,
 )
@@ -66,6 +70,25 @@ elif args[:2] == ["service", "ps"]:
 elif args[:3] == ["inspect", "--type", "task"]:
     override = data.get("task_inspect_overrides", {}).get(args[3])
     print(json.dumps([override] if override is not None else [task for task in tasks if task["ID"] == args[3]]))
+elif args[0] == "compose" or args[:3] == ["inspect", "--type", "container"]:
+    snapshots = data["compose"]
+    cycle = sum(call[0] == "compose" for call in calls)
+    snapshot = snapshots[min(cycle, len(snapshots)) - 1]
+    members = snapshot["containers"]
+    if args[0] == "compose":
+        selected = args[args.index("--quiet") + 1:]
+        label = "com.docker.compose.service"
+        print(snapshot["raw_listing"] if "raw_listing" in snapshot else "\\n".join(
+            identity for identity in snapshot["listing"]
+            if identity not in members or not selected or members[identity]["Config"]["Labels"][label] in selected
+        ))
+    elif args[3] in snapshot.get("raw", {}):
+        print(snapshot["raw"][args[3]])
+    elif args[3] in members:
+        print(json.dumps([members[args[3]]]))
+    else:
+        sys.stderr.write("Error: No such container: " + args[3] + "\\n")
+        sys.exit(1)
 elif args[:2] in (["stack", "deploy"], ["service", "update"]):
     pass
 else:
@@ -1044,3 +1067,785 @@ def test_global_partial_recheck_retains_previous_complete_cycle_and_reaps_child(
     calls = [json.loads(line) for line in (tmp_path / "calls").read_text().splitlines()]
     assert calls[-1] == ["service", "inspect", "service-b"]
     assert calls.count(calls[-1]) == 5
+
+
+A, B, C = ("a" * 64, "b" * 64, "c" * 64)
+SECRETS = (A, B, C, "web", "private-project", "private-label", "private-name")
+SECRETS += ("hash-1", "hash-2", "credential-payload")
+PS = ["compose", "ps", "--all", "--quiet", "web"]
+
+
+def container(
+    identity: str,
+    *,
+    service: str = "web",
+    status: str = "running",
+    health: str | None = None,
+    config_hash: str = "hash-1",
+    oneoff: bool = False,
+    restarting: bool = False,
+    paused: bool = False,
+) -> dict[str, Any]:
+    state: dict[str, Any] = {
+        "Status": status,
+        "Running": status in {"running", "restarting", "paused"},
+        "Restarting": restarting,
+        "Paused": paused,
+        "ExitCode": 0,
+    }
+    if health is not None:
+        state["Health"] = {"Status": health, "Log": [{"Output": "credential-payload"}]}
+    return {
+        "Id": identity,
+        "Name": "/private-name",
+        "State": state,
+        "Config": {
+            "Env": ["TOKEN=credential-payload"],
+            "Cmd": ["--password=credential-payload"],
+            "Labels": {
+                "com.docker.compose.project": "private-project",
+                "com.docker.compose.service": service,
+                "com.docker.compose.config-hash": config_hash,
+                "com.docker.compose.oneoff": "True" if oneoff else "False",
+                "com.example.private": "private-label",
+            },
+        },
+    }
+
+
+def snapshot(
+    *members: dict[str, Any], listing: list[str] | None = None
+) -> dict[str, Any]:
+    return {
+        "listing": [item["Id"] for item in members] if listing is None else listing,
+        "containers": {item["Id"]: item for item in members},
+    }
+
+
+def store_compose(path: Path, *snapshots: dict[str, Any]) -> None:
+    """Replace the scripted snapshots and restart the per-cycle call count."""
+    (path / "calls").unlink(missing_ok=True)
+    (path / "data.json").write_text(
+        json.dumps({"services": {}, "tasks": [], "compose": list(snapshots)})
+    )
+
+
+def compose_target(
+    client: DockerClient,
+    policy: InspectionPolicy,
+    services: tuple[str, ...] = ("web",),
+) -> ComposeTarget:
+    result = capture_compose(client, services, policy=policy, timeout=5)
+    assert isinstance(result, ComposeTarget)
+    return result
+
+
+@pytest.mark.parametrize(
+    "test",
+    [["CMD", "credential-payload"], ["CMD-SHELL", "credential-payload"], [], ["NONE"]],
+)
+def test_compose_configured_healthcheck_requires_health_state(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    test: list[str],
+) -> None:
+    member = container(A)
+    member["Config"]["Healthcheck"] = {"Test": test}
+    store_compose(tmp_path, snapshot(member))
+    target = compose_target(fake_cli, policy)
+    outcome = wait(target, policy=policy, timeout=1.5, poll_interval=0.01)
+    if test and test[0] != "NONE":
+        assert outcome == Deadline(
+            DeadlineDetail(captured_services=1, unhealthy_containers=1)
+        )
+    else:
+        assert outcome == Success()
+
+
+def calls_of(path: Path) -> list[list[str]]:
+    return [json.loads(line) for line in (path / "calls").read_text().splitlines()]
+
+
+def inspection(identity: str) -> list[str]:
+    return ["inspect", "--type", "container", identity]
+
+
+def listings(path: Path) -> int:
+    return sum(call[0] == "compose" for call in calls_of(path))
+
+
+def track_processes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[subprocess.Popen[bytes]]:
+    processes: list[subprocess.Popen[bytes]] = []
+    popen = subprocess.Popen
+
+    def track(
+        args: list[str],
+        *,
+        stdout: int,
+        stderr: int,
+        env: Mapping[str, str],
+        pass_fds: Sequence[int],
+    ) -> subprocess.Popen[bytes]:
+        process = popen(args, stdout=stdout, stderr=stderr, env=env, pass_fds=pass_fds)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", track)
+    return processes
+
+
+def assert_reaped(processes: list[subprocess.Popen[bytes]]) -> None:
+    assert processes
+    for process in processes:
+        assert process.returncode is not None
+        assert process.stdout is not None and process.stdout.closed
+        assert process.stderr is not None and process.stderr.closed
+
+
+def hang_at(path: Path, args: list[str], occurrence: int) -> None:
+    data = json.loads((path / "data.json").read_text())
+    data["hang_at"] = {"args": args, "occurrence": occurrence}
+    (path / "data.json").write_text(json.dumps(data))
+
+
+def test_compose_capture_stores_full_ids_and_per_service_hashes(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    store_compose(
+        tmp_path,
+        snapshot(
+            container(A), container(B), container(C, service="db", config_hash="hash-2")
+        ),
+    )
+    target = compose_target(fake_cli, policy, ("web", "db"))
+    assert target.services == (
+        ComposeService(name="web", config_hash="hash-1", container_ids=(A, B)),
+        ComposeService(name="db", config_hash="hash-2", container_ids=(C,)),
+    )
+    assert calls_of(tmp_path)[0] == [*PS, "db"]
+
+
+def test_compose_listing_follows_configured_project_globals(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    fake_cli.client_config.compose_project_name = "demo"
+    store_compose(tmp_path, snapshot(container(A)))
+    compose_target(fake_cli, policy)
+    assert calls_of(tmp_path)[0] == [
+        "compose",
+        "--project-name",
+        "demo",
+        "ps",
+        "--all",
+        "--quiet",
+        "web",
+    ]
+
+
+def test_compose_healthy_and_unchecked_services_succeed_after_a_final_relist(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    store_compose(
+        tmp_path,
+        snapshot(container(A, health="healthy"), container(B, service="db")),
+    )
+    target = compose_target(fake_cli, policy, ("web", "db"))
+    assert wait(target, policy=policy, timeout=5, poll_interval=0.01) == Success()
+    listing = [*PS, "db"]
+    assert calls_of(tmp_path) == [listing, inspection(A), inspection(B)] * 3
+
+
+@pytest.mark.parametrize(
+    "blockers",
+    [
+        [{"health": "starting"}, {"health": "unhealthy"}],
+        [{"status": "restarting", "restarting": True}, {"status": "created"}],
+        [{"status": "paused", "paused": True}],
+    ],
+    ids=["health", "restart", "pause"],
+)
+def test_compose_keeps_polling_through_blockers_until_ready(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    blockers: list[dict[str, Any]],
+) -> None:
+    stages: list[dict[str, Any]] = [
+        {"health": "healthy"},
+        *blockers,
+        {"health": "healthy"},
+    ]
+    store_compose(tmp_path, *(snapshot(container(A, **stage)) for stage in stages))
+    target = compose_target(fake_cli, policy)
+    assert wait(target, policy=policy, timeout=10, poll_interval=0.01) == Success()
+    assert listings(tmp_path) == len(stages) + 1
+
+
+def test_compose_success_needs_the_final_pass_to_be_ready_too(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    ready, unhealthy = container(A, health="healthy"), container(A, health="unhealthy")
+    store_compose(
+        tmp_path, snapshot(ready), snapshot(ready), snapshot(unhealthy), snapshot(ready)
+    )
+    target = compose_target(fake_cli, policy)
+    assert wait(target, policy=policy, timeout=10, poll_interval=0.01) == Success()
+    assert listings(tmp_path) == 5
+
+
+def test_compose_final_pass_detects_change_after_all_are_ready(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    store_compose(
+        tmp_path,
+        snapshot(container(A)),
+        snapshot(container(A)),
+        snapshot(container(A), container(B)),
+    )
+    target = compose_target(fake_cli, policy)
+    result = wait(target, policy=policy, timeout=5, poll_interval=0.01)
+    assert result == Failure(reason="superseded")
+    assert listings(tmp_path) == 3
+
+
+@pytest.mark.parametrize(
+    "flags,expected",
+    [
+        ({"restarting": True}, DeadlineDetail(1, restarting_containers=1)),
+        ({"paused": True}, DeadlineDetail(1, paused_containers=1)),
+        ({"status": "exited"}, DeadlineDetail(1, non_running_containers=1)),
+        ({"health": "starting"}, DeadlineDetail(1, unhealthy_containers=1)),
+        (
+            {"status": "restarting", "restarting": True, "health": "unhealthy"},
+            DeadlineDetail(
+                1,
+                non_running_containers=1,
+                restarting_containers=1,
+                unhealthy_containers=1,
+            ),
+        ),
+    ],
+    ids=["restarting-flag", "paused-flag", "exited", "starting", "overlap"],
+)
+def test_compose_non_ready_states_poll_until_the_deadline(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    flags: dict[str, Any],
+    expected: DeadlineDetail,
+) -> None:
+    store_compose(tmp_path, snapshot(container(A, **flags)))
+    target = compose_target(fake_cli, policy)
+    result = wait(target, policy=policy, timeout=1.5, poll_interval=0.01)
+    assert result == Deadline(expected)
+
+
+def test_compose_counts_each_affected_service_once_across_a_mixed_project(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    names = ("web", "db", "cache", "queue", "ok")
+    store_compose(
+        tmp_path,
+        snapshot(
+            container(A, restarting=True),
+            container(B, service="db", paused=True, status="paused"),
+            container(C, service="cache", status="exited"),
+            container("d" * 64, service="cache", status="dead"),
+            container("e" * 64, service="queue", health="starting"),
+            container("f" * 64, service="ok", health="healthy"),
+        ),
+    )
+    target = compose_target(fake_cli, policy, names)
+    result = wait(target, policy=policy, timeout=2, poll_interval=0.01)
+    assert result == Deadline(
+        DeadlineDetail(
+            5,
+            non_running_containers=2,
+            restarting_containers=1,
+            paused_containers=1,
+            unhealthy_containers=1,
+        )
+    )
+
+
+def test_exited_zero_one_shot_is_a_blocker_unless_left_out_of_the_selection(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    store_compose(
+        tmp_path,
+        snapshot(container(A), container(B, service="migrate", status="exited")),
+    )
+    with_one_shot = compose_target(fake_cli, policy, ("web", "migrate"))
+    assert with_one_shot.services[1].container_ids == (B,)
+    blocked = wait(with_one_shot, policy=policy, timeout=1.5, poll_interval=0.01)
+    assert blocked == Deadline(DeadlineDetail(2, non_running_containers=1))
+    long_running = compose_target(fake_cli, policy)
+    assert wait(long_running, policy=policy, timeout=5, poll_interval=0.01) == Success()
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        snapshot(container(A), container(C)),
+        snapshot(container(A), container(B, config_hash="hash-2")),
+        snapshot(container(A), container(B), container(C)),
+        snapshot(container(A)),
+        snapshot(),
+        snapshot(container(A), listing=[A, B]),
+        snapshot(container(A), container(B, service="db")),
+    ],
+    ids=[
+        "recreated",
+        "config-hash",
+        "scaled-up",
+        "vanished",
+        "all-vanished",
+        "vanished-after-listing",
+        "relabelled",
+    ],
+)
+def test_compose_membership_or_hash_change_is_superseded(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    changed: dict[str, Any],
+) -> None:
+    store_compose(tmp_path, snapshot(container(A), container(B)), changed)
+    target = compose_target(fake_cli, policy)
+    result = wait(target, policy=policy, timeout=5, poll_interval=0.01)
+    assert result == Failure(reason="superseded")
+    assert "web" not in repr(result) and A not in repr(result)
+
+
+def test_compose_ignores_one_off_containers_in_capture_and_every_cycle(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    web = container(A)
+    one_off = container(C, oneoff=True, status="exited", health="unhealthy")
+    store_compose(
+        tmp_path, snapshot(web, one_off), snapshot(web), snapshot(web, one_off)
+    )
+    target = compose_target(fake_cli, policy)
+    assert target.services[0].container_ids == (A,)
+    assert wait(target, policy=policy, timeout=5, poll_interval=0.01) == Success()
+    assert inspection(C) in calls_of(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "members,services",
+    [
+        ([], ("web",)),
+        ([container(A)], ("web", "db")),
+        ([container(A, oneoff=True)], ("web",)),
+        ([container(A), container(B, config_hash="hash-2")], ("web",)),
+    ],
+    ids=["none", "missing-service", "only-one-off", "mixed-hashes"],
+)
+def test_compose_capture_rejects_unusable_selection(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    members: list[dict[str, Any]],
+    services: tuple[str, ...],
+) -> None:
+    store_compose(tmp_path, snapshot(*members))
+    result = capture_compose(fake_cli, services, policy=policy, timeout=5)
+    assert result == Failure(reason="unsupported")
+
+
+def broken(identity: str, kind: str) -> str:
+    wire = container(identity, health="healthy")
+    if kind == "not-json":
+        return "not json"
+    if kind == "no-results":
+        return "[]"
+    if kind == "two-results":
+        return json.dumps([wire, container(C)])
+    if kind == "short-id":
+        wire["Id"] = identity[:12]
+    elif kind == "other-id":
+        wire["Id"] = C
+    elif kind == "no-state":
+        del wire["State"]
+    elif kind == "string-flag":
+        wire["State"]["Paused"] = "false"
+    elif kind == "empty-status":
+        wire["State"]["Status"] = ""
+    elif kind == "numeric-health":
+        wire["State"]["Health"]["Status"] = 3
+    elif kind == "null-labels":
+        wire["Config"]["Labels"] = None
+    elif kind == "no-service-label":
+        del wire["Config"]["Labels"]["com.docker.compose.service"]
+    return json.dumps([wire])
+
+
+def corrupted(kind: str) -> dict[str, Any]:
+    damaged = snapshot(container(A, health="healthy"))
+    if kind == "duplicate-listing":
+        damaged["raw_listing"] = f"{A}\n{A}"
+    elif kind == "blank-listing":
+        damaged["raw_listing"] = f"{A}\n\n"
+    else:
+        damaged["raw"] = {A: broken(A, kind)}
+    return damaged
+
+
+MALFORMED = [
+    "not-json",
+    "no-results",
+    "two-results",
+    "short-id",
+    "other-id",
+    "no-state",
+    "string-flag",
+    "empty-status",
+    "numeric-health",
+    "null-labels",
+    "no-service-label",
+    "duplicate-listing",
+    "blank-listing",
+]
+
+
+@pytest.mark.parametrize("kind", MALFORMED)
+def test_compose_malformed_output_fails_without_payload_in_capture_and_wait(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path, kind: str
+) -> None:
+    store_compose(tmp_path, corrupted(kind))
+    captured = capture_compose(fake_cli, ("web",), policy=policy, timeout=5)
+    assert isinstance(captured, Failure) and captured.reason == "malformed"
+    store_compose(tmp_path, snapshot(container(A, health="healthy")), corrupted(kind))
+    result = wait(
+        compose_target(fake_cli, policy), policy=policy, timeout=5, poll_interval=0.01
+    )
+    assert isinstance(result, Failure) and result.reason == "malformed"
+    assert captured.cause is None and result.cause is None
+    assert not any(secret in repr(captured) + repr(result) for secret in SECRETS)
+
+
+def test_compose_capture_without_config_hash_label_is_malformed(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    unlabelled = container(A)
+    del unlabelled["Config"]["Labels"]["com.docker.compose.config-hash"]
+    store_compose(tmp_path, snapshot(unlabelled))
+    result = capture_compose(fake_cli, ("web",), policy=policy, timeout=5)
+    assert isinstance(result, Failure) and result.reason == "malformed"
+
+
+def test_compose_capture_rejects_a_listing_outside_the_selection(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    unselected = snapshot(container(A), container(B, service="db"))
+    unselected["raw_listing"] = f"{A}\n{B}"
+    store_compose(tmp_path, unselected)
+    result = capture_compose(fake_cli, ("web",), policy=policy, timeout=5)
+    assert result == Failure(reason="malformed")
+
+
+@pytest.mark.parametrize(
+    "services",
+    [(), ("web", "web"), ("",), (1,), ["web"], "web"],
+    ids=["empty", "duplicate", "blank", "not-text", "list", "text"],
+)
+def test_compose_capture_rejects_invalid_selection_before_launch(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path, services: object
+) -> None:
+    selection: Any = services
+    with pytest.raises(ValueError):
+        capture_compose(fake_cli, selection, policy=policy, timeout=5)
+    assert not (tmp_path / "calls").exists()
+
+
+def test_compose_dry_run_client_is_rejected_at_capture_and_wait(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    store_compose(tmp_path, snapshot(container(A)))
+    target = compose_target(fake_cli, policy)
+    launched = len(calls_of(tmp_path))
+    fake_cli.client_config.compose_dry_run = True
+    with pytest.raises(ValueError):
+        capture_compose(fake_cli, ("web",), policy=policy, timeout=5)
+    result = wait(target, policy=policy, timeout=5, poll_interval=0.01)
+    assert result == Failure(reason="unsupported")
+    assert len(calls_of(tmp_path)) == launched
+
+
+@pytest.mark.parametrize("command", ["listing", "inspect"])
+def test_compose_cancellation_reaps_hung_child(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    store_compose(tmp_path, snapshot(container(A)))
+    target = compose_target(fake_cli, policy)
+    hung = PS if command == "listing" else inspection(A)
+    hang_at(tmp_path, hung, 2)
+    processes = track_processes(monkeypatch)
+    cancel = Event()
+    results: list[object] = []
+    worker = Thread(
+        target=lambda: results.append(
+            wait(target, policy=policy, timeout=30, poll_interval=1, cancel=cancel)
+        )
+    )
+    worker.start()
+    end = time.monotonic() + 10
+    while not (tmp_path / "started").exists() and time.monotonic() < end:
+        Event().wait(0.01)
+    assert (tmp_path / "started").exists()
+    cancel.set()
+    worker.join(5)
+    assert not worker.is_alive()
+    assert results == [Cancelled()]
+    assert_reaped(processes)
+    assert calls_of(tmp_path)[-1] == hung
+
+
+def test_compose_cancel_is_noticed_within_sleep_slices(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pywhales.convergence._compose as compose_module
+
+    store_compose(tmp_path, snapshot(container(A, health="starting")))
+    target = compose_target(fake_cli, policy)
+    cancel = Event()
+    slices: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slices.append(seconds)
+        cancel.set()
+
+    clock = SimpleNamespace(monotonic=time.monotonic, sleep=sleep)
+    monkeypatch.setattr(compose_module, "time", clock)
+    result = wait(target, policy=policy, timeout=30, poll_interval=20, cancel=cancel)
+    assert result == Cancelled()
+    assert slices == [0.05]
+
+
+@pytest.mark.parametrize(
+    "health,hung,occurrence,expected",
+    [
+        ("starting", "listing", 2, None),
+        ("starting", "inspect", 3, DeadlineDetail(1, unhealthy_containers=1)),
+        ("healthy", "listing", 3, None),
+    ],
+    ids=["first-listing", "second-inspect", "final-pass"],
+)
+def test_compose_deadline_reaps_hung_child_and_keeps_last_complete_cycle(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    health: str,
+    hung: str,
+    occurrence: int,
+    expected: DeadlineDetail | None,
+) -> None:
+    store_compose(tmp_path, snapshot(container(A, health=health)))
+    target = compose_target(fake_cli, policy)
+    command = PS if hung == "listing" else inspection(A)
+    hang_at(tmp_path, command, occurrence)
+    processes = track_processes(monkeypatch)
+    result = wait(target, policy=policy, timeout=1.5, poll_interval=0.01)
+    assert result == Deadline(expected)
+    assert (tmp_path / "started").exists()
+    assert_reaped(processes)
+    assert calls_of(tmp_path)[-1] == command
+    assert calls_of(tmp_path).count(command) == occurrence
+
+
+def test_compose_every_launch_runs_under_the_observation_scope(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pywhales.convergence._wire as wire_module
+    from pywhales._observation import get_observation
+
+    cancel = Event()
+    scoped: list[bool] = []
+    launch = wire_module.run
+
+    def spy(args: Sequence[object]) -> str:
+        state = get_observation()
+        scoped.append(
+            state is not None
+            and state.policy == policy
+            and state.deadline is not None
+            and cancel in state.cancel_tokens
+        )
+        return launch(args)
+
+    monkeypatch.setattr(wire_module, "run", spy)
+    store_compose(tmp_path, snapshot(container(A)))
+    captured = capture_compose(
+        fake_cli, ("web",), policy=policy, timeout=5, cancel=cancel
+    )
+    assert isinstance(captured, ComposeTarget)
+    result = wait(captured, policy=policy, timeout=5, poll_interval=0.01, cancel=cancel)
+    assert result == Success()
+    assert len(scoped) == len(calls_of(tmp_path)) == 6 and all(scoped)
+
+
+@pytest.mark.parametrize("limit", ["max_argv_bytes", "max_response_bytes"])
+@pytest.mark.parametrize("stage", ["capture", "wait"])
+def test_compose_observation_limits_are_failures_with_the_cause(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    limit: str,
+    stage: str,
+) -> None:
+    from pywhales.exceptions import ObservationLimitError
+
+    store_compose(tmp_path, snapshot(container(A)))
+    bounded = replace(policy, **{limit: 1})
+    if stage == "capture":
+        result = capture_compose(fake_cli, ("web",), policy=bounded, timeout=5)
+    else:
+        target = compose_target(fake_cli, policy)
+        result = wait(target, policy=bounded, timeout=5, poll_interval=0.01)
+    assert isinstance(result, Failure) and result.reason == "observation"
+    assert isinstance(result.cause, ObservationLimitError)
+
+
+def test_compose_capture_deadline_has_no_detail(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    store_compose(tmp_path, snapshot(container(A)))
+    hang_at(tmp_path, PS, 1)
+    result = capture_compose(fake_cli, ("web",), policy=policy, timeout=1)
+    assert result == Deadline(None)
+    assert (tmp_path / "started").exists()
+
+
+def test_compose_capture_cancelled_before_launch_runs_nothing(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    cancel = Event()
+    cancel.set()
+    result = capture_compose(
+        fake_cli, ("web",), policy=policy, timeout=5, cancel=cancel
+    )
+    assert result == Cancelled()
+    assert not (tmp_path / "calls").exists()
+
+
+def test_compose_outcomes_never_carry_identities_labels_or_payloads(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+) -> None:
+    ready = snapshot(container(A, health="healthy"))
+    store_compose(tmp_path, ready)
+    target = compose_target(fake_cli, policy)
+    outcomes = [wait(target, policy=policy, timeout=5, poll_interval=0.01)]
+    store_compose(tmp_path, ready, snapshot(container(C)))
+    outcomes.append(wait(target, policy=policy, timeout=5, poll_interval=0.01))
+    store_compose(tmp_path, ready, snapshot(container(A, health="unhealthy")))
+    outcomes.append(wait(target, policy=policy, timeout=1.5, poll_interval=0.01))
+    store_compose(tmp_path, ready, corrupted("not-json"))
+    outcomes.append(wait(target, policy=policy, timeout=5, poll_interval=0.01))
+    assert [type(outcome) for outcome in outcomes] == [
+        Success,
+        Failure,
+        Deadline,
+        Failure,
+    ]
+    for outcome in outcomes:
+        shown = (
+            repr(outcome)
+            + str(outcome)
+            + str(vars(outcome) if hasattr(outcome, "__dict__") else "")
+        )
+        assert not any(secret in shown for secret in SECRETS)
+    assert not any(
+        isinstance(getattr(outcome, "detail", None), Mapping) for outcome in outcomes
+    )
+
+
+def test_compose_diagnostics_withhold_payloads_when_debugging(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("PYWHALES_DEBUG", "1")
+    caplog.set_level(logging.DEBUG)
+    store_compose(tmp_path, snapshot(container(A, health="healthy")))
+    target = compose_target(fake_cli, policy)
+    assert wait(target, policy=policy, timeout=5, poll_interval=0.01) == Success()
+    output = capfd.readouterr()
+    shown = output.out + output.err + caplog.text
+    assert not any(secret in shown for secret in ("credential-payload", A, "private"))
+
+
+WEB_SERVICE = ComposeService(name="web", config_hash="hash-1", container_ids=(A,))
+
+
+@pytest.mark.parametrize(
+    "fields_",
+    [
+        {"name": "web", "config_hash": "hash-1", "container_ids": ()},
+        {"name": "web", "config_hash": "hash-1", "container_ids": ("",)},
+        {"name": "web", "config_hash": "hash-1", "container_ids": (A, A)},
+        {"name": "web", "config_hash": "hash-1", "container_ids": [A]},
+        {"name": "", "config_hash": "hash-1", "container_ids": (A,)},
+        {"name": "web", "config_hash": "", "container_ids": (A,)},
+    ],
+    ids=["empty", "blank-id", "duplicate-id", "list", "no-name", "no-hash"],
+)
+def test_compose_service_rejects_invalid_identity(fields_: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        ComposeService(**fields_)
+
+
+@pytest.mark.parametrize(
+    "services",
+    [
+        (),
+        [WEB_SERVICE],
+        (WEB_SERVICE, WEB_SERVICE),
+        (
+            WEB_SERVICE,
+            ComposeService(name="db", config_hash="hash-1", container_ids=(A,)),
+        ),
+        ("web",),
+    ],
+    ids=["empty", "list", "duplicate-name", "duplicate-id", "not-service"],
+)
+def test_compose_target_rejects_invalid_membership(
+    fake_cli: DockerClient, services: object
+) -> None:
+    members: Any = services
+    with pytest.raises(ValueError):
+        ComposeTarget(client_config=fake_cli.client_config, services=members)
+
+
+def test_compose_target_is_frozen_and_keeps_config_out_of_equality_and_repr(
+    fake_cli: DockerClient,
+) -> None:
+    other = DockerClient(client_call=["private-docker"])
+    first = ComposeTarget(client_config=fake_cli.client_config, services=(WEB_SERVICE,))
+    second = ComposeTarget(client_config=other.client_config, services=(WEB_SERVICE,))
+    assert first == second
+    assert "client_config" not in repr(second) and "private-docker" not in repr(second)
+    for attribute in fields(first):
+        with pytest.raises(FrozenInstanceError):
+            setattr(first, attribute.name, None)
+    for attribute in fields(WEB_SERVICE):
+        with pytest.raises(FrozenInstanceError):
+            setattr(WEB_SERVICE, attribute.name, None)

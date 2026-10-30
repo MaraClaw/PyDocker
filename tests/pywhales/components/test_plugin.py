@@ -10,6 +10,7 @@ from pywhales import DockerClient
 from pywhales.client_config import ParsingError
 from pywhales.components.plugin.cli_wrapper import Plugin
 from pywhales.components.plugin.models import PluginInspectResult
+from pywhales.exceptions import DockerException, NoSuchContainer, NotASwarmManager
 from pywhales.test_utils import get_all_jsons
 
 test_plugin_name = "vieux/sshfs:latest"
@@ -208,3 +209,156 @@ def test_plugin_remove_single_selection_builds_argv_once(
         "--force",
         "alpha",
     ]
+
+
+NOT_A_MANAGER = (
+    b"Error response from daemon: This node is not a swarm manager. "
+    b'Use "docker swarm init" or "docker swarm join" to connect this node to swarm '
+    b"and try again."
+)
+PLUGIN_MISSING = b'Error response from daemon: plugin "resource" not found'
+PLUGIN_JSON = b'[{"Id":"resource"}]'
+# Each failure below is not this plugin's own not-found error.
+OTHER_FAILURES = [
+    pytest.param(b"permission denied", DockerException, id="command-failure"),
+    pytest.param(NOT_A_MANAGER, NotASwarmManager, id="not-a-swarm-manager"),
+    pytest.param(
+        b'Error response from daemon: plugin "resource" is enabled',
+        DockerException,
+        id="plugin-enabled",
+    ),
+    pytest.param(
+        b"Error response from daemon: No such container: resource",
+        NoSuchContainer,
+        id="container-not-found",
+    ),
+]
+
+
+def _plugin() -> tuple[DockerClient, Plugin]:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    return client, Plugin(client.client_config, "resource", is_immutable_id=True)
+
+
+@pytest.mark.parametrize("missing", [False, True], ids=["removed", "already-missing"])
+def test_plugin_cleanup_ignores_only_a_missing_plugin(missing: bool) -> None:
+    _, plugin = _plugin()
+    response = CompletedProcess(
+        [], 1 if missing else 0, b"", PLUGIN_MISSING if missing else b""
+    )
+    with patch("subprocess.run", return_value=response) as command, plugin:
+        pass
+    command.assert_called_once()
+    assert command.call_args.args[0] == [
+        "docker-test",
+        "plugin",
+        "remove",
+        "--force",
+        "resource",
+    ]
+
+
+@pytest.mark.parametrize(("stderr", "error_type"), OTHER_FAILURES)
+def test_plugin_cleanup_propagates_other_removal_failures(
+    stderr: bytes, error_type: type[DockerException]
+) -> None:
+    _, plugin = _plugin()
+    response = CompletedProcess([], 17, b"output", stderr)
+    with (
+        patch("subprocess.run", return_value=response) as command,
+        pytest.raises(DockerException) as raised,
+        plugin,
+    ):
+        pass
+    command.assert_called_once()
+    assert type(raised.value) is error_type
+    assert raised.value.return_code == 17
+    assert raised.value.stderr == stderr.decode()
+
+
+@pytest.mark.parametrize(("stderr", "error_type"), OTHER_FAILURES)
+def test_plugin_cleanup_failure_joins_the_body_error(
+    stderr: bytes, error_type: type[DockerException]
+) -> None:
+    _, plugin = _plugin()
+    body = RuntimeError("body")
+    response = CompletedProcess([], 17, b"", stderr)
+    with (
+        patch("subprocess.run", return_value=response),
+        pytest.raises(BaseExceptionGroup) as raised,
+        plugin,
+    ):
+        raise body
+    assert raised.value.message == "Plugin body and cleanup both failed"
+    assert raised.value.exceptions[0] is body
+    assert type(raised.value.exceptions[1]) is error_type
+
+
+def test_plugin_missing_at_cleanup_leaves_the_body_error_alone() -> None:
+    _, plugin = _plugin()
+    body = RuntimeError("body")
+    response = CompletedProcess([], 1, b"", PLUGIN_MISSING)
+    with (
+        patch("subprocess.run", return_value=response),
+        pytest.raises(RuntimeError) as raised,
+        plugin,
+    ):
+        raise body
+    assert raised.value is body
+
+
+def _exists(client: DockerClient, plugin: Plugin, *, as_handle: bool) -> bool:
+    return plugin.exists() if as_handle else client.plugin.exists("resource")
+
+
+@pytest.mark.parametrize("as_handle", [False, True], ids=["cli", "handle"])
+def test_plugin_exists_is_true_after_inspect(as_handle: bool) -> None:
+    client, plugin = _plugin()
+    response = CompletedProcess([], 0, PLUGIN_JSON, b"")
+    with patch("subprocess.run", return_value=response) as command:
+        found = _exists(client, plugin, as_handle=as_handle)
+    assert found is True
+    command.assert_called_once()
+    assert command.call_args.args[0] == [
+        "docker-test",
+        "plugin",
+        "inspect",
+        "resource",
+    ]
+
+
+@pytest.mark.parametrize("as_handle", [False, True], ids=["cli", "handle"])
+def test_plugin_exists_is_false_for_a_missing_plugin(as_handle: bool) -> None:
+    client, plugin = _plugin()
+    response = CompletedProcess([], 1, b"", PLUGIN_MISSING)
+    with patch("subprocess.run", return_value=response):
+        found = _exists(client, plugin, as_handle=as_handle)
+    assert found is False
+
+
+@pytest.mark.parametrize("as_handle", [False, True], ids=["cli", "handle"])
+@pytest.mark.parametrize(("stderr", "error_type"), OTHER_FAILURES)
+def test_plugin_exists_propagates_other_failures(
+    as_handle: bool, stderr: bytes, error_type: type[DockerException]
+) -> None:
+    client, plugin = _plugin()
+    response = CompletedProcess([], 1, b"", stderr)
+    with (
+        patch("subprocess.run", return_value=response),
+        pytest.raises(DockerException) as raised,
+    ):
+        _exists(client, plugin, as_handle=as_handle)
+    assert type(raised.value) is error_type
+
+
+def test_plugin_removed_inside_its_context_exits_cleanly(
+    docker_client: DockerClient,
+) -> None:
+    with docker_client.plugin.install(test_plugin_name) as my_plugin:
+        assert my_plugin.exists()
+        assert docker_client.plugin.exists(my_plugin.id)
+        my_plugin.remove(force=True)
+        assert not my_plugin.exists()
+    assert not my_plugin.exists()
+    assert not docker_client.plugin.exists(test_plugin_name)

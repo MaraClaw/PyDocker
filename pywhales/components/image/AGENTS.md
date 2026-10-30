@@ -14,15 +14,19 @@
 - `quiet=True` with `stream_logs=True` raises `ValueError` for both pull and push.
 - Nonstreamed transfers are eager; multiple unique references use a four-worker `ThreadPool`
   through `streams.py::map_in_contexts`. Each task enters its own `copy_context()` made in the
-  caller's thread; never share one `Context` across workers. Inside `observation()`, `quiet=False`
-  raises the same `ValueError` for one reference or many.
+  caller's thread; never share one `Context` across workers.
   Pull returns `Image` for a string or an ordered list for an iterable; push returns `None`.
+- Inside `observation()`, only nonstreamed transfers reject `quiet=False`: `run()` raises `ValueError`
+  for one reference or many. `stream_logs=True` accepts `quiet=False` there.
 - `pull([])` returns `[]`, or an empty generator with `stream_logs=True`; no child CLI starts.
   `push([])` returns `None` even with streaming enabled. Preserve this asymmetry.
-- Push batch-inspects deduplicated references before starting any transfer, including streamed ones.
-- At public `pull()`/`push()` entry, select non-`None` `image_stream_buffer_bytes`, otherwise
-  `stream_buffer_bytes`, once before consuming references or running push preflight. Keep the
-  independent override unchanged; don't write the fallback into config.
+- Validate `timeout` first: before references are consumed (strings, iterators, and `[]` alike), before
+  push inspection, and before any CLI lookup. Empty requests keep their results after a valid timeout.
+- Each transfer is timed from its own launch: every pool task, and every lazy or queued stream child once a
+  worker starts it, never from queueing or group creation. Push batch-inspects deduplicated references before
+  any transfer, streamed ones included; that inspection and a pull's handle inspection sit outside the deadline.
+- Snapshot the selected byte budget (image override, else general) once at public `pull()`/`push()` entry,
+  before consuming references or running push preflight.
 
 ## Multi-Image Streams
 
@@ -32,9 +36,9 @@
   observation scope even if iteration starts after its `with` block.
 - A single unique reference uses an eager `MappedProcessStream`, including duplicate-only input.
 - Records are `(image_reference, bytes)`; don't promise global ordering across images or pipes.
-- The first worker error stops sibling work and queued transfers without waiting for consumption.
-  Deliver that original error once through iteration, including after explicit `close()`.
-- Snapshot the selected budget, including `None`, for the group queue and every eager, lazy, or queued
+- The first worker error, a child's `DockerTimeout` included, stops sibling work and queued transfers without
+  waiting for consumption. Deliver that original error once through iteration, including after explicit `close()`.
+- Snapshot the selected byte budget, including `None`, for the group queue and every eager, lazy, or queued
   child stream. Later budget mutations affect new public operations only. Pass `None` explicitly at
   the shared boundary so it stays unbounded. A record exceeding a configured budget raises `BufferError`.
 
@@ -46,11 +50,13 @@
   Keep typed inspect snapshots on returned images instead of fetching them again immediately.
 - `copy_from()` copies through a temporary container; `copy_to()` copies into one and commits it,
   returning a new `Image` with optional `new_tag`. Both forward `pull`, defaulting to `"missing"`.
+  Their `timeout` times each launch they make (inspect through removal) via `execution_timeout()`, not config mutation.
 - `save()` rejects empty input and inspects references before saving. An output path returns `None`;
   omitted output returns an iterator of archive bytes. Don't treat it as a progress-log stream.
-- Direct archive load/save launches go through `_prepare_archive_launch`, which snapshots the
-  observation active at launch (first iteration for a lazy save) and applies its preflight; the
-  scope reaches `ArchiveDeadline` only when one is active. `save()` payloads aren't response-charged.
+- Byte-input `load()` and lazy `save()` launch through `_prepare_archive_launch`, which validates the selected
+  timeout (explicit, else the client default) before any process starts or input is read. A save's eager
+  inspection stays outside the save deadline: it runs in an `execution_timeout()` scope that ends before any
+  yield. A lazy save's clock starts at first iteration, using the client default as configured then.
 - Path-based `load()` uses the general stream budget, not the pull/push override.
   Direct archive load/save subprocesses snapshot `raw_diagnostics` before launch for failure rendering;
   preserve archive payloads, exception classes, and raw attributes. Don't promise archive memory bounds.
@@ -60,12 +66,14 @@
 
 - `tests/pywhales/test_container_image_enum_json.py`: nested config and graph-driver JSON contracts.
 - `tests/pywhales/components/test_image.py` contains mocked CLI and real child-process stream tests:
-  `test_empty_image_operations_keep_existing_result_shapes`,
-  `test_multiple_image_stream_has_lazy_owned_lifecycle`,
-  `test_multiple_image_stream_keeps_first_original_error`,
-  `test_batch_inspect_image_aliases_and_typed_snapshot`.
-- The same file covers fallback/override snapshots before preflight, lazy queued children,
-  backpressure, path-load budgets, and safe/raw direct-archive failures.
-- The same component file covers copy policy forwarding with `test_copy_from_pull` and
-  `test_copy_to_pull`; archive integration coverage includes `test_save_load` and
-  `test_save_iterator_bytes`. Read fixtures before choosing daemon-free selections.
+  `test_empty_image_operations_keep_existing_result_shapes`, `test_multiple_image_stream_has_lazy_owned_lifecycle`,
+  `test_multiple_image_stream_keeps_first_original_error`, `test_batch_inspect_image_aliases_and_typed_snapshot`.
+- The same file covers fallback/override snapshots before preflight, lazy queued children, backpressure,
+  path-load budgets, and safe/raw archive failures. Deadlines: `test_archive_lazy_save_explicit_timeout_starts_at_first_iteration`,
+  `test_multi_image_timeout_is_launch_relative_not_group_relative`, `test_image_save_bounds_eager_inspection_with_override`,
+  and `test_unquiet_transfer_in_a_scope_raises_the_same_error_for_one_or_many`.
+- Daemon-free transfer deadlines: `tests/pywhales/components/test_deadline_forwarding.py` (mocked, e.g.
+  `test_image_push_validates_before_consuming_or_inspecting`) and `test_command_deadlines.py` (local Python CLI,
+  e.g. `test_push_inspect_preflight_is_outside_the_explicit_budget`). Static shapes: `tests/pywhales/test_command_deadline_types.py`.
+- Copy forwarding uses `test_copy_from_pull` and `test_copy_to_pull`; archive integration includes `test_save_load`
+  and `test_save_iterator_bytes`. Read fixtures before choosing daemon-free selections.

@@ -1,6 +1,5 @@
 """Bounded, interruptible capture of a single local subprocess."""
 
-import errno
 import os
 import subprocess
 from collections.abc import Mapping, Sequence
@@ -8,9 +7,9 @@ from time import monotonic
 
 from pywhales._capture_pipes import CapturePipes
 from pywhales._execution_policy import ExecutionPolicy
-from pywhales._launch_limits import argv_size, check_launch
 from pywhales._observation import ObservationState, check_observation
-from pywhales._readiness import watch_exit
+from pywhales._readiness import CANCEL_CHECK, watch_exit
+from pywhales._scoped_launch import check_scoped_launch, native_argv_limit
 from pywhales.exceptions import (
     DockerTimeout,
     ObservationCancelled,
@@ -30,12 +29,10 @@ def bounded_capture(
     telemetry: ExecutionTelemetry,
 ) -> subprocess.CompletedProcess[bytes]:
     """Launch, capture within the observation budget, and reap the local child."""
-    check_observation(observation)
-    check_launch(args, env, observation.policy)
-    check_observation(observation)
+    check_scoped_launch(args, env, observation)
     telemetry.start()
     deadline = None if timeout is None else monotonic() + timeout
-    try:
+    with native_argv_limit(args):
         process = subprocess.Popen(
             args,
             stdout=subprocess.PIPE,
@@ -43,10 +40,6 @@ def bounded_capture(
             env=env,
             pass_fds=pass_fds,
         )
-    except OSError as error:
-        if error.errno == errno.E2BIG or getattr(error, "winerror", None) == 206:
-            raise ObservationLimitError("native_argv", None, argv_size(args)) from None
-        raise
 
     assert process.stdout is not None and process.stderr is not None
     stdout = bytearray()
@@ -92,7 +85,7 @@ def bounded_capture(
                         remaining = max(0, end - now)
                         wait = remaining if wait is None else min(wait, remaining)
                 if observation.cancel_tokens:
-                    wait = 0.05 if wait is None else min(wait, 0.05)
+                    wait = CANCEL_CHECK if wait is None else min(wait, CANCEL_CHECK)
                 for fd, available in pipes.ready(wait):
                     if available == 0:
                         pipes.discard(fd)

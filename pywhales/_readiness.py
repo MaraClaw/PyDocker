@@ -22,6 +22,13 @@ POLL_SLICE: Final = 0.01
 MAX_WAIT: Final = 86400.0
 """Longest single OS wait; longer deadlines are re-evaluated after each slice."""
 
+CANCEL_CHECK: Final = 0.05
+"""Longest wait, in seconds, while an observation cancel token must be polled.
+
+Cancel tokens are plain events that cannot wake a readiness wait, so this is the
+only timer a wait may add for them. Deadlines and pipe readiness need no slice.
+"""
+
 
 def bounded_wait(seconds: float | None) -> float | None:
     """Clamp a remaining time to one the OS and lock primitives accept.

@@ -4,8 +4,9 @@ The ty check analyzes assert_type calls inside _check_* functions. Pytest does
 not collect or execute these functions; they are not runtime Docker examples.
 """
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import assert_type
 
 from pywhales import (
@@ -22,7 +23,9 @@ from pywhales import (
 from pywhales.components.buildx.cli_wrapper import BakeResult
 from pywhales.components.buildx.imagetools.models import Manifest
 from pywhales.components.compose.models import ComposeEvent
+from pywhales.components.config.cli_wrapper import ConfigListFilter
 from pywhales.components.image.streams import EmptyImageStream, ImageStream
+from pywhales.components.system.cli_wrapper import SystemPruneFilter
 from pywhales.components.system.models import DockerEvent
 from pywhales.components.top import ComposeTopResult, ContainerTopResult
 from pywhales.utils import MappedProcessStream, ProcessStream, stream_stdout_and_stderr
@@ -124,3 +127,80 @@ def _check_buildx_return_contracts(client: DockerClient, stream: bool) -> None:
     assert_type(client.buildx.imagetools.create(), None)
     assert_type(client.buildx.imagetools.create(dry_run=True), Manifest)
     assert_type(client.buildx.imagetools.create(dry_run=stream), Manifest | None)
+
+
+def _check_mapping_or_pair_filter_contracts(
+    client: DockerClient,
+    mapping: Mapping[str, str],
+    pairs: Iterable[tuple[str, str]],
+    config_pairs: Iterable[ConfigListFilter],
+    prune_pairs: Iterable[SystemPruneFilter],
+    stream: bool,
+) -> None:
+    assert_type(client.config.list(), list[Config])
+    assert_type(client.config.list({"name": "app"}), list[Config])
+    assert_type(client.config.list(filters=mapping), list[Config])
+    assert_type(client.config.list(MappingProxyType({"id": "x"})), list[Config])
+    assert_type(
+        client.config.list(filters=[("name", "a"), ("label", "b"), ("id", "c")]),
+        list[Config],
+    )
+    assert_type(client.config.list(filters=(("name", "a"),)), list[Config])
+    assert_type(client.config.list(filters=config_pairs), list[Config])
+    assert_type(
+        client.config.list(filters=(("name", name) for name in ["a", "b"])),
+        list[Config],
+    )
+
+    assert_type(client.system.events(), MappedProcessStream[DockerEvent])
+    assert_type(
+        client.system.events(filters={"type": "container"}),
+        MappedProcessStream[DockerEvent],
+    )
+    assert_type(client.system.events(filters=mapping), MappedProcessStream[DockerEvent])
+    assert_type(
+        client.system.events(filters=[("event", "start"), ("event", "die")]),
+        MappedProcessStream[DockerEvent],
+    )
+    assert_type(client.system.events(filters=pairs), MappedProcessStream[DockerEvent])
+    assert_type(
+        client.system.events(None, None, iter([("type", "container")])),
+        MappedProcessStream[DockerEvent],
+    )
+
+    assert_type(client.system.prune(), None)
+    assert_type(client.system.prune(filters={"until": "24h"}), None)
+    assert_type(client.system.prune(filters=mapping), None)
+    assert_type(
+        client.system.prune(
+            filters=[("label!", "keep"), ("label", "tmp"), ("until", "24h")]
+        ),
+        None,
+    )
+    assert_type(client.system.prune(filters=prune_pairs), None)
+    assert_type(client.system.prune(True, True, (("until", "1h"),)), None)
+
+    assert_type(client.buildx.prune(filters={"until": "24h"}), None)
+    assert_type(client.buildx.prune(filters=mapping), None)
+    assert_type(client.buildx.prune(filters=[("until", "24h"), ("type", "x")]), None)
+    assert_type(client.buildx.prune(filters=pairs), None)
+    assert_type(
+        client.buildx.prune(filters={"until": "24h"}, stream_logs=True),
+        MappedProcessStream[str],
+    )
+    assert_type(
+        client.buildx.prune(filters=[("until", "24h")], stream_logs=True),
+        MappedProcessStream[str],
+    )
+    assert_type(
+        client.buildx.prune(True, [("until", "24h")], False),
+        None,
+    )
+    assert_type(
+        client.buildx.prune(filters=mapping, stream_logs=stream),
+        MappedProcessStream[str] | None,
+    )
+    assert_type(
+        client.buildx.prune(filters=pairs, stream_logs=stream),
+        MappedProcessStream[str] | None,
+    )

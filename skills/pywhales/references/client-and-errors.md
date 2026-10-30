@@ -125,5 +125,5 @@ to the plugin without a compatibility probe or automatic fallback.
 For opt-in sanitized execution telemetry or application-owned concurrency
 limits around specific calls, see
 [Telemetry and admission](telemetry-and-admission.md). For bounding batch
-inspection or waiting for Swarm convergence, see
-[Observation budgets and convergence](observation-and-convergence.md).
+inspection or waiting for Swarm service/stack or Compose project convergence,
+see [Observation budgets and convergence](observation-and-convergence.md).

@@ -8,7 +8,9 @@
 - `utils.py`: `run()`, stream factories/adapters, CLI value conversion, and JSON aliases.
 - `_process_stream.py`: process ownership and watchdog; `_stream_buffer.py`: queue accounting.
 - `_readiness.py`: wake latch, readiness wait, and child-exit helpers shared by pipe workers, capture, and archives.
-- `exceptions.py`: captured command details and stderr-based exception selection.
+- `exceptions.py`: captured command details and stderr-based exception selection. Kinds are an ordered
+  table of line-start patterns; add a kind there, not as a substring test. Names and context paths
+  can't pick a kind. Application stderr forwarded by `run`/`exec` can still be misclassified, by design.
 
 ## Commands And Configuration
 

@@ -25,6 +25,7 @@ from pywhales.components.config.models import (
     ConfigSpec,
     DockerObjectVersion,
 )
+from pywhales.exceptions import NoSuchConfig
 from pywhales.utils import (
     custom_parse_object_as,
     format_filters_for_cli,
@@ -43,8 +44,9 @@ type ConfigListFilter = (
 class Config(ReloadableObjectFromJson[ConfigInspectResult]):
     """Reloadable Swarm config handle using its originating client settings.
 
-    A context manager attempts removal on exit, including when its body fails.
-    If both body and cleanup fail, both exceptions are preserved in a group.
+    A context manager attempts removal on exit, including when its body fails,
+    and ignores a config that is already gone. Other cleanup failures are grouped
+    with any active body exception.
     """
 
     def __init__(
@@ -62,7 +64,10 @@ class Config(ReloadableObjectFromJson[ConfigInspectResult]):
         exc_tb: TracebackType | None,
     ) -> None:
         with resource_cleanup(exc_val, "Config body and cleanup both failed"):
-            self.remove()
+            try:
+                self.remove()
+            except NoSuchConfig:
+                return
 
     @override
     def _fetch_inspect_result_json(self, reference: str) -> dict[str, JsonValue]:
@@ -81,6 +86,10 @@ class Config(ReloadableObjectFromJson[ConfigInspectResult]):
         A context manager attempts this removal even if its body raises.
         """
         ConfigCLI(self.client_config).remove(self)
+
+    def exists(self) -> bool:
+        """Return whether this config can still be inspected in the Swarm."""
+        return ConfigCLI(self.client_config).exists(self.id)
 
     @property
     def id(self) -> str:
@@ -135,6 +144,23 @@ class ConfigCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--template-driver", template_driver)
         full_cmd += [name, file]
         return Config(self.client_config, run(full_cmd), is_immutable_id=True)
+
+    def exists(self, x: str) -> bool:
+        """Return whether a config can be inspected.
+
+        Args:
+            x: Config name or ID to inspect.
+
+        Returns:
+            False when Docker reports NoSuchConfig; True on successful inspection.
+            Other inspection failures propagate, including NotASwarmManager.
+        """
+        try:
+            self.inspect(x)
+        except NoSuchConfig:
+            return False
+        else:
+            return True
 
     @overload
     def inspect(self, x: str) -> Config: ...

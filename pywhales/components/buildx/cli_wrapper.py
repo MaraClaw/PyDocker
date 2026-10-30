@@ -1076,6 +1076,7 @@ class BuildxCLI(DockerCLICaller):
         filters: Mapping[str, str] | Iterable[BuildxPruneFilter] = MappingProxyType({}),
         *,
         stream_logs: Literal[True],
+        timeout: float | None = None,
     ) -> MappedProcessStream[str]: ...
 
     @overload
@@ -1084,6 +1085,8 @@ class BuildxCLI(DockerCLICaller):
         all: bool = False,
         filters: Mapping[str, str] | Iterable[BuildxPruneFilter] = MappingProxyType({}),
         stream_logs: Literal[False] = False,
+        *,
+        timeout: float | None = None,
     ) -> None: ...
 
     @overload
@@ -1092,6 +1095,8 @@ class BuildxCLI(DockerCLICaller):
         all: bool = False,
         filters: Mapping[str, str] | Iterable[BuildxPruneFilter] = MappingProxyType({}),
         stream_logs: bool = False,
+        *,
+        timeout: float | None = None,
     ) -> MappedProcessStream[str] | None: ...
 
     def prune(
@@ -1099,6 +1104,8 @@ class BuildxCLI(DockerCLICaller):
         all: bool = False,
         filters: Mapping[str, str] | Iterable[BuildxPruneFilter] = MappingProxyType({}),
         stream_logs: bool = False,
+        *,
+        timeout: float | None = None,
     ) -> MappedProcessStream[str] | None:
         """Remove build cache on the current builder.
 
@@ -1115,6 +1122,10 @@ class BuildxCLI(DockerCLICaller):
                 combination it rejects as a `DockerException`.
             stream_logs: Return owned decoded output instead of waiting for the
                 local CLI to finish.
+            timeout: Positive finite seconds from local CLI launch, replacing the
+                client default; `None` inherits it. This is a local deadline only
+                and is not passed to Buildx's own `prune --timeout` flag. Timing
+                advances while stream consumption pauses.
 
         Returns:
             An owned stream of text chunks when `stream_logs=True`; otherwise
@@ -1124,16 +1135,21 @@ class BuildxCLI(DockerCLICaller):
             TypeError: If filters is a string, bytes, or an iterable containing
                 anything but ``(key, value)`` tuples of strings. Raised before
                 the Docker executable is looked up.
+            ValueError: `timeout` is not positive and finite. Checked before
+                filters are consumed.
             DockerException: If the CLI rejects the command, for example because
                 of repeated filter keys.
+            DockerTimeout: The local CLI exceeds its deadline and is killed and
+                reaped without undoing cache removal.
         """
+        validate_timeout(timeout)
         filter_args = format_filters_for_cli(filters)
         full_cmd = Command([*self.docker_cmd, "buildx", "prune", "--force"])
         full_cmd.add_flag("--all", all)
         full_cmd.add_args_iterable_or_single("--filter", filter_args)
         if stream_logs:
-            return stream_buildx_logs(full_cmd)
-        run(full_cmd)
+            return stream_buildx_logs(full_cmd, timeout=timeout)
+        run(full_cmd, timeout=timeout)
 
     def remove(self, builder: Builder | str) -> None:
         """Remove a builder.

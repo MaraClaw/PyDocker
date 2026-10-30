@@ -363,3 +363,81 @@ def _check_volume_transfer_deadlines(
     assert_type(client.volume.copy((volume, "/src"), "dst", timeout=timeout), None)
     assert_type(client.volume.clone(volume, timeout=timeout), Volume)
     assert_type(volume.clone(timeout=timeout), Volume)
+
+
+def _check_image_push_deadlines(
+    client: DockerClient, timeout: float | None, flag: bool
+) -> None:
+    assert_type(client.image.push("app", timeout=timeout), None)
+    assert_type(client.image.push(["app"], timeout=timeout), None)
+    assert_type(client.push("app", timeout=timeout), None)
+    assert_type(docker.push(["app"], timeout=timeout), None)
+    assert_type(
+        client.image.push("app", stream_logs=True, timeout=timeout), ImageStream
+    )
+    assert_type(client.image.push("app", True, True, timeout=timeout), ImageStream)
+    assert_type(
+        client.image.push(["app"], stream_logs=True, timeout=timeout),
+        ImageStream | None,
+    )
+    assert_type(
+        client.image.push(["app"], True, True, timeout=timeout), ImageStream | None
+    )
+    assert_type(
+        client.image.push("app", stream_logs=flag, timeout=timeout), ImageStream | None
+    )
+    assert_type(docker.push(["app"], False, flag, timeout=timeout), ImageStream | None)
+
+
+def _check_container_start_deadlines(
+    client: DockerClient, container: Container, timeout: float | None, flag: bool
+) -> None:
+    assert_type(client.container.start("app", timeout=timeout), None)
+    assert_type(
+        client.container.start(["app"], flag, flag, flag, timeout=timeout),
+        None | str | ProcessStream,
+    )
+    assert_type(client.container.start("app", True, timeout=timeout), str)
+    assert_type(
+        client.container.start("app", True, stream=True, timeout=timeout), ProcessStream
+    )
+    assert_type(
+        client.container.start("app", flag, stream=flag, timeout=timeout),
+        str | ProcessStream | None,
+    )
+    assert_type(client.start("app", True, timeout=timeout), str)
+    assert_type(docker.start("app", True, stream=True, timeout=timeout), ProcessStream)
+    assert_type(container.start(timeout=timeout), None)
+    assert_type(container.start(True, timeout=timeout), str)
+    assert_type(container.start(True, stream=True, timeout=timeout), ProcessStream)
+    assert_type(
+        container.start(flag, flag, flag, "keys", timeout=timeout),
+        str | ProcessStream | None,
+    )
+
+
+def _check_compose_push_and_watch_deadlines(
+    client: DockerClient, timeout: float | None
+) -> None:
+    assert_type(client.compose.push(timeout=timeout), None)
+    assert_type(client.compose.push(["web"], timeout=timeout), None)
+    assert_type(client.compose.watch(timeout=timeout), ProcessStream | None)
+    assert_type(
+        client.compose.watch("web", no_up=True, prune=True, timeout=timeout),
+        ProcessStream | None,
+    )
+
+
+def _check_buildx_prune_deadlines(
+    client: DockerClient, timeout: float | None, flag: bool
+) -> None:
+    assert_type(client.buildx.prune(timeout=timeout), None)
+    assert_type(client.buildx.prune(True, {}, False, timeout=timeout), None)
+    assert_type(
+        client.buildx.prune(stream_logs=True, timeout=timeout),
+        MappedProcessStream[str],
+    )
+    assert_type(
+        client.buildx.prune(stream_logs=flag, timeout=timeout),
+        MappedProcessStream[str] | None,
+    )

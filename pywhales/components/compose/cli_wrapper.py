@@ -897,7 +897,12 @@ class ComposeCLI(DockerCLICaller):
         else:
             run(full_cmd, capture_stdout=False, capture_stderr=False, timeout=timeout)
 
-    def push(self, services: list[str] | None = None) -> None:
+    def push(
+        self,
+        services: list[str] | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> None:
         """Push service images.
 
         Args:
@@ -905,13 +910,23 @@ class ComposeCLI(DockerCLICaller):
                 services will be pushed. If no services are specified (`None`, the default
                 behavior) all images of all services are pushed.
                 If an empty list is provided, then the function call is a no-op.
+            timeout: Positive finite seconds from local CLI launch, replacing the
+                client default; `None` inherits it. Validated before selecting
+                services, even for an empty request.
+
+        Raises:
+            ValueError: `timeout` is not positive and finite.
+            DockerTimeout: The local CLI exceeds its deadline and is killed and
+                reaped, without undoing pushed layers or guaranteeing that
+                registry or daemon-side work stops.
         """
+        validate_timeout(timeout)
         full_cmd = Command([*self.docker_compose_cmd, "push"])
         if services == []:
             return
         elif services is not None:
             full_cmd += services
-        run(full_cmd)
+        run(full_cmd, timeout=timeout)
 
     def restart(
         self,
@@ -1613,6 +1628,7 @@ class ComposeCLI(DockerCLICaller):
         no_up: bool = False,
         quiet: bool = False,
         prune: bool = False,
+        timeout: float | None = None,
     ) -> ProcessStream | None:
         """Watch source changes and rebuild or refresh Compose services.
 
@@ -1626,6 +1642,10 @@ class ComposeCLI(DockerCLICaller):
             quiet: Hide build output; other watch messages can still be streamed.
             prune: Prune dangling images on rebuild. Defaults to `False`, explicitly
                 overriding the CLI's pruning default to avoid shared-image cleanup.
+            timeout: Positive finite seconds from local CLI launch, replacing the
+                client default; `None` inherits it. Timing advances while stream
+                consumption pauses. Validated before selecting services, even
+                for an empty request.
 
         Returns:
             `None` for `services=[]`; otherwise an owned stream of
@@ -1635,8 +1655,12 @@ class ComposeCLI(DockerCLICaller):
             removing running services.
 
         Raises:
+            ValueError: `timeout` is not positive and finite.
             DockerException: The local watch CLI exits unsuccessfully.
+            DockerTimeout: The local watch CLI exceeds its deadline and is killed
+                and reaped without stopping services.
         """
+        validate_timeout(timeout)
         if services == []:
             return None
         full_cmd = Command([*self.docker_compose_cmd, "watch"])
@@ -1645,7 +1669,7 @@ class ComposeCLI(DockerCLICaller):
         full_cmd.append(f"--prune={str(prune).lower()}")
         if services is not None:
             full_cmd += to_list(services)
-        return stream_stdout_and_stderr(full_cmd)
+        return stream_stdout_and_stderr(full_cmd, timeout=timeout)
 
     def version(self) -> str:
         """Return the Docker Compose version text reported by the CLI."""

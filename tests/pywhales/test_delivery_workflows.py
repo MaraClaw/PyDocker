@@ -38,12 +38,14 @@ from scripts.delivery.models import (
     Job,
     Jobs,
     Pull,
+    Receipt,
     Release,
     Repository,
     Run,
     Seal,
     Workflow,
 )
+from scripts.delivery.notes import section
 from scripts.delivery.pages import verify_pages_tar
 from scripts.delivery.publication import confirm, prepare
 from scripts.delivery.releases import release
@@ -54,6 +56,8 @@ WHEEL = "pywhales-0.6.1-py3-none-any.whl"
 SDIST = "pywhales-0.6.1.tar.gz"
 BASE_URL = "https://api.github.com/repos/owner/repo/"
 PYPI = "https://pypi.org/pypi/pywhales/0.6.1/json"
+NOTES = "### Added\n\n- Sealed release notes."
+CHANGELOG = f"# Changelog\n\n## 0.6.1\n\n{NOTES}\n\n## 0.6.0\n\n- Earlier release.\n"
 
 
 def zipped(files: dict[str, bytes], *, compression: int = zipfile.ZIP_STORED) -> bytes:
@@ -62,6 +66,14 @@ def zipped(files: dict[str, bytes], *, compression: int = zipfile.ZIP_STORED) ->
         for filename, data in files.items():
             archive.writestr(filename, data)
     return result.getvalue()
+
+
+def checkout(
+    root: Path, changelog: str | bytes = CHANGELOG, version: str = "0.6.1"
+) -> None:
+    (root / "pyproject.toml").write_text(f'[project]\nversion = "{version}"\n')
+    data = changelog.encode() if isinstance(changelog, str) else changelog
+    (root / "CHANGELOG.md").write_bytes(data)
 
 
 def distributions() -> dict[str, bytes]:
@@ -159,6 +171,7 @@ class Service(Transport):
             producer=identity(self.source),
             jobs={job.name: job.id for job in self.jobs},
             version="0.6.1",
+            notes=NOTES,
             distributions=describe(dist, self.material),
             site=describe(site, {"index.html": b"exact tested site", ".nojekyll": b""}),
         )
@@ -296,6 +309,15 @@ def service(monkeypatch: pytest.MonkeyPatch) -> Service:
     monkeypatch.setattr(cli, "Curl", lambda: instance)
     monkeypatch.setattr(publication.time, "sleep", lambda _seconds: None)
     return instance
+
+
+def uploaded(service: Service, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_SHA", service.source.head_sha)
+    for kind, artifact in zip(("DIST", "SITE"), service.artifacts()[:2], strict=True):
+        monkeypatch.setenv(f"{kind}_ARTIFACT_ID", str(artifact.id))
+        monkeypatch.setenv(
+            f"{kind}_ARTIFACT_DIGEST", artifact.digest.removeprefix("sha256:")
+        )
 
 
 def invoke(monkeypatch: pytest.MonkeyPatch, *arguments: str) -> int:
@@ -585,17 +607,209 @@ def test_trigger_attempt_must_match_even_with_valid_material(
 def test_sealer_checks_actual_uploader_ids_and_digests(
     service: Service, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("GITHUB_SHA", service.source.head_sha)
-    (tmp_path / "pyproject.toml").write_text('[project]\nversion = "0.6.1"\n')
-    for kind, artifact in zip(("DIST", "SITE"), service.artifacts()[:2], strict=True):
-        monkeypatch.setenv(f"{kind}_ARTIFACT_ID", str(artifact.id))
-        monkeypatch.setenv(
-            f"{kind}_ARTIFACT_DIGEST", artifact.digest.removeprefix("sha256:")
-        )
+    checkout(tmp_path)
+    uploaded(service, monkeypatch)
     assert seal(service.api, 100, tmp_path) == service.tested
     monkeypatch.setenv("DIST_ARTIFACT_ID", "987")
     with pytest.raises(Rejected, match="uploader output"):
         seal(service.api, 100, tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("changelog", "reason"),
+    [
+        ("# Changelog\n\n## 0.6.0\n\n- Earlier release.\n", "missing"),
+        (
+            "## 0.6.10\n\n- a\n\n## 0.6.1 (draft)\n\n- b\n\n### 0.6.1\n\n- c\n\n"
+            "##0.6.1\n- d\n\n## 0.6x1\n\n- e\n",
+            "missing",
+        ),
+        ("## 0.6.1\n\n   \n\n## 0.6.0\n\n- Earlier release.\n", "empty"),
+        ("## 0.6.1\n", "empty"),
+        (CHANGELOG + "\n## 0.6.1\n\n- Again.\n", "duplicated"),
+    ],
+    ids=["absent", "near-misses", "empty", "empty-at-end", "duplicated"],
+)
+def test_sealer_rejects_missing_empty_and_duplicated_notes(
+    service: Service,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changelog: str,
+    reason: str,
+) -> None:
+    checkout(tmp_path, changelog)
+    uploaded(service, monkeypatch)
+    with pytest.raises(Rejected, match=f"release notes section {reason}"):
+        seal(service.api, 100, tmp_path)
+
+
+def test_sealer_extracts_exact_section_from_crlf_changelog(
+    service: Service, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    changelog = (
+        "# Changelog\r\n\r\n## 0.6.10\r\n\r\n- Decoy.\r\n\r\n## 0.6.1\r\n\r\n\r\n"
+        "### Added\r\n\r\n- One.\r\n\r\n#### Detail\r\n\r\n### Fixed\r\n\r\n- Two.\r\n"
+        "\r\n\r\n## Unreleased\r\n\r\n- Later.\r\n"
+    )
+    checkout(tmp_path, changelog)
+    uploaded(service, monkeypatch)
+    assert seal(service.api, 100, tmp_path).notes == (
+        "### Added\n\n- One.\n\n#### Detail\n\n### Fixed\n\n- Two."
+    )
+
+
+def test_sealer_rejects_changelog_that_is_not_utf8(
+    service: Service, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkout(tmp_path, b"## 0.6.1\n\n- Caf\xe9.\n")
+    uploaded(service, monkeypatch)
+    with pytest.raises(Rejected, match="not UTF-8"):
+        seal(service.api, 100, tmp_path)
+
+
+def test_sealer_requires_a_changelog_file(
+    service: Service, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkout(tmp_path)
+    (tmp_path / "CHANGELOG.md").unlink()
+    uploaded(service, monkeypatch)
+    with pytest.raises(FileNotFoundError):
+        seal(service.api, 100, tmp_path)
+
+
+@pytest.mark.parametrize("excess", [False, True])
+def test_sealer_bounds_notes_in_utf8_bytes_not_characters(
+    service: Service,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    excess: bool,
+) -> None:
+    notes = "é" * 10
+    checkout(tmp_path, f"## 0.6.1\n\n{notes}\n")
+    uploaded(service, monkeypatch)
+    monkeypatch.setattr(limits, "NOTES_BYTES", len(notes.encode()) - int(excess))
+    if excess:
+        with pytest.raises(Rejected, match="release notes size budget"):
+            seal(service.api, 100, tmp_path)
+    else:
+        assert seal(service.api, 100, tmp_path).notes == notes
+
+
+@pytest.mark.parametrize("excess", [False, True])
+def test_sealer_independently_bounds_changelog_file(
+    service: Service,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    excess: bool,
+) -> None:
+    checkout(tmp_path)
+    monkeypatch.setattr(
+        limits, "CHANGELOG_BYTES", len(CHANGELOG.encode()) - int(excess)
+    )
+    uploaded(service, monkeypatch)
+    if excess:
+        with pytest.raises(Rejected, match="input byte budget exceeded"):
+            seal(service.api, 100, tmp_path)
+    else:
+        assert seal(service.api, 100, tmp_path) == service.tested
+
+
+def test_notes_budget_stays_inside_github_body_limit() -> None:
+    assert 0 < limits.NOTES_BYTES <= 125_000
+
+
+@pytest.mark.parametrize(
+    ("heading", "found"),
+    [
+        ("## 0.7.0rc1", True),
+        ("## 0.7.0rc10", False),
+        ("## 0.7.0rc1 (draft)", False),
+        ("## 0.7.0rc1 ", False),
+        ("### 0.7.0rc1", False),
+        ("##0.7.0rc1", False),
+        ("## 0.7x0rc1", False),
+    ],
+)
+def test_notes_heading_is_matched_exactly_without_patterns(
+    heading: str, found: bool
+) -> None:
+    text = f"# Changelog\n\n{heading}\n\n- Body.\n"
+    if found:
+        assert section(text, "0.7.0rc1") == "- Body."
+    else:
+        with pytest.raises(Rejected, match="section missing"):
+            section(text, "0.7.0rc1")
+
+
+@pytest.mark.parametrize(
+    ("changes", "removed"),
+    [
+        ({"schema_version": 1}, ()),
+        ({"schema_version": 1}, ("notes",)),
+        ({}, ("notes",)),
+        ({"notes": ""}, ()),
+        ({"notes": " \n"}, ()),
+        ({"notes": "x" * (limits.NOTES_BYTES + 1)}, ()),
+    ],
+)
+def test_seal_documents_require_schema_version_2_and_bounded_notes(
+    service: Service, changes: dict[str, JsonValue], removed: tuple[str, ...]
+) -> None:
+    data = json.loads(service.tested.model_dump_json()) | changes
+    for key in removed:
+        del data[key]
+    with pytest.raises(ValidationError):
+        Seal.model_validate_json(json.dumps(data))
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_receipt_documents_reject_schema_version_1(
+    service: Service, nested: bool
+) -> None:
+    service.receipted()
+    data = json.loads(confirm(service.api, 100).model_dump_json())
+    assert data["schema_version"] == 2 and data["seal"]["schema_version"] == 2
+    if nested:
+        data["seal"]["schema_version"] = 1
+    else:
+        data["schema_version"] = 1
+    with pytest.raises(ValidationError):
+        Receipt.model_validate_json(json.dumps(data))
+
+
+def test_consumers_reject_version_1_seal_and_receipt_artifacts(
+    service: Service,
+) -> None:
+    service.receipted()
+    document = confirm(service.api, 100)
+    old_receipt = json.loads(document.model_dump_json()) | {"schema_version": 1}
+    service.set_artifacts(
+        (
+            service.artifact(
+                4,
+                "receipt",
+                service.publisher,
+                {"receipt.json": json.dumps(old_receipt).encode()},
+            ),
+        ),
+        200,
+    )
+    with pytest.raises(ValidationError):
+        receipt(service.api, 200)
+
+    old_seal = json.loads(service.tested.model_dump_json()) | {"schema_version": 1}
+    dist, site, _seal = service.artifacts()
+    service.set_artifacts(
+        (
+            dist,
+            site,
+            service.artifact(
+                3, "seal", service.source, {"seal.json": json.dumps(old_seal).encode()}
+            ),
+        )
+    )
+    with pytest.raises(ValidationError):
+        producer(service.api, 100)
 
 
 @pytest.mark.parametrize(
@@ -1471,14 +1685,10 @@ def test_sealer_independently_bounds_project_configuration(
     excess: bool,
 ) -> None:
     project = ('[project]\nversion = "0.6.1"\n# ' + "é" * 64 + "\n").encode()
+    checkout(tmp_path)
     (tmp_path / "pyproject.toml").write_bytes(project)
     monkeypatch.setattr(limits, "PROJECT_BYTES", len(project) - int(excess))
-    monkeypatch.setenv("GITHUB_SHA", service.source.head_sha)
-    for kind, artifact in zip(("DIST", "SITE"), service.artifacts()[:2], strict=True):
-        monkeypatch.setenv(f"{kind}_ARTIFACT_ID", str(artifact.id))
-        monkeypatch.setenv(
-            f"{kind}_ARTIFACT_DIGEST", artifact.digest.removeprefix("sha256:")
-        )
+    uploaded(service, monkeypatch)
 
     if excess:
         with pytest.raises(Rejected, match="input byte budget exceeded"):

@@ -5,11 +5,12 @@ import tomllib
 from pathlib import Path
 
 from . import limits
-from .api import GitHub, require
+from .api import GitHub, Rejected, require
 from .artifacts import describe, download, inventory, linked, select, verified
 from .budgets import local
 from .distributions import inspect
 from .models import Artifact, Bundle, Identity, Job, Receipt, Run, Seal
+from .notes import section
 from .trust import (
     CHECKS,
     PRODUCER,
@@ -45,6 +46,17 @@ def bundle(api: GitHub, run: Run, jobs: tuple[Job, ...], kind: str) -> Artifact:
     artifact = select(inventory(api, run), name(kind, run))
     linked(artifact, run, job_named(jobs, owners[kind]))
     return artifact
+
+
+def release_notes(root: Path, version: str) -> str:
+    """Read the sealed checkout's CHANGELOG section for exactly this version."""
+    try:
+        text = local(root / "CHANGELOG.md", limits.CHANGELOG_BYTES).decode(
+            "utf-8", errors="strict"
+        )
+    except UnicodeDecodeError:
+        raise Rejected("changelog is not UTF-8") from None
+    return section(text, version)
 
 
 def seal(api: GitHub, run_id: int, root: Path) -> Seal:
@@ -86,11 +98,13 @@ def seal(api: GitHub, run_id: int, root: Path) -> Seal:
     version = tomllib.loads(
         local(root / "pyproject.toml", limits.PROJECT_BYTES).decode("utf-8")
     )["project"]["version"]
+    notes = release_notes(root, version)
     inspect(distributions, version)
     return Seal(
         producer=identity(run),
         jobs={job.name: job.id for job in jobs},
         version=version,
+        notes=notes,
         distributions=describe(dist, distributions),
         site=describe(site, download(api, site)),
     )

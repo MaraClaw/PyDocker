@@ -20,6 +20,11 @@ class ArchiveLimits:
 MIB: Final = 1024 * 1024
 RESPONSE_BYTES: Final = 64 * MIB
 PROJECT_BYTES: Final = MIB
+CHANGELOG_BYTES: Final = MIB
+# GitHub rejects release bodies above 125,000 characters. UTF-8 bytes are never
+# fewer than characters, so this byte cap also bounds the characters and leaves
+# 5,000 for any server-side difference when the body is read back.
+NOTES_BYTES: Final = 120_000
 DISTRIBUTION_BYTES: Final = 16 * MIB
 PAGES_TAR_BYTES: Final = 160 * MIB
 ARTIFACT: Final = ArchiveLimits(8192, 16 * MIB, 128 * MIB)

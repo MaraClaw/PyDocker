@@ -202,6 +202,26 @@ def test_events(docker_client: DockerClient) -> None:
     assert len(events) == 5
 
 
+def test_events_with_repeated_filter_pairs(docker_client: DockerClient) -> None:
+    name = random_name()
+    docker_client.run("hello-world", remove=True, name=name)
+    # Takes some time for events to register
+    sleep(1)
+    timestamp = datetime.now()
+    # Repeated event filters are alternatives, so start and die both match.
+    pairs = [("container", name), ("event", "start"), ("event", "die")]
+    events = list(docker_client.system.events(until=timestamp, filters=pairs))
+    assert {event.action for event in events} == {"start", "die"}
+    generated = list(
+        docker_client.system.events(until=timestamp, filters=(pair for pair in pairs))
+    )
+    assert [event.action for event in generated] == [event.action for event in events]
+    only_start = docker_client.system.events(
+        until=timestamp, filters=[("container", name), ("event", "start")]
+    )
+    assert {event.action for event in only_start} == {"start"}
+
+
 def test_events_no_arguments(docker_client: DockerClient) -> None:
     # The removal of the container will happen while we are waiting for an event
     container_name = random_name()
@@ -310,6 +330,37 @@ def test_prune_raises_exception_on_invalid_arguments(
     """Propagate Docker's rejection of an until filter combined with volumes."""
     with pytest.raises(DockerException):
         docker_client.system.prune(volumes=True, filters={"until": "1000000h"})
+
+
+def test_prune_accepts_repeatable_filter_pairs(ctr_client: DockerClient) -> None:
+    for container in ctr_client.container.list(filters=[("ancestor", "busybox")]):
+        ctr_client.container.remove(container, force=True)
+    image = ctr_client.pull("busybox")
+    assert image in ctr_client.image.list()
+
+    # image not pruned because it has neither of the two labels
+    ctr_client.system.prune(all=True, filters=[("label", "dne"), ("label", "dne2")])
+    assert image in ctr_client.image.list()
+
+    # image not pruned because it is not 1000000 hours old
+    ctr_client.system.prune(
+        all=True, filters=[("until", "1000000h"), ("label!", "dne")]
+    )
+    assert image in ctr_client.image.list()
+
+    # image pruned because it has neither of the two protection labels
+    ctr_client.system.prune(
+        all=True, filters=(pair for pair in [("label!", "dne"), ("label!", "dne2")])
+    )
+    assert image not in ctr_client.image.list()
+
+
+def test_prune_pair_filters_raise_exception_on_invalid_arguments(
+    docker_client: DockerClient,
+) -> None:
+    """Propagate Docker's rejection of an until filter combined with volumes."""
+    with pytest.raises(DockerException):
+        docker_client.system.prune(volumes=True, filters=[("until", "1000000h")])
 
 
 @pytest.mark.parametrize("consume", [False, True])

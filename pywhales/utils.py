@@ -693,6 +693,41 @@ def format_mapping_for_cli(
     return [f"{key}{separator}{value}" for key, value in mapping.items()]
 
 
+def format_filters_for_cli(
+    filters: Mapping[str, object] | Iterable[tuple[str, str]],
+) -> list[str]:
+    """Format Docker filters from a mapping or an iterable of pairs.
+
+    A mapping is formatted exactly as `format_mapping_for_cli` does, keeping its
+    existing output. Any other iterable is read exactly once into pairs that keep their
+    order and duplicate keys; nothing is deduplicated or reordered.
+
+    Args:
+        filters: Either a mapping of filter names to values, or an iterable of
+            ``(key, value)`` tuples whose items are both strings.
+
+    Returns:
+        One ``key=value`` string per filter, in input order.
+
+    Raises:
+        TypeError: If filters is a string or bytes-like value, or if a pair is
+            not a two-item tuple of strings. Raised before any command is built.
+    """
+    if isinstance(filters, Mapping):
+        return [f"{key}={value}" for key, value in filters.items()]
+    if isinstance(filters, str | bytes | bytearray):
+        raise TypeError("filters must be a mapping or an iterable of pairs")
+    pairs = list(filters)
+    for position, pair in enumerate(pairs):
+        if not isinstance(pair, tuple) or len(pair) != 2:
+            raise TypeError(
+                f"filter {position} must be a (key, value) tuple of two strings"
+            )
+        if not isinstance(pair[0], str) or not isinstance(pair[1], str):
+            raise TypeError(f"filter {position} must have a string key and value")
+    return [f"{key}={value}" for key, value in pairs]
+
+
 def read_env_file(env_file: Path) -> dict[str, str]:
     """Read simple environment assignments without shell or dotenv expansion.
 

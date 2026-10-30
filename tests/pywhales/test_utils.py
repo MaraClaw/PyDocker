@@ -5,14 +5,17 @@ and deadlines. Docker wrapper paths are patched where used; daemon availability
 does not replace the local process requirements.
 """
 
+import errno
 import os
 import select
 import signal
 import subprocess
 import sys
 import threading
+import traceback
 from collections import Counter
 from collections.abc import Buffer, Callable, Mapping, Sequence
+from contextvars import Context
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event, Thread
@@ -26,13 +29,20 @@ import pywhales._process_stream
 import pywhales._readiness
 import pywhales._stdin_pump
 import pywhales.utils
-from pywhales._observation import observation
-from pywhales._readiness import WakeLatch, wait_ready
+from pywhales._observation import ObservationState, _current_observation, observation
+from pywhales._readiness import CANCEL_CHECK, WakeLatch, wait_ready
 from pywhales._stdin_pump import StdinPump
 from pywhales._stream_buffer import StreamBuffer
 from pywhales.client_config import ClientConfig
 from pywhales.components.buildx.cli_wrapper import stream_buildx_logs
-from pywhales.exceptions import DockerException, DockerTimeout, NoSuchContainer
+from pywhales.exceptions import (
+    DockerException,
+    DockerTimeout,
+    NoSuchContainer,
+    ObservationCancelled,
+    ObservationLimitError,
+    ObservationTimeout,
+)
 from pywhales.inventory import InspectionPolicy
 from pywhales.telemetry._lifecycle import ExecutionTelemetry
 from pywhales.utils import (
@@ -1808,3 +1818,400 @@ def test_windows_waits_stay_bounded_slices(monkeypatch: pytest.MonkeyPatch) -> N
         assert monotonic() - started < 3
     finally:
         latch.close()
+
+
+_SCOPE_BLOCKER = (
+    "import os,threading; os.write(1,b'ready\\n'); threading.Event().wait()"
+)
+
+
+def _scope_policy(argv: int = 65536) -> InspectionPolicy:
+    return InspectionPolicy(
+        max_references=1, max_argv_bytes=argv, max_response_bytes=1024
+    )
+
+
+def _scoped_stream(
+    code: str = _SCOPE_BLOCKER,
+    *,
+    deadline: float | None = None,
+    cancel: Event | None = None,
+    timeout: float | None = None,
+) -> ProcessStream:
+    """Launch a stream inside a scope that has already exited when this returns."""
+    with observation(_scope_policy(), deadline=deadline, cancel=cancel):
+        return stream_stdout_and_stderr([sys.executable, "-c", code], timeout=timeout)
+
+
+def _forbid_launch(monkeypatch: pytest.MonkeyPatch) -> None:
+    def launch(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        raise AssertionError("a process was launched")
+
+    monkeypatch.setattr(pywhales.utils, "Popen", launch)
+
+
+def test_scoped_stream_never_launches_for_a_cancelled_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _forbid_launch(monkeypatch)
+    cancel = Event()
+    with (
+        pytest.raises(ObservationCancelled),
+        observation(_scope_policy(), cancel=cancel),
+    ):
+        cancel.set()
+        stream_stdout_and_stderr([sys.executable, "-c", "pass"])
+
+
+def test_scoped_stream_never_launches_for_an_expired_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _forbid_launch(monkeypatch)
+    expired = ObservationState(
+        policy=_scope_policy(),
+        deadline=monotonic() - 1,
+        cancel_tokens=(),
+        response_accounts=(),
+    )
+
+    def launch() -> ProcessStream:
+        _current_observation.set(expired)
+        return stream_stdout_and_stderr([sys.executable, "-c", "pass"])
+
+    with pytest.raises(ObservationTimeout):
+        Context().run(launch)
+
+
+def test_scoped_stream_checks_argv_and_environment_limits_before_launch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _forbid_launch(monkeypatch)
+    command = [sys.executable, "-c", "pass"]
+    with (
+        observation(_scope_policy(argv=8)),
+        pytest.raises(ObservationLimitError) as oversized,
+    ):
+        stream_stdout_and_stderr(command)
+    assert (oversized.value.reason, oversized.value.limit) == ("argv", 8)
+
+    invalid = {"PRIVATE": "secret\0value"}
+    with observation(_scope_policy()), pytest.raises(ObservationLimitError) as unsafe:
+        stream_stdout_and_stderr(command, env=invalid)
+    assert unsafe.value.reason == "environment"
+    assert "secret" not in "".join(traceback.format_exception(unsafe.value))
+
+    with pytest.raises(ValueError):
+        stream_stdout_and_stderr(command, env=invalid)
+
+
+def test_scoped_stream_translates_native_argv_refusal_only_when_observed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def refuse(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        raise OSError(errno.E2BIG, "secret")
+
+    monkeypatch.setattr(pywhales.utils, "Popen", refuse)
+    command = [sys.executable, "-c", "pass"]
+    with (
+        observation(_scope_policy()),
+        pytest.raises(ObservationLimitError) as scoped,
+    ):
+        stream_stdout_and_stderr(command)
+    assert scoped.value.reason == "native_argv"
+    assert scoped.value.__cause__ is None
+
+    with pytest.raises(OSError) as unscoped:
+        stream_stdout_and_stderr(command)
+    assert not isinstance(unscoped.value, ObservationLimitError)
+
+
+def test_scope_deadline_reaps_the_child_and_raises_observation_timeout() -> None:
+    stream = _scoped_stream(deadline=monotonic() + 0.4)
+    try:
+        assert next(stream) == ("stdout", b"ready\n")
+
+        # The watchdog stops the child although nothing iterates the stream.
+        assert stream._released.wait(timeout=3)
+        _assert_process_released(stream)
+        assert stream._process.returncode == -signal.SIGKILL
+        with pytest.raises(ObservationTimeout):
+            next(stream)
+        assert list(stream) == []
+    finally:
+        stream.close()
+
+
+def test_cancel_token_reaps_the_child_after_the_scope_exited() -> None:
+    cancel = Event()
+    stream = _scoped_stream(cancel=cancel)
+    try:
+        assert next(stream) == ("stdout", b"ready\n")
+
+        # The launch-time token still applies once the with block has ended.
+        cancel.set()
+        assert stream._released.wait(timeout=3)
+        _assert_process_released(stream)
+        with pytest.raises(ObservationCancelled):
+            next(stream)
+        assert list(stream) == []
+    finally:
+        stream.close()
+
+
+def test_cancellation_is_delivered_once_through_close_and_context_exit() -> None:
+    cancel = Event()
+    with _scoped_stream(cancel=cancel) as stream:
+        assert next(stream) == ("stdout", b"ready\n")
+        cancel.set()
+        stream.close()
+        stream.close()
+        assert stream._released.wait(timeout=3)
+        _assert_process_released(stream)
+        with pytest.raises(ObservationCancelled):
+            next(stream)
+    assert list(stream) == []
+
+
+def test_scope_error_is_raised_by_clean_context_exit() -> None:
+    cancel = Event()
+    stream = _scoped_stream(cancel=cancel)
+    with pytest.raises(ObservationCancelled), stream:
+        assert next(stream) == ("stdout", b"ready\n")
+        cancel.set()
+        assert stream._released.wait(timeout=3)
+    _assert_process_released(stream)
+
+
+def test_scope_error_does_not_replace_a_body_exception() -> None:
+    cancel = Event()
+    stream = _scoped_stream(cancel=cancel)
+    with pytest.raises(RuntimeError), stream:
+        cancel.set()
+        assert stream._released.wait(timeout=3)
+        raise RuntimeError("body")
+    _assert_process_released(stream)
+
+
+def test_cancellation_after_natural_exit_discards_undelivered_output() -> None:
+    cancel = Event()
+    stream = _scoped_stream("print('pending')", cancel=cancel)
+    try:
+        assert stream._released.wait(timeout=3)
+        assert stream._process.returncode == 0
+
+        cancel.set()
+
+        with pytest.raises(ObservationCancelled):
+            next(stream)
+        assert list(stream) == []
+    finally:
+        stream.close()
+
+
+def test_natural_completion_inside_a_live_scope_is_unchanged() -> None:
+    cancel = Event()
+    with observation(_scope_policy(), deadline=monotonic() + 30, cancel=cancel):
+        stream = stream_stdout_and_stderr([sys.executable, "-c", "print('done')"])
+        assert list(stream) == [("stdout", b"done\n")]
+    stream.close()
+    _assert_process_released(stream)
+
+
+@pytest.mark.parametrize("selected_first", [True, False])
+def test_command_deadline_precedes_only_a_later_scope_deadline(
+    selected_first: bool,
+) -> None:
+    expected = DockerTimeout if selected_first else ObservationTimeout
+    stream = _scoped_stream(
+        deadline=monotonic() + (30 if selected_first else 0.4),
+        timeout=0.4 if selected_first else 30,
+    )
+    try:
+        assert next(stream) == ("stdout", b"ready\n")
+        with pytest.raises(expected):
+            next(stream)
+        _assert_process_released(stream)
+    finally:
+        stream.close()
+
+
+def test_equal_command_and_scope_deadlines_report_the_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The launch deadline is computed from a pinned clock, so both are the same
+    # float; the strictly-earlier rule of captured runs gives the tie to the scope.
+    launch_clock = monotonic()
+    monkeypatch.setattr(pywhales.utils, "monotonic", lambda: launch_clock)
+    stream = _scoped_stream(deadline=launch_clock + 0.5, timeout=0.5)
+    try:
+        assert stream._deadline == launch_clock + 0.5
+        with pytest.raises(ObservationTimeout):
+            list(stream)
+        _assert_process_released(stream)
+    finally:
+        stream.close()
+
+
+def test_cancel_token_wins_over_command_and_scope_deadlines() -> None:
+    cancel = Event()
+    stream = _scoped_stream(deadline=monotonic() + 30, cancel=cancel, timeout=30)
+    try:
+        assert next(stream) == ("stdout", b"ready\n")
+        # Make every stop reason true at once; close() evaluates them together.
+        stream._deadline = monotonic() - 1
+        cancel.set()
+
+        stream.close()
+
+        with pytest.raises(ObservationCancelled):
+            next(stream)
+        _assert_process_released(stream)
+    finally:
+        stream.close()
+
+
+def test_unscoped_stream_ignores_a_later_scope_and_keeps_command_timeouts() -> None:
+    stream = stream_stdout_and_stderr([sys.executable, "-c", "print('free')"])
+    assert stream._observation is None
+    cancel = Event()
+    with (
+        pytest.raises(ObservationCancelled),
+        observation(_scope_policy(), cancel=cancel),
+    ):
+        cancel.set()
+        assert list(stream) == [("stdout", b"free\n")]
+    _assert_process_released(stream)
+
+    bounded = stream_stdout_and_stderr(
+        [sys.executable, "-c", _SCOPE_BLOCKER], timeout=0.2
+    )
+    try:
+        assert next(bounded) == ("stdout", b"ready\n")
+        with pytest.raises(DockerTimeout):
+            next(bounded)
+    finally:
+        bounded.close()
+
+
+def test_scope_without_deadline_or_token_adds_no_monitoring() -> None:
+    with observation(_scope_policy()):
+        stream = stream_stdout_and_stderr(
+            [sys.executable, "-c", "input()"], pipe_stdin=True
+        )
+    try:
+        assert stream._observation is None
+        assert stream._wake_in() is None
+    finally:
+        stream.close()
+    _assert_process_released(stream)
+
+
+def test_early_close_of_scoped_stream_closes_pipes_and_joins_workers() -> None:
+    cancel = Event()
+    for consume in (False, True):
+        stream = _scoped_stream(cancel=cancel)
+        if consume:
+            assert next(stream) == ("stdout", b"ready\n")
+        stream.close()
+        stream.close()
+        assert list(stream) == []
+        _assert_process_released(stream)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX fork and inherited fds")
+def test_scope_deadline_stops_a_stream_whose_descendant_holds_the_pipes() -> None:
+    release_read, release_write = os.pipe()
+    status_read, status_write = os.pipe()
+    with (
+        os.fdopen(release_read, "rb", buffering=0) as release_reader,
+        os.fdopen(release_write, "wb", buffering=0) as release_writer,
+        os.fdopen(status_read, "rb", buffering=0) as status_reader,
+        os.fdopen(status_write, "wb", buffering=0) as status_writer,
+    ):
+        # Given a child that exits while its descendant keeps both pipes open.
+        with observation(_scope_policy(), deadline=monotonic() + 0.6):
+            stream = stream_stdout_and_stderr(
+                [
+                    sys.executable,
+                    "-c",
+                    _HOLDER,
+                    str(release_reader.fileno()),
+                    str(status_writer.fileno()),
+                ],
+                pass_fds=(release_reader.fileno(), status_writer.fileno()),
+            )
+        try:
+            release_reader.close()
+            status_writer.close()
+            assert select.select([status_reader], [], [], 3)[0]
+            assert status_reader.read(1) == b"R"
+
+            # When the scope deadline passes while the readers still wait.
+            assert stream._released.wait(timeout=3)
+
+            # Then the readers were stopped and the error is delivered once.
+            _assert_process_released(stream)
+            with pytest.raises(ObservationTimeout):
+                next(stream)
+            assert list(stream) == []
+        finally:
+            release_writer.close()
+            stream.close()
+            assert select.select([status_reader], [], [], 3)[0]
+            assert status_reader.read(1) == b""
+
+
+@dataclass
+class StreamWaits:
+    """Timers requested by worker-thread condition waits, and the first request."""
+
+    timeouts: list[float] = field(default_factory=list)
+    first: Event = field(default_factory=Event)
+
+
+@pytest.fixture
+def stream_waits(monkeypatch: pytest.MonkeyPatch) -> StreamWaits:
+    """Record every timed condition wait made off the main thread."""
+    log = StreamWaits()
+    wait = threading.Condition.wait
+
+    def record(self: threading.Condition, timeout: float | None = None) -> bool:
+        if timeout is not None and threading.current_thread() is not (
+            threading.main_thread()
+        ):
+            log.timeouts.append(timeout)
+            log.first.set()
+        return wait(self, timeout)
+
+    monkeypatch.setattr(threading.Condition, "wait", record)
+    return log
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX readiness waits")
+def test_scoped_stream_waits_use_only_the_bounded_cancel_check(
+    stream_waits: StreamWaits,
+) -> None:
+    cancel = Event()
+    stream = _scoped_stream(cancel=cancel)
+    try:
+        assert stream_waits.first.wait(timeout=3)
+        cancel.set()
+        assert stream._released.wait(timeout=3)
+    finally:
+        stream.close()
+    assert all(0 <= timeout <= CANCEL_CHECK for timeout in stream_waits.timeouts)
+    _assert_process_released(stream)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX readiness waits")
+def test_scoped_stream_deadline_wait_is_one_wait_for_the_remaining_time(
+    stream_waits: StreamWaits,
+) -> None:
+    stream = _scoped_stream(deadline=monotonic() + 30)
+    try:
+        assert stream_waits.first.wait(timeout=3)
+        (timeout,) = stream_waits.timeouts
+        assert 29 < timeout <= 30
+    finally:
+        stream.close()
+    _assert_process_released(stream)

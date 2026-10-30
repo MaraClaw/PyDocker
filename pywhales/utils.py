@@ -16,6 +16,7 @@ import signal
 import subprocess
 import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
 from subprocess import PIPE, Popen
@@ -577,13 +578,30 @@ def _start_process(
         deadline advances independently of iteration; early consumers must
         close it or use its context manager.
 
+    Inside an active observation the launch first checks cancellation and the
+    argv and environment limits, as a captured run does, and the stream keeps
+    that scope's deadline and tokens after the scope exits.
+
     Raises:
         ValueError: If timeout or the selected byte budget is invalid, including
             boolean values. Validation occurs before process launch.
         OSError: If the executable cannot be launched.
+        ObservationCancelled: If an active observation was cancelled.
+        ObservationTimeout: If an active observation deadline has passed.
+        ObservationLimitError: If an active observation rejects the argv or
+            environment, before any process starts.
     """
     validate_timeout(timeout)
-    policy = get_execution_policy(full_cmd)
+    from pywhales._observation import get_observation
+    from pywhales._scoped_launch import (
+        check_scoped_launch,
+        environment_limit,
+        native_argv_limit,
+    )
+
+    observation = get_observation()
+    with environment_limit(observation is not None):
+        policy = get_execution_policy(full_cmd)
     timeout = policy.default_timeout if timeout is None else timeout
     validate_timeout(timeout)
     if buffer_bytes is DEFAULT_BUFFER:
@@ -592,29 +610,39 @@ def _start_process(
         type(buffer_bytes) is not int or buffer_bytes <= 0
     ):
         raise ValueError("buffer_bytes must be a positive integer or None")
-    subprocess_env = resolve_environment(
-        policy.environment, env, frozen=policy.frozen_environment
-    )
+    with environment_limit(observation is not None):
+        subprocess_env = resolve_environment(
+            policy.environment, env, frozen=policy.frozen_environment
+        )
 
     telemetry = ExecutionTelemetry(policy.telemetry_observer, "stream")
+    args: list[str] | None = None
+    if observation is not None:
+        # Like a captured run, reject before telemetry sees a launch or a
+        # process exists: a stopped scope or an oversized argv/environment.
+        args = [str(x) for x in full_cmd]
+        subprocess_env = finalize_environment(subprocess_env, args)
+        check_scoped_launch(args, subprocess_env, observation)
     telemetry.start()
     deadline = None if timeout is None else monotonic() + timeout
     try:
-        args = [str(x) for x in full_cmd]
-        subprocess_env = finalize_environment(subprocess_env, args)
+        if args is None:
+            args = [str(x) for x in full_cmd]
+            subprocess_env = finalize_environment(subprocess_env, args)
         _log_command(
             args,
             subprocess_env,
             raw_diagnostics=policy.raw_diagnostics,
         )
-        process = Popen(
-            args,
-            stdin=PIPE if pipe_stdin else None,
-            stdout=PIPE,
-            stderr=PIPE,
-            env=subprocess_env,
-            pass_fds=pass_fds,
-        )
+        with nullcontext() if observation is None else native_argv_limit(args):
+            process = Popen(
+                args,
+                stdin=PIPE if pipe_stdin else None,
+                stdout=PIPE,
+                stderr=PIPE,
+                env=subprocess_env,
+                pass_fds=pass_fds,
+            )
         return ProcessStream(
             process,
             args,
@@ -622,6 +650,7 @@ def _start_process(
             buffer_bytes=buffer_bytes,
             raw_diagnostics=policy.raw_diagnostics,
             telemetry=telemetry if policy.telemetry_observer is not None else None,
+            observation=observation,
         )
     except BaseException:
         telemetry.finish("failure")
@@ -644,6 +673,14 @@ def stream_stdout_and_stderr(
     or never begins. Exhaustion reaps the child; early exit requires a context
     manager or close(), because a bare break does not clean up. Closure or
     timeout kills only the local CLI, not daemon-managed resources.
+
+    Started inside ``observation()``, the launch checks cancellation and the
+    argv and environment limits before ``Popen``, and the stream keeps that
+    scope's deadline and cancel tokens after the ``with`` block exits. When the
+    scope ends first, the local CLI is killed and reaped and iteration raises
+    ``ObservationTimeout`` or ``ObservationCancelled``; a per-call ``timeout``
+    that is strictly earlier than the scope deadline still raises
+    ``DockerTimeout``. Response-byte accounting does not cover stream payloads.
 
     Args:
         full_cmd: Executable and arguments; an originating policy carrier is
@@ -671,7 +708,12 @@ def stream_stdout_and_stderr(
         ValueError: Before launch if timeout or the selected budget is invalid;
             booleans are rejected.
         OSError: If process launch fails. Later read errors, BufferError,
-            DockerException, and DockerTimeout are delivered by the stream.
+            DockerException, DockerTimeout, ObservationTimeout, and
+            ObservationCancelled are delivered by the stream.
+        ObservationCancelled: Before launch if an active observation was cancelled.
+        ObservationTimeout: Before launch if an active observation has expired.
+        ObservationLimitError: Before launch if an active observation rejects the
+            argv or environment size.
     """
     return _start_process(
         full_cmd, env, pass_fds, pipe_stdin, timeout=timeout, buffer_bytes=buffer_bytes

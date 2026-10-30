@@ -33,6 +33,26 @@ def check_scoped_launch(
 
 
 @contextmanager
+def environment_limit(observed: bool) -> Generator[None]:
+    """Report an invalid launch environment as an observation limit when observed.
+
+    Args:
+        observed: Whether an observation scope is active for the launch.
+
+    Raises:
+        ObservationLimitError: If ``observed`` and the block rejects the
+            environment with ``TypeError`` or ``ValueError``; the original error
+            is dropped so no entry contents are exposed. Otherwise it propagates.
+    """
+    try:
+        yield
+    except TypeError, ValueError:
+        if observed:
+            raise ObservationLimitError("environment", None, None) from None
+        raise
+
+
+@contextmanager
 def native_argv_limit(args: Sequence[str]) -> Generator[None]:
     """Report an operating-system argument-size refusal as an observation limit.
 

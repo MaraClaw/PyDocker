@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from pywhales._observation import check_observation, observation
 from pywhales.client_config import ClientNotFoundError, ParsingError
-from pywhales.convergence._service import ServiceObservation, check_service
+from pywhales.convergence._service import ServiceObservation, check_service, summarize
 from pywhales.convergence._types import (
     Cancelled,
     Deadline,
@@ -185,34 +185,7 @@ def wait(
                             ready = False
                             rechecked_updates += 1
                 check_observation(state)
-                last_complete = DeadlineDetail(
-                    captured_services=len(targets),
-                    missing_ready_slots=sum(
-                        item.missing_ready_slots for item in observations
-                    ),
-                    duplicate_slots=sum(item.duplicate_slots for item in observations),
-                    stale_templates=sum(item.stale_templates for item in observations),
-                    non_running_tasks=sum(
-                        item.non_running_tasks for item in observations
-                    ),
-                    invalid_task_shape=sum(
-                        item.invalid_task_shape for item in observations
-                    ),
-                    ongoing_updates=sum(item.ongoing_updates for item in observations)
-                    + rechecked_updates,
-                    missing_ready_nodes=sum(
-                        item.missing_ready_nodes for item in observations
-                    ),
-                    duplicate_node_assignments=sum(
-                        item.duplicate_node_assignments for item in observations
-                    ),
-                    missing_node_assignments=sum(
-                        item.missing_node_assignments for item in observations
-                    ),
-                    outside_approved_nodes=sum(
-                        item.outside_approved_nodes for item in observations
-                    ),
-                )
+                last_complete = summarize(observations, rechecked_updates)
                 if ready:
                     return Success()
                 next_poll = time.monotonic() + poll_interval

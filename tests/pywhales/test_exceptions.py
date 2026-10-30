@@ -226,6 +226,119 @@ def test_new_kinds_are_classified(
 
 
 @pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        pytest.param(
+            b"Error response from daemon: cannot kill container: DOODODGOIHURHURI: "
+            b"No such container: DOODODGOIHURHURI",
+            NoSuchContainer,
+            id="kill-real",
+        ),
+        pytest.param(
+            b"failed to rename container: Error response from daemon: "
+            b"No such container: dodueizbgueirzhgueoz",
+            NoSuchContainer,
+            id="rename-real",
+        ),
+        pytest.param(
+            b"could not fetch unlock key: Error response from daemon: "
+            b"This node is not a swarm manager. Use ...",
+            NotASwarmManager,
+            id="unlock-key-real",
+        ),
+        pytest.param(
+            b"ERROR RESPONSE FROM DAEMON: CANNOT KILL CONTAINER: x: NO SUCH CONTAINER: x",
+            NoSuchContainer,
+            id="kill-case",
+        ),
+        pytest.param(
+            b"noise\nfailed to rename container: Error response from daemon: "
+            b"No such container: x\n",
+            NoSuchContainer,
+            id="rename-later-line",
+        ),
+        pytest.param(
+            b"Error response from daemon: cannot kill container: a: "
+            b"No such container: a\n"
+            b"Error response from daemon: cannot kill container: b: No such image: b",
+            NoSuchImage,
+            id="kill-precedence",
+        ),
+    ],
+)
+def test_operation_wrappers_around_daemon_errors_are_classified(
+    stderr: bytes, expected: type[DockerException]
+) -> None:
+    assert get_docker_exception_type(stderr) is expected
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        pytest.param(
+            b"cannot kill container: x: No such container: x", id="kill-no-marker"
+        ),
+        pytest.param(
+            b"Error: cannot kill container: x: No such container: x",
+            id="kill-error-prefix",
+        ),
+        pytest.param(
+            b"failed to rename container: No such container: x", id="rename-no-marker"
+        ),
+        pytest.param(
+            b"failed to rename container: Error: No such container: x",
+            id="rename-error-prefix",
+        ),
+        pytest.param(
+            b"could not fetch unlock key: Error: This node is not a swarm manager",
+            id="unlock-key-error-prefix",
+        ),
+        pytest.param(
+            b"cannot kill container: Error response from daemon: No such container: x",
+            id="kill-before-marker",
+        ),
+        pytest.param(
+            b"Error response from daemon: failed to rename container: "
+            b"No such container: x",
+            id="rename-after-marker",
+        ),
+        pytest.param(
+            b"prefix failed to rename container: Error response from daemon: "
+            b"No such container: x",
+            id="rename-mid-line",
+        ),
+        pytest.param(
+            b"a b: failed to rename container: Error response from daemon: "
+            b"No such container: x",
+            id="rename-behind-extra-token",
+        ),
+        pytest.param(
+            b"Error response from daemon: cannot kill container: a b: "
+            b"No such container: x",
+            id="kill-name-with-whitespace",
+        ),
+        pytest.param(
+            b"Error response from daemon: cannot kill container: x: failed: "
+            b"No such container: x",
+            id="kill-two-tokens",
+        ),
+        pytest.param(
+            b"Error response from daemon: cannot kill container: x: "
+            b"Container x is not running",
+            id="kill-other-failure",
+        ),
+        pytest.param(
+            b"failed to rename container: Error response from daemon: "
+            b"Conflict. The container name is in use",
+            id="rename-other-failure",
+        ),
+    ],
+)
+def test_operation_wrappers_stay_anchored(stderr: bytes) -> None:
+    assert get_docker_exception_type(stderr) is DockerException
+
+
+@pytest.mark.parametrize(
     "error_type", [NoSuchConfig, NoSuchSecret, NoSuchPlugin, NoSuchContext]
 )
 def test_new_kinds_directly_extend_docker_exception(
@@ -353,6 +466,19 @@ FORMS = [
     ),
     pytest.param('context "{}" does not exist', NoSuchContext),
     pytest.param("{0}: Error response from daemon: " + NOT_A_MANAGER, NotASwarmManager),
+    pytest.param(
+        "Error response from daemon: cannot kill container: {0}: "
+        "No such container: {0}",
+        NoSuchContainer,
+    ),
+    pytest.param(
+        "failed to rename container: Error response from daemon: No such container: {}",
+        NoSuchContainer,
+    ),
+    pytest.param(
+        "could not fetch unlock key: Error response from daemon: " + NOT_A_MANAGER,
+        NotASwarmManager,
+    ),
 ]
 
 

@@ -166,9 +166,16 @@ class ObservationCancelled(Exception):
 
 
 # Docker prefixes failures with the daemon marker, optionally led by one
-# whitespace-free token (``docker:`` or a service name in ``service scale``),
-# or with ``Error:``. The bare token is allowed only before the daemon marker.
-_PREFIX = r"(?:(?:\S+: )?Error response from daemon: |Error: )?"
+# whitespace-free token (``docker:`` or a service name in ``service scale``) or
+# one of two fixed CLI operation phrases, or with ``Error:``. After the marker
+# the daemon may add its own ``cannot kill container: <name>: `` phrase. Each
+# is allowed only at its listed position, never searched for elsewhere.
+_CLI_OPERATION = r"(?:failed to rename container|could not fetch unlock key): "
+_DAEMON_OPERATION = r"cannot kill container: \S+: "
+_PREFIX = (
+    rf"(?:(?:\S+: |{_CLI_OPERATION})?Error response from daemon: "
+    rf"(?:{_DAEMON_OPERATION})?|Error: )?"
+)
 # Docker resource names contain no whitespace, so a name is one token.
 _NAME = r"\S+"
 _QUOTED_NAME = r'"[^"\s]+"'
@@ -225,7 +232,9 @@ def get_docker_exception_type(output: bytes | None) -> type[DockerException]:
 
     A kind is recognized only when a line starts with its own phrase, compared
     case-insensitively after an optional ``Error response from daemon: ``,
-    ``<token>: Error response from daemon: ``, or ``Error: `` prefix. The phrases
+    ``<token>: Error response from daemon: ``, or ``Error: `` prefix. The daemon
+    marker may also follow ``failed to rename container: `` or ``could not fetch
+    unlock key: `` and be followed by ``cannot kill container: <name>: ``. The phrases
     are ``No such <kind>`` for image, service, container, volume, config, secret,
     and plugin; ``<kind> <name> not found`` for service, network, config, and
     secret; ``get <name>: no such volume``; ``plugin "<name>" not found``;

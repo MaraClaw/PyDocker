@@ -13,7 +13,6 @@ from collections import OrderedDict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import nullcontext, suppress
 from datetime import datetime
-from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from subprocess import PIPE, Popen
 from time import monotonic
@@ -58,6 +57,7 @@ from pywhales.components.image.streams import (
     EmptyImageStream,
     ImageStream,
     MultiImageStream,
+    map_in_contexts,
 )
 from pywhales.exceptions import DockerException, NoSuchImage
 from pywhales.telemetry._lifecycle import ExecutionTelemetry
@@ -901,6 +901,12 @@ class ImageCLI(DockerCLICaller):
         daemon-side transfers stop. The selected image/general stream budget is
         snapshotted before consuming references and retained for queued children.
 
+        Inside `observation()` one and several references behave alike: every
+        pool task and every stream worker runs in its own copy of the calling
+        context, so `quiet=False` raises the same `ValueError` for one image or
+        many, and a stream group keeps the scope it was created in after the
+        `with` block exits.
+
         Args:
             x: Image reference or iterable of references. Iterable references are
                 deduplicated in first-seen order before selecting transfer mode.
@@ -923,7 +929,8 @@ class ImageCLI(DockerCLICaller):
         Raises:
             ValueError: `quiet=True` is combined with `stream_logs=True`, or
                 `timeout` is not positive and finite. Booleans are rejected
-                before consuming references, even for an empty request.
+                before consuming references, even for an empty request. Inside
+                an observation, `quiet=False` without streaming is rejected too.
             DockerException: A transfer or subsequent image inspection fails.
             DockerTimeout: A transfer subprocess exceeds its own deadline; it is
                 killed and reaped without undoing the pull or guaranteeing that
@@ -1004,9 +1011,7 @@ class ImageCLI(DockerCLICaller):
             )
         else:
 
-            def pull_one(
-                image_name: str, quiet: bool, stream_logs: bool, platform: str | None
-            ) -> None:
+            def pull_one(image_name: str) -> None:
                 self._pull_single_tag(
                     image_name,
                     quiet,
@@ -1016,16 +1021,7 @@ class ImageCLI(DockerCLICaller):
                     timeout=timeout,
                 )
 
-            pool = ThreadPool(4)
-            pool.starmap(
-                func=pull_one,
-                iterable=(
-                    (image_name, quiet, stream_logs, platform)
-                    for image_name in image_names
-                ),
-            )
-            pool.close()
-            pool.join()
+            map_in_contexts(pull_one, image_names)
             return [Image(self.client_config, image_name) for image_name in image_names]
 
     def _pull_multiple_tags_stream(
@@ -1159,6 +1155,10 @@ class ImageCLI(DockerCLICaller):
         selected image/general stream budget is snapshotted before consuming
         references or inspecting images and retained for queued children.
 
+        Inside `observation()` pool tasks and stream workers each run in their
+        own copy of the calling context, so one and several references behave
+        alike, including the rejection of `quiet=False` without streaming.
+
         Args:
             x: Tag or repository reference, or an iterable deduplicated in
                 first-seen order.
@@ -1173,7 +1173,8 @@ class ImageCLI(DockerCLICaller):
             returns `None` in both modes, without starting a transfer CLI.
 
         Raises:
-            ValueError: `quiet=True` is combined with `stream_logs=True`.
+            ValueError: `quiet=True` is combined with `stream_logs=True`, or an
+                observation is active and `quiet=False` without streaming.
             NoSuchImage: A locally inspected reference does not exist.
             DockerException: Inspection or a push command fails.
             BufferError: A streamed record or retained stderr exceeds the selected
@@ -1228,15 +1229,11 @@ class ImageCLI(DockerCLICaller):
                 buffer_bytes=buffer_bytes,
             )
         else:
-            pool = ThreadPool(4)
-            pool.starmap(
-                func=self._push_single_tag,
-                iterable=(
-                    (tags_or_repo, quiet, stream_logs) for tags_or_repo in tags_or_repos
-                ),
-            )
-            pool.close()
-            pool.join()
+
+            def push_one(tag_or_repo: str) -> None:
+                self._push_single_tag(tag_or_repo, quiet, stream_logs)
+
+            map_in_contexts(push_one, tags_or_repos)
             return None
 
     def _push_multiple_tags_stream(

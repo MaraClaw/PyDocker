@@ -11,10 +11,11 @@ import sys
 import time
 from collections.abc import Callable, Generator, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextvars import ContextVar
 from pathlib import Path
 from queue import Queue
 from subprocess import CompletedProcess, Popen
-from threading import Barrier, Event, Thread, current_thread
+from threading import Barrier, Event, Thread, current_thread, get_ident
 from types import GeneratorType
 from typing import Literal, assert_never, override
 from unittest.mock import ANY, MagicMock, Mock, patch
@@ -24,6 +25,7 @@ import pytest
 from pywhales import DockerClient, Image, docker
 from pywhales._archive_deadline import ArchiveDeadline
 from pywhales._execution_policy import get_execution_policy
+from pywhales._observation import ObservationState, get_observation, observation
 from pywhales.client_config import Command, ParsingError
 from pywhales.components.image.cli_wrapper import ImageCLI
 from pywhales.components.image.models import ImageInspectResult
@@ -35,7 +37,9 @@ from pywhales.exceptions import (
     NoSuchImage,
     NoSuchNetwork,
     NoSuchVolume,
+    ObservationCancelled,
 )
+from pywhales.inventory import InspectionPolicy
 from pywhales.test_utils import get_all_jsons, random_name
 from pywhales.utils import MappedProcessStream, ProcessStream, stream_stdout_and_stderr
 
@@ -2765,6 +2769,124 @@ SINGLE_SELECTIONS = [
     pytest.param(lambda: ["alpha"], id="list"),
     pytest.param(lambda: (item for item in ["alpha"]), id="generator"),
 ]
+
+
+def _scope_policy() -> InspectionPolicy:
+    return InspectionPolicy(
+        max_references=1, max_argv_bytes=65536, max_response_bytes=1024
+    )
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+@pytest.mark.parametrize(
+    "images", ["one", ["one"], ["one", "one"], ["one", "two"], list("abcdefg")]
+)
+def test_unquiet_transfer_in_a_scope_raises_the_same_error_for_one_or_many(
+    operation: Literal["pull", "push"], images: str | list[str]
+) -> None:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    method = client.image.pull if operation == "pull" else client.image.push
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        patch("pywhales.utils.Popen", side_effect=AssertionError("launched")),
+        patch("subprocess.Popen", side_effect=AssertionError("launched")),
+        observation(_scope_policy()),
+        pytest.raises(ValueError, match="Observation requires captured output"),
+    ):
+        method(images, quiet=False)
+
+
+@pytest.mark.parametrize("operation", ["pull", "push"])
+def test_pool_tasks_each_run_in_a_fresh_copy_of_the_callers_context(
+    operation: Literal["pull", "push"],
+) -> None:
+    names = [f"image-{number}" for number in range(8)]
+    caller: ContextVar[str] = ContextVar("caller", default="unset")
+    seen: list[tuple[ObservationState | None, str, int]] = []
+    ready = Barrier(4)
+
+    def fake_run(full_cmd: Command, *args: object, **kwargs: object) -> str:
+        command = [str(part) for part in full_cmd]
+        if command[1:3] == ["image", "inspect"]:
+            return json.dumps([{"Id": "sha256:" + command[-1]}])
+        seen.append((get_observation(), caller.get(), get_ident()))
+        caller.set(f"leaked-by-{command[-1]}")
+        if len(seen) <= 4:
+            # Four tasks overlap, so workers are distinct and then get reused.
+            ready.wait(timeout=3)
+        return ""
+
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    caller.set("caller")
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        patch("pywhales.components.image.cli_wrapper.run", side_effect=fake_run),
+        observation(_scope_policy()) as state,
+    ):
+        if operation == "pull":
+            client.image.pull(names, quiet=True)
+        else:
+            client.image.push(names, quiet=True)
+
+    assert len(seen) == len(names)
+    assert all(scope is state for scope, _, _ in seen)
+    assert {value for _, value, _ in seen} == {"caller"}
+    assert 1 < len({ident for _, _, ident in seen}) <= 4
+    assert caller.get() == "caller"
+
+
+def test_multi_image_children_launch_in_the_scope_that_created_the_group(
+    image_commands: _ImageCommands,
+) -> None:
+    names = ["one", "two", "three", "four", "five"]
+    cancel = Event()
+    with observation(_scope_policy(), cancel=cancel) as state:
+        stream = image_commands.stream("pull", names)
+    try:
+        # The group is first consumed after its scope has exited.
+        next(stream)
+        for _ in range(4):
+            image_commands.started.get(timeout=3)
+        image_commands.finish("one")
+        image_commands.started.get(timeout=3)
+        assert set(image_commands.children) == set(names)
+        assert all(
+            child._observation is state for child in image_commands.children.values()
+        )
+
+        cancel.set()
+
+        with pytest.raises(ObservationCancelled):
+            list(stream)
+        for child in image_commands.children.values():
+            _assert_image_process_released(child)
+    finally:
+        image_commands.release_children()
+        stream.close()
+
+
+def test_multi_image_group_created_outside_a_scope_stays_unscoped(
+    image_commands: _ImageCommands,
+) -> None:
+    stream = image_commands.stream("pull", ["one", "two"])
+    cancel = Event()
+    try:
+        with (
+            pytest.raises(ObservationCancelled),
+            observation(_scope_policy(), cancel=cancel),
+        ):
+            cancel.set()
+            next(stream)
+            for _ in range(2):
+                image_commands.started.get(timeout=3)
+        assert all(
+            child._observation is None for child in image_commands.children.values()
+        )
+    finally:
+        image_commands.release_children()
+        stream.close()
 
 
 @pytest.mark.parametrize("make_empty", EMPTY_SELECTIONS)

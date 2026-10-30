@@ -7,10 +7,15 @@ from io import BufferedReader, RawIOBase
 from subprocess import Popen
 from threading import Event, Lock, Thread
 from time import monotonic
-from typing import IO, override
+from typing import IO, TYPE_CHECKING, Literal, override
 
-from pywhales._readiness import bounded_wait, reap, wait_ready
-from pywhales.exceptions import DockerTimeout
+from pywhales._readiness import CANCEL_CHECK, bounded_wait, reap, wait_ready
+from pywhales.exceptions import DockerTimeout, ObservationCancelled, ObservationTimeout
+
+if TYPE_CHECKING:
+    from pywhales._observation import ObservationState
+
+type _Stop = Literal["command", "timeout", "cancelled"]
 
 
 class ArchiveDeadline:
@@ -24,6 +29,16 @@ class ArchiveDeadline:
     never closes a pipe beneath one. A wait lasts the remaining time to the
     deadline, which is when the watchdog needs the lock to expire the child,
     and has no timer at all without a deadline or after a natural exit.
+
+    An observation snapshotted at launch adds its own deadline and cancel
+    tokens, and keeps them after its ``with`` block exits. The watchdog expires
+    the child when the scope ends first, and ``check()`` then raises
+    ``ObservationTimeout`` or ``ObservationCancelled`` once the child is
+    reaped. Tokens are plain events, so they add only the bounded cancel check
+    to a wait. A command deadline reports ``DockerTimeout`` only when strictly
+    earlier than the scope's, and a set token wins over both, as in a captured
+    run. After a natural exit nothing is left to stop, but ``check()`` still
+    reports a scope that ended before the transfer was delivered.
     """
 
     def __init__(
@@ -33,11 +48,20 @@ class ArchiveDeadline:
         deadline: float | None,
         *,
         raw: bool,
+        observation: ObservationState | None = None,
     ) -> None:
         self.process = process
         self.command = command
         self.deadline = deadline
         self.raw = raw
+        self._scope = (
+            observation
+            if observation is not None
+            and (observation.deadline is not None or observation.cancel_tokens)
+            else None
+        )
+        self.bounded = deadline is not None or self._scope is not None
+        self._stop: _Stop | None = None
         self.expired = False
         self.stdout: bytes | None = None
         self.stderr: bytes | None = None
@@ -49,13 +73,13 @@ class ArchiveDeadline:
         self._exited = Event()
         for pipe in (process.stdin, process.stdout, process.stderr):
             if pipe is not None and (
-                deadline is not None or (pipe is process.stdin and os.name != "nt")
+                self.bounded or (pipe is process.stdin and os.name != "nt")
             ):
                 os.set_blocking(pipe.fileno(), False)
         self._reaper = (
-            None
-            if deadline is None
-            else Thread(target=reap, args=(process, self._exited.set), daemon=True)
+            Thread(target=reap, args=(process, self._exited.set), daemon=True)
+            if self.bounded
+            else None
         )
         self.thread = Thread(target=self._watch, daemon=True)
         try:
@@ -69,13 +93,60 @@ class ArchiveDeadline:
                 self._reaper.join()
             raise
 
+    def _stop_reason(self, *, running: bool) -> _Stop | None:
+        """Return why the transfer must stop now, in the captured path's precedence.
+
+        A set cancel token wins, then a command deadline strictly earlier than the
+        scope's (only while the child runs), then the scope deadline.
+        """
+        scope = self._scope
+        if scope is not None and any(token.is_set() for token in scope.cancel_tokens):
+            return "cancelled"
+        now = monotonic()
+        if (
+            running
+            and self.deadline is not None
+            and now >= self.deadline
+            and (
+                scope is None
+                or scope.deadline is None
+                or self.deadline < scope.deadline
+            )
+        ):
+            return "command"
+        if scope is not None and scope.deadline is not None and now >= scope.deadline:
+            return "timeout"
+        return None
+
+    def _remaining(self, *, running: bool = True) -> float | None:
+        """Return seconds to the next deadline or cancel check; None means no timer.
+
+        Once the child has exited, only the observation still applies.
+        """
+        scope = self._scope
+        ends = [
+            end
+            for end in (
+                self.deadline if running else None,
+                None if scope is None else scope.deadline,
+            )
+            if end is not None
+        ]
+        remaining = bounded_wait(min(ends) - monotonic()) if ends else None
+        if scope is not None and scope.cancel_tokens:
+            remaining = (
+                CANCEL_CHECK if remaining is None else min(remaining, CANCEL_CHECK)
+            )
+        return remaining
+
     def _watch(self) -> None:
         try:
-            if self.deadline is None:
+            if not self.bounded:
                 self.process.wait()
                 return
-            while not self._exited.wait(bounded_wait(self.deadline - monotonic())):
-                if monotonic() >= self.deadline:
+            while not self._exited.wait(self._remaining()):
+                self._stop = self._stop_reason(running=True)
+                if self._stop is not None:
                     break
             if self._exited.is_set():
                 return
@@ -102,15 +173,14 @@ class ArchiveDeadline:
         """Wait for readiness while holding the pipe lock.
 
         Returns:
-            False if the deadline has passed and the watchdog has yet to decide
+            False if a deadline has passed and the watchdog has yet to decide
             between expiry and a natural exit; the caller then releases the
             lock and waits for that decision.
         """
-        timeout = None
-        if self.deadline is not None and not self.released.is_set():
-            timeout = self.deadline - monotonic()
-            if timeout <= 0:
-                return False
+        running = not self.released.is_set()
+        timeout = self._remaining(running=running)
+        if timeout is not None and timeout <= 0:
+            return not running
         wait_ready(pipe.fileno(), writable=writable, timeout=timeout)
         return True
 
@@ -144,8 +214,20 @@ class ArchiveDeadline:
             self.stderr_bytes += len(chunk)
 
     def check(self) -> None:
+        """Raise if the transfer was stopped by a deadline or the observation.
+
+        Raises:
+            DockerTimeout: The command deadline expired and the child was reaped.
+            ObservationTimeout: The observation deadline passed first.
+            ObservationCancelled: An observation token was set.
+        """
+        released = self.released.is_set()
         if self.expired:
             self.released.wait()
+            if self._stop == "cancelled":
+                raise ObservationCancelled()
+            if self._stop == "timeout":
+                raise ObservationTimeout()
             raise DockerTimeout(
                 self.command,
                 self.process.returncode,
@@ -153,6 +235,12 @@ class ArchiveDeadline:
                 self.stderr,
                 raw_diagnostics=self.raw,
             )
+        if released and self._scope is not None:
+            stop = self._stop_reason(running=False)
+            if stop == "cancelled":
+                raise ObservationCancelled()
+            if stop == "timeout":
+                raise ObservationTimeout()
 
     def read(self, pipe: IO[bytes], size: int = 65536) -> bytes:
         while True:

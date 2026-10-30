@@ -11,7 +11,7 @@ import json
 import os
 from collections import OrderedDict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from datetime import datetime
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
@@ -19,6 +19,7 @@ from subprocess import PIPE, Popen
 from time import monotonic
 from types import TracebackType
 from typing import (
+    TYPE_CHECKING,
     Literal,
     Never,
     Self,
@@ -70,6 +71,9 @@ from pywhales.utils import (
     validate_timeout,
 )
 
+if TYPE_CHECKING:
+    from pywhales._observation import ObservationState
+
 type ImageListFilter = (
     tuple[Literal["id"], str]
     | tuple[Literal["reference"], str]
@@ -105,6 +109,91 @@ def _select_archive_timeout(
     selected = policy.default_timeout if timeout is None else timeout
     validate_timeout(selected)
     return selected
+
+
+def _prepare_archive_launch(
+    full_cmd: Sequence[object], timeout: float | None
+) -> tuple[
+    ExecutionPolicy,
+    float | None,
+    list[str],
+    dict[str, str],
+    ObservationState | None,
+]:
+    """Snapshot everything one direct archive launch needs, before any process.
+
+    The observation active when this runs is the launch's scope: for a lazy save
+    that is the first iteration, never the call that created the generator. Like
+    a captured run, a stopped scope or an oversized argv or environment is
+    rejected here, before any input is consumed or telemetry sees a launch.
+
+    Args:
+        full_cmd: Complete archive command; the first item may carry the policy.
+        timeout: Per-call seconds, or `None` to select the policy default.
+
+    Returns:
+        The execution policy, selected timeout, stringified command, finalized
+        child environment, and the launch-time observation (or `None`).
+
+    Raises:
+        ValueError: The selected timeout is boolean, nonfinite, zero, or negative.
+        ObservationCancelled: The active observation was cancelled.
+        ObservationTimeout: The active observation deadline has passed.
+        ObservationLimitError: The active observation rejects the argv or
+            environment.
+    """
+    from pywhales._observation import get_observation
+    from pywhales._scoped_launch import check_scoped_launch, environment_limit
+
+    observation = get_observation()
+    observed = observation is not None
+    with environment_limit(observed):
+        policy = get_execution_policy(full_cmd)
+    selected_timeout = _select_archive_timeout(policy, timeout)
+    with environment_limit(observed):
+        environment = resolve_environment(
+            policy.environment, frozen=policy.frozen_environment
+        )
+    command = [str(argument) for argument in full_cmd]
+    environment = finalize_environment(environment, command)
+    if observation is not None:
+        check_scoped_launch(command, environment, observation)
+    return policy, selected_timeout, command, environment, observation
+
+
+def _launch_archive(
+    command: list[str],
+    environment: Mapping[str, str],
+    observation: ObservationState | None,
+    *,
+    stdin: int | None = None,
+    stderr: int | None = None,
+) -> Popen[bytes]:
+    """Start an unbuffered archive child with a piped stdout.
+
+    An operating-system argument-size refusal is reported as an observation
+    limit only when the launch is observed.
+    """
+    from pywhales._scoped_launch import native_argv_limit
+
+    with nullcontext() if observation is None else native_argv_limit(command):
+        return Popen(
+            command, stdin=stdin, stdout=PIPE, stderr=stderr, env=environment, bufsize=0
+        )
+
+
+def _own_archive(
+    process: Popen[bytes],
+    command: list[str],
+    deadline: float | None,
+    *,
+    raw: bool,
+    observation: ObservationState | None,
+) -> ArchiveDeadline:
+    """Start the archive watchdog, passing the scope along only when observed."""
+    if observation is None:
+        return ArchiveDeadline(process, command, deadline, raw=raw)
+    return ArchiveDeadline(process, command, deadline, raw=raw, observation=observation)
 
 
 class Image(ReloadableObjectFromJson[ImageInspectResult]):
@@ -282,6 +371,9 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
                 rejected before inspection.
             DockerTimeout: The save CLI exceeds its deadline; it is killed and
                 reaped without guaranteeing that daemon-side work stops.
+            ObservationTimeout: The observation active when a lazy archive first
+                iterates (or when a path save runs) expired first.
+            ObservationCancelled: A token of that observation was set.
         """
         return ImageCLI(self.client_config).save(self, output, timeout=timeout)
 
@@ -520,7 +612,9 @@ class ImageCLI(DockerCLICaller):
         the call. These archive bytes are not progress-log records. The selected
         deadline (explicit `timeout`, otherwise the configured default) reaps
         the local CLI even if the input iterator stalls; an iterator's Python
-        code is not interrupted.
+        code is not interrupted. Inside `observation()` the load first checks
+        cancellation and the argv and environment limits, before consuming any
+        input, and the active scope's deadline and tokens reap the CLI the same way.
 
         Args:
             input: Archive path, complete archive bytes, or an iterator of archive
@@ -540,6 +634,10 @@ class ImageCLI(DockerCLICaller):
                 rejected before any input is consumed or CLI is resolved.
             DockerTimeout: The load CLI exceeds its deadline; it is killed and
                 reaped without guaranteeing that daemon-side work stops.
+            ObservationTimeout: An active observation deadline passed first.
+            ObservationCancelled: An active observation token was set.
+            ObservationLimitError: An active observation rejects the argv or
+                environment, before any CLI starts.
         """
         validate_timeout(timeout)
         full_cmd = Command([*self.docker_cmd, "image", "load"])
@@ -574,25 +672,25 @@ class ImageCLI(DockerCLICaller):
         input: Iterable[bytes],
         timeout: float | None,
     ) -> builtins.list[str]:
-        policy = get_execution_policy(full_cmd)
-        selected_timeout = _select_archive_timeout(policy, timeout)
-        environment = resolve_environment(
-            policy.environment, frozen=policy.frozen_environment
+        policy, selected_timeout, command, environment, observation = (
+            _prepare_archive_launch(full_cmd, timeout)
         )
-        command = [str(argument) for argument in full_cmd]
-        environment = finalize_environment(environment, command)
         with ExecutionTelemetry(policy.telemetry_observer, "archive_load") as telemetry:
             telemetry.start()
             deadline = (
                 None if selected_timeout is None else monotonic() + selected_timeout
             )
-            with Popen(
-                command, stdin=PIPE, stdout=PIPE, env=environment, bufsize=0
+            with _launch_archive(
+                command, environment, observation, stdin=PIPE
             ) as process:
                 assert process.stdin is not None
                 assert process.stdout is not None
-                owner = ArchiveDeadline(
-                    process, command, deadline, raw=policy.raw_diagnostics
+                owner = _own_archive(
+                    process,
+                    command,
+                    deadline,
+                    raw=policy.raw_diagnostics,
+                    observation=observation,
                 )
                 try:
                     for buffer_bytes in input:
@@ -1257,6 +1355,12 @@ class ImageCLI(DockerCLICaller):
         Archive bytes have no progress-stream buffer budget; no daemon rollback
         is guaranteed.
 
+        A lazy archive applies the observation active at its first iteration,
+        not at this call: that launch checks cancellation and the argv and
+        environment limits, and keeps the scope's deadline and tokens after the
+        `with` block exits. A scope that ends first kills and reaps the CLI and
+        is reported on resumption.
+
         Args:
             images: Single image or non-empty iterable of images to save.
             output: Path of the tar archive to produce. If `output` is None, a generator
@@ -1282,6 +1386,10 @@ class ImageCLI(DockerCLICaller):
                 failures delivered during iteration.
             DockerTimeout: The save CLI exceeds its deadline; it is killed and
                 reaped without guaranteeing that daemon-side work stops.
+            ObservationTimeout: The launch-time observation deadline passed first.
+            ObservationCancelled: The launch-time observation token was set.
+            ObservationLimitError: The observation active at first iteration
+                rejects the argv or environment, before the CLI starts.
         """
         validate_timeout(timeout)
         image_list = [images] if isinstance(images, (str, Image)) else list(images)
@@ -1321,29 +1429,33 @@ class ImageCLI(DockerCLICaller):
         Raises:
             NoSuchImage: The save CLI reports a missing image.
             DockerException: The save CLI exits unsuccessfully.
+            ObservationTimeout: The observation deadline captured at first
+                iteration passed before the archive was delivered.
+            ObservationCancelled: A token of that observation was set.
+            ObservationLimitError: That observation rejects the argv or environment.
         """
-        policy = get_execution_policy(full_cmd)
-        selected_timeout = _select_archive_timeout(policy, timeout)
-        environment = resolve_environment(
-            policy.environment, frozen=policy.frozen_environment
+        policy, selected_timeout, command, environment, observation = (
+            _prepare_archive_launch(full_cmd, timeout)
         )
-        command = [str(argument) for argument in full_cmd]
-        environment = finalize_environment(environment, command)
         with ExecutionTelemetry(policy.telemetry_observer, "archive_save") as telemetry:
             telemetry.start()
             deadline = (
                 None if selected_timeout is None else monotonic() + selected_timeout
             )
-            with Popen(
-                command, stdout=PIPE, stderr=PIPE, env=environment, bufsize=0
+            with _launch_archive(
+                command, environment, observation, stderr=PIPE
             ) as process:
                 assert process.stdout is not None
                 assert process.stderr is not None
-                owner = ArchiveDeadline(
-                    process, command, deadline, raw=policy.raw_diagnostics
+                owner = _own_archive(
+                    process,
+                    command,
+                    deadline,
+                    raw=policy.raw_diagnostics,
+                    observation=observation,
                 )
                 try:
-                    if deadline is None:
+                    if not owner.bounded:
                         yield from owner.lines(process.stdout)
                         exit_code = process.wait(0.1)
                     else:

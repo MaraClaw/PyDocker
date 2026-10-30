@@ -6,7 +6,7 @@ import threading
 from collections import Counter
 from collections.abc import Buffer
 from subprocess import PIPE, Popen
-from threading import Thread
+from threading import Event, Thread
 from time import monotonic, sleep
 from typing import override
 
@@ -14,7 +14,10 @@ import pytest
 
 from pywhales import _archive_deadline
 from pywhales._archive_deadline import ArchiveDeadline
-from pywhales.exceptions import DockerTimeout
+from pywhales._observation import ObservationState, observation
+from pywhales._readiness import CANCEL_CHECK, WakeLatch
+from pywhales.exceptions import DockerTimeout, ObservationCancelled, ObservationTimeout
+from pywhales.inventory import InspectionPolicy
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX readiness waits")
 
@@ -222,3 +225,234 @@ def test_owner_start_failure_kills_the_child_and_joins_its_helper(
 
         assert process.wait(timeout=3) == -signal.SIGKILL
     assert set(threading.enumerate()) == before
+
+
+def scope_state(
+    *, deadline: float | None = None, cancel: Event | None = None
+) -> ObservationState:
+    """Return the state of a scope that has already exited, as a launch keeps it."""
+    policy = InspectionPolicy(
+        max_references=1, max_argv_bytes=65536, max_response_bytes=1024
+    )
+    with observation(policy, deadline=deadline, cancel=cancel) as state:
+        return state
+
+
+_BLOCKER = [sys.executable, "-c", "import threading; threading.Event().wait()"]
+
+
+def test_scope_deadline_reaps_a_silent_child_and_check_reports_it() -> None:
+    before = set(threading.enumerate())
+    state = scope_state(deadline=monotonic() + 0.5)
+    with Popen(_BLOCKER, stdout=PIPE, bufsize=0) as process:
+        assert process.stdout is not None
+        owner = ArchiveDeadline(process, _BLOCKER, None, raw=False, observation=state)
+
+        with pytest.raises(ObservationTimeout):
+            owner.read(process.stdout)
+
+        assert owner.expired and owner.released.is_set()
+        with pytest.raises(ObservationTimeout):
+            owner.check()
+        owner.thread.join(timeout=3)
+        assert process.returncode == -signal.SIGKILL
+        assert process.stdout.closed
+    assert set(threading.enumerate()) == before
+
+
+def test_cancel_token_interrupts_a_blocked_read_with_only_bounded_waits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timeouts: list[float | None] = []
+    blocked = Event()
+    wait_ready = _archive_deadline.wait_ready
+
+    def record(
+        fd: int,
+        *,
+        writable: bool = False,
+        latch: WakeLatch | None = None,
+        timeout: float | None = None,
+    ) -> None:
+        timeouts.append(timeout)
+        blocked.set()
+        wait_ready(fd, writable=writable, latch=latch, timeout=timeout)
+
+    monkeypatch.setattr(_archive_deadline, "wait_ready", record)
+    cancel = Event()
+    state = scope_state(cancel=cancel)
+    with Popen(_BLOCKER, stdout=PIPE, bufsize=0) as process:
+        assert process.stdout is not None
+        owner = ArchiveDeadline(process, _BLOCKER, None, raw=False, observation=state)
+        outcome: list[bytes | BaseException] = []
+
+        def consume() -> None:
+            assert process.stdout is not None
+            try:
+                outcome.append(owner.read(process.stdout))
+            except ObservationCancelled as error:
+                outcome.append(error)
+
+        reader = Thread(target=consume, daemon=True)
+        reader.start()
+        assert blocked.wait(timeout=3)
+
+        cancel.set()
+        reader.join(timeout=3)
+
+        assert not reader.is_alive()
+        assert [type(item) for item in outcome] == [ObservationCancelled]
+        owner.thread.join(timeout=3)
+        assert process.returncode == -signal.SIGKILL and process.stdout.closed
+    assert timeouts
+    assert all(timeout is not None and timeout <= CANCEL_CHECK for timeout in timeouts)
+
+
+def test_cancel_token_interrupts_a_saturated_write() -> None:
+    command = [sys.executable, "-c", "import time; time.sleep(60)"]
+    cancel = Event()
+    state = scope_state(cancel=cancel)
+    with Popen(command, stdin=PIPE, bufsize=0) as process:
+        assert process.stdin is not None
+        owner = ArchiveDeadline(process, command, None, raw=False, observation=state)
+        cancel.set()
+
+        with pytest.raises(ObservationCancelled):
+            owner.write(process.stdin, b"x" * (8 * 1024 * 1024))
+
+        owner.thread.join(timeout=3)
+        assert process.returncode == -signal.SIGKILL and process.stdin.closed
+
+
+@pytest.mark.parametrize("command_first", [True, False])
+def test_command_deadline_precedes_only_a_later_scope_deadline(
+    command_first: bool,
+) -> None:
+    expected = DockerTimeout if command_first else ObservationTimeout
+    now = monotonic()
+    state = scope_state(deadline=now + (30 if command_first else 0.4))
+    with Popen(_BLOCKER, stdout=PIPE, bufsize=0) as process:
+        assert process.stdout is not None
+        owner = ArchiveDeadline(
+            process,
+            _BLOCKER,
+            now + (0.4 if command_first else 30),
+            raw=False,
+            observation=state,
+        )
+
+        with pytest.raises(expected):
+            owner.read(process.stdout)
+
+        owner.thread.join(timeout=3)
+        assert process.returncode == -signal.SIGKILL
+
+
+def test_equal_command_and_scope_deadlines_report_the_scope() -> None:
+    deadline = monotonic() + 0.4
+    state = scope_state(deadline=deadline)
+    with Popen(_BLOCKER, stdout=PIPE, bufsize=0) as process:
+        assert process.stdout is not None
+        owner = ArchiveDeadline(
+            process, _BLOCKER, deadline, raw=False, observation=state
+        )
+
+        with pytest.raises(ObservationTimeout):
+            owner.read(process.stdout)
+
+
+def test_cancel_token_wins_over_expired_command_and_scope_deadlines() -> None:
+    cancel = Event()
+    cancel.set()
+    past = monotonic() - 1
+    state = ObservationState(
+        policy=InspectionPolicy(
+            max_references=1, max_argv_bytes=65536, max_response_bytes=1024
+        ),
+        deadline=past,
+        cancel_tokens=(cancel,),
+        response_accounts=(),
+    )
+    with Popen(_BLOCKER, stdout=PIPE, bufsize=0) as process:
+        assert process.stdout is not None
+        owner = ArchiveDeadline(process, _BLOCKER, past, raw=False, observation=state)
+
+        with pytest.raises(ObservationCancelled):
+            owner.read(process.stdout)
+
+        owner.thread.join(timeout=3)
+        assert process.returncode == -signal.SIGKILL
+
+
+def test_check_reports_a_scope_that_ended_after_a_natural_exit() -> None:
+    cancel = Event()
+    state = scope_state(cancel=cancel)
+    command = [sys.executable, "-c", "pass"]
+    with Popen(command, stdout=PIPE, bufsize=0) as process:
+        owner = ArchiveDeadline(process, command, None, raw=False, observation=state)
+        owner.thread.join(timeout=3)
+        assert owner.released.is_set() and not owner.expired
+        owner.check()
+
+        cancel.set()
+
+        with pytest.raises(ObservationCancelled):
+            owner.check()
+        assert process.returncode == 0
+
+
+def test_scope_deadline_stops_a_read_while_a_descendant_holds_the_pipe() -> None:
+    release_read, release_write = os.pipe()
+    status_read, status_write = os.pipe()
+    command = [
+        sys.executable,
+        "-c",
+        _HOLDER + "os._exit(0)\n",
+        str(release_read),
+        str(status_write),
+    ]
+    state = scope_state(deadline=monotonic() + 0.6)
+    try:
+        with Popen(
+            command, stdout=PIPE, bufsize=0, pass_fds=(release_read, status_write)
+        ) as process:
+            assert process.stdout is not None
+            owner = ArchiveDeadline(
+                process, command, None, raw=False, observation=state
+            )
+            assert select.select([status_read], [], [], 3)[0]
+            assert os.read(status_read, 1) == b"R"
+            outcome: list[bytes | BaseException] = []
+
+            def consume() -> None:
+                assert process.stdout is not None
+                try:
+                    outcome.append(owner.read(process.stdout))
+                except ObservationTimeout as error:
+                    outcome.append(error)
+
+            reader = Thread(target=consume, daemon=True)
+            reader.start()
+            reader.join(timeout=3)
+
+            assert not reader.is_alive(), "read waited for the descendant"
+            assert [type(item) for item in outcome] == [ObservationTimeout]
+            assert not owner.expired and process.returncode == 0
+    finally:
+        os.write(release_write, b"x")
+        for descriptor in (release_read, release_write, status_write):
+            os.close(descriptor)
+        assert os.read(status_read, 1) == b""
+        os.close(status_read)
+
+
+def test_policy_only_scope_adds_no_monitoring() -> None:
+    state = scope_state()
+    command = [sys.executable, "-c", "print('x')"]
+    with Popen(command, stdout=PIPE, bufsize=0) as process:
+        owner = ArchiveDeadline(process, command, None, raw=False, observation=state)
+
+        assert not owner.bounded
+        assert process.stdout is not None
+        assert b"".join(owner.lines(process.stdout)) == b"x\n"
+        owner.thread.join(timeout=3)

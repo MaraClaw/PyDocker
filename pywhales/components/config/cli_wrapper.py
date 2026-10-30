@@ -8,7 +8,7 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType, TracebackType
-from typing import Self, assert_never, overload, override
+from typing import Literal, Self, assert_never, overload, override
 
 from pydantic import JsonValue
 
@@ -25,7 +25,19 @@ from pywhales.components.config.models import (
     ConfigSpec,
     DockerObjectVersion,
 )
-from pywhales.utils import custom_parse_object_as, format_mapping_for_cli, run, to_list
+from pywhales.utils import (
+    custom_parse_object_as,
+    format_filters_for_cli,
+    format_mapping_for_cli,
+    run,
+    to_list,
+)
+
+type ConfigListFilter = (
+    tuple[Literal["id"], str]
+    | tuple[Literal["label"], str]
+    | tuple[Literal["name"], str]
+)
 
 
 class Config(ReloadableObjectFromJson[ConfigInspectResult]):
@@ -166,20 +178,30 @@ class ConfigCLI(DockerCLICaller):
                 assert_never(unreachable)
 
     def list(
-        self, filters: Mapping[str, str] = MappingProxyType({})
+        self,
+        filters: Mapping[str, str] | Iterable[ConfigListFilter] = MappingProxyType({}),
     ) -> builtins.list[Config]:
         """List configs available in the Swarm.
 
         Args:
-            filters: Docker filter names and values; the default selects all configs.
+            filters: Docker filter names and values, either as a mapping or as
+                an iterable of ``(key, value)`` pairs. Pairs keep their order
+                and repeated keys, and an iterator is read once. The documented
+                keys are `id`, `label`, and `name`. The default selects all
+                configs. For example, `filters={"name": "app"}` or
+                `filters=[("label", "tier=web"), ("label", "team=core")]`.
 
         Returns:
             Config handles in CLI output order.
+
+        Raises:
+            TypeError: If filters is a string, bytes, or an iterable containing
+                anything but ``(key, value)`` tuples of strings. Raised before
+                the Docker executable is looked up.
         """
+        filter_args = format_filters_for_cli(filters)
         full_cmd = Command([*self.docker_cmd, "config", "list", "--quiet"])
-        full_cmd.add_args_iterable_or_single(
-            "--filter", format_mapping_for_cli(filters)
-        )
+        full_cmd.add_args_iterable_or_single("--filter", filter_args)
         output = run(full_cmd)
         ids = output.splitlines()
         return [Config(self.client_config, id_, is_immutable_id=True) for id_ in ids]

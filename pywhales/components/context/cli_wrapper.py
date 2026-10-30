@@ -25,6 +25,7 @@ from pywhales.components.context.models import (
     ContextInspectResult,
     ContextStorage,
 )
+from pywhales.exceptions import NoSuchContext
 from pywhales.utils import custom_parse_object_as, run, to_list
 
 
@@ -96,6 +97,10 @@ class Context(ReloadableObjectFromJson[ContextInspectResult, str | None]):
             force: Forward Docker's forced-removal option when True.
         """
         ContextCLI(self.client_config).remove(self, force)
+
+    def exists(self) -> bool:
+        """Return whether this context can still be inspected."""
+        return ContextCLI(self.client_config).exists(str(self))
 
     def update(self) -> None:
         """Reject context updates because this operation is not implemented.
@@ -214,6 +219,23 @@ class ContextCLI(DockerCLICaller):
         full_cmd.append(context_name)
         run(full_cmd)
         return self.inspect(context_name)
+
+    def exists(self, x: str) -> bool:
+        """Return whether a context can be inspected.
+
+        Args:
+            x: Context name to inspect.
+
+        Returns:
+            False when Docker reports NoSuchContext; True on successful inspection.
+            Other inspection failures propagate.
+        """
+        try:
+            self.inspect(x)
+        except NoSuchContext:
+            return False
+        else:
+            return True
 
     @overload
     def inspect(self, x: str | None = None) -> Context: ...

@@ -14,6 +14,7 @@ from pywhales.components.context.cli_wrapper import (
     KubernetesContextConfig,
 )
 from pywhales.components.context.models import ContextEndpoint, ContextInspectResult
+from pywhales.exceptions import DockerException, NoSuchContainer, NotASwarmManager
 from pywhales.test_utils import get_all_jsons
 
 
@@ -391,3 +392,142 @@ def test_context_inspect_exposes_typed_properties_and_repr() -> None:
         "context",
         "inspect",
     ]
+
+
+NOT_A_MANAGER = (
+    b"Error response from daemon: This node is not a swarm manager. "
+    b'Use "docker swarm init" or "docker swarm join" to connect this node to swarm '
+    b"and try again."
+)
+CONTEXT_MISSING = (
+    b'context "resource": context not found: open '
+    b"/Users/me/.docker/contexts/meta/0123abcd/meta.json: no such file or directory"
+)
+CONTEXT_JSON = b'[{"Name":"resource"}]'
+# Each failure below is not this context's own not-found error.
+OTHER_FAILURES = [
+    pytest.param(b"permission denied", DockerException, id="command-failure"),
+    pytest.param(NOT_A_MANAGER, NotASwarmManager, id="not-a-swarm-manager"),
+    pytest.param(
+        b'context "resource": context is in use', DockerException, id="context-in-use"
+    ),
+    pytest.param(
+        b"Error response from daemon: No such container: resource",
+        NoSuchContainer,
+        id="container-not-found",
+    ),
+]
+
+
+def _context() -> tuple[DockerClient, Context]:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    return client, Context(client.client_config, "resource", is_immutable_id=True)
+
+
+@pytest.mark.parametrize(("stderr", "error_type"), OTHER_FAILURES)
+def test_context_cleanup_propagates_removal_failures(
+    stderr: bytes, error_type: type[DockerException]
+) -> None:
+    _, context = _context()
+    response = CompletedProcess([], 17, b"output", stderr)
+    with (
+        patch("subprocess.run", return_value=response) as command,
+        pytest.raises(DockerException) as raised,
+        context,
+    ):
+        pass
+    command.assert_called_once()
+    assert command.call_args.args[0] == [
+        "docker-test",
+        "context",
+        "remove",
+        "--force",
+        "resource",
+    ]
+    assert type(raised.value) is error_type
+    assert raised.value.return_code == 17
+    assert raised.value.stderr == stderr.decode()
+
+
+@pytest.mark.parametrize(("stderr", "error_type"), OTHER_FAILURES)
+def test_context_cleanup_failure_joins_the_body_error(
+    stderr: bytes, error_type: type[DockerException]
+) -> None:
+    _, context = _context()
+    body = RuntimeError("body")
+    response = CompletedProcess([], 17, b"", stderr)
+    with (
+        patch("subprocess.run", return_value=response),
+        pytest.raises(BaseExceptionGroup) as raised,
+        context,
+    ):
+        raise body
+    assert raised.value.message == "Context body and cleanup both failed"
+    assert raised.value.exceptions[0] is body
+    assert type(raised.value.exceptions[1]) is error_type
+
+
+def _exists(client: DockerClient, context: Context, *, as_handle: bool) -> bool:
+    return context.exists() if as_handle else client.context.exists("resource")
+
+
+@pytest.mark.parametrize("as_handle", [False, True], ids=["cli", "handle"])
+def test_context_exists_is_true_after_inspect(as_handle: bool) -> None:
+    client, context = _context()
+    response = CompletedProcess([], 0, CONTEXT_JSON, b"")
+    with patch("subprocess.run", return_value=response) as command:
+        found = _exists(client, context, as_handle=as_handle)
+    assert found is True
+    command.assert_called_once()
+    assert command.call_args.args[0] == [
+        "docker-test",
+        "context",
+        "inspect",
+        "resource",
+    ]
+
+
+@pytest.mark.parametrize("as_handle", [False, True], ids=["cli", "handle"])
+@pytest.mark.parametrize(
+    "stderr",
+    [CONTEXT_MISSING, b'context "resource" does not exist'],
+    ids=["inspect", "remove"],
+)
+def test_context_exists_is_false_for_a_missing_context(
+    as_handle: bool, stderr: bytes
+) -> None:
+    client, context = _context()
+    response = CompletedProcess([], 1, b"", stderr)
+    with patch("subprocess.run", return_value=response):
+        found = _exists(client, context, as_handle=as_handle)
+    assert found is False
+
+
+@pytest.mark.parametrize("as_handle", [False, True], ids=["cli", "handle"])
+@pytest.mark.parametrize(("stderr", "error_type"), OTHER_FAILURES)
+def test_context_exists_propagates_other_failures(
+    as_handle: bool, stderr: bytes, error_type: type[DockerException]
+) -> None:
+    client, context = _context()
+    response = CompletedProcess([], 1, b"", stderr)
+    with (
+        patch("subprocess.run", return_value=response),
+        pytest.raises(DockerException) as raised,
+    ):
+        _exists(client, context, as_handle=as_handle)
+    assert type(raised.value) is error_type
+
+
+def test_context_removed_inside_its_context_exits_cleanly(
+    docker_client: DockerClient,
+) -> None:
+    with docker_client.context.create(
+        "pywhales-removed-in-context", docker={"host": "ssh://test@test.domain"}
+    ) as new_context:
+        assert new_context.exists()
+        assert docker_client.context.exists("pywhales-removed-in-context")
+        new_context.remove(force=True)
+        assert not new_context.exists()
+    assert not new_context.exists()
+    assert not docker_client.context.exists("pywhales-removed-in-context")

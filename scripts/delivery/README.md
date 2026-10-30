@@ -13,11 +13,21 @@ release or deployment operations locally against the production repository.
    The rendered site and distributions are uploaded under run/attempt-qualified
    names. `Seal tested delivery` depends on every check, including each matrix
    result. PR runs still test/build but cannot seal deliverable material.
-2. The seal records schema version 1, repository name/numeric ID, workflow
+2. The seal records schema version 2, repository name/numeric ID, workflow
    numeric ID/path, run ID/attempt, source commit, exact job IDs, project version,
-   artifact IDs/names, ZIP SHA256 and every extracted file SHA256. Dist/site IDs
-   and ZIP digests must match the uploader action outputs passed through job
-   outputs, not merely a matching name or creation timestamp.
+   the release notes, artifact IDs/names, ZIP SHA256 and every extracted file
+   SHA256. Dist/site IDs and ZIP digests must match the uploader action outputs
+   passed through job outputs, not merely a matching name or creation timestamp.
+   The seal and receipt reject version 1 documents; there is no dual-accept path.
+   The notes are the body of the `## <version>` section of `CHANGELOG.md` read
+   from the sealed checkout, the same root as `pyproject.toml`. The heading line
+   must equal `## ` plus the project version by string comparison, never a
+   pattern, so `0.7.0rc1` does not match `0.7.0rc10` or `0.7.0rc1 (draft)`. The
+   section runs to the next level-2 heading or the end of the file, keeps its
+   `###` subheadings, and excludes the heading and surrounding blank lines. Line
+   endings are folded to LF. The file is decoded as strict UTF-8, and a missing,
+   empty or duplicated section fails the seal. Code fences are not tracked, so
+   a line starting with `## ` inside a fence ends the section.
 3. `python-publish.yml` runs from the trusted default-branch workflow revision.
    It revalidates the successful same-repository `push` to `main`, workflow ID,
    attempt endpoint and full job set, and queries authoritative associated PRs
@@ -46,6 +56,15 @@ release or deployment operations locally against the production repository.
    New releases are created as drafts and the tag is resolved again before
    publication, so a tag creation/mutation race cannot be accepted by name.
    Draft and prerelease records are not accepted as the published release.
+   The release body is the sealed notes; `generate_release_notes` is never sent
+   and `release` never reads `CHANGELOG.md`, which belongs to another checkout.
+   An existing or just-created draft gets its body and `draft: false` in one
+   PATCH, sent only after the tag-to-commit and prerelease checks pass. A
+   published release whose body differs is rejected without any PATCH. Bodies
+   are compared after folding CRLF/CR to LF and removing trailing whitespace
+   from every line and from the end. Finally the release is read back and its
+   body compared the same way. `released`, which Pages also uses, does not
+   compare bodies, so Pages redeploys never depend on release text.
 7. Release completion explicitly calls `gh-pages.yml` using `workflow_call`.
    It does not depend on a token-created release event triggering anything.
    Pages validates the same receipt, destination and release, then extracts the
@@ -96,6 +115,8 @@ overrides.
 | Standalone Pages tar | 160 MiB | 8,192 | 16 MiB | 128 MiB |
 | Local Pages reference site | Files read individually | 8,192 | 16 MiB | 128 MiB |
 | Local project configuration (smoke and seal) | 1 MiB | — | — | — |
+| Local `CHANGELOG.md` (seal) | 1 MiB | — | — | — |
+| Sealed release notes section (UTF-8) | 120,000 | — | — | — |
 
 PyWhales distributes pure Python, type markers and metadata, not native binaries
 or bundled datasets. A 16 MiB compressed distribution and 64 MiB expanded
@@ -108,7 +129,12 @@ ordinary paginated REST JSON is much smaller. Larger legitimate deliverables
 require an explicit review of these trusted policies, not silently unbounded
 fallbacks. The separate 1 MiB project-configuration cap leaves room for extensive
 tool configuration and UTF-8 comments while bounding both independent local
-`pyproject.toml` reads before TOML decoding.
+`pyproject.toml` reads before TOML decoding. The whole `CHANGELOG.md` read has
+the same 1 MiB cap, which holds many releases of history. The notes cap applies
+to one section after the strict UTF-8 decode and is measured in encoded bytes.
+GitHub rejects release bodies above 125,000 characters. Bytes are never fewer
+than characters, so 120,000 bytes also bounds the characters and leaves 5,000
+of headroom.
 
 Actual received/read bytes are counted in bounded chunks with a one-byte excess
 probe before accumulation. Exact limits succeed; declared lengths and archive

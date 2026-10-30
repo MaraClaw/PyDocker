@@ -10,6 +10,7 @@ from pywhales import Config, DockerClient
 from pywhales.client_config import ParsingError
 from pywhales.components.config.models import ConfigInspectResult
 from pywhales.exceptions import DockerException
+from pywhales.test_utils import random_name
 
 
 def test_batch_inspect_matches_config_references_and_hydrates_cache() -> None:
@@ -172,6 +173,49 @@ def test_labels_config(docker_client: DockerClient, tmp_path: Path) -> None:
         assert my_conf.spec.name == "my_conf"
         assert docker_client.config.list(filters={"label": "dodo=dada"}) == [my_conf]
         assert docker_client.config.list(filters={"label": "dodo=dadu"}) == []
+
+
+@pytest.mark.usefixtures("swarm_mode")
+def test_list_configs_with_repeated_name_filter_pairs(
+    docker_client: DockerClient, tmp_path: Path
+) -> None:
+    config_file = tmp_path / "config.conf"
+    config_file.write_text("hello world")
+    prefix = random_name()
+    with (
+        docker_client.config.create(f"{prefix}_a", config_file) as conf_a,
+        docker_client.config.create(f"{prefix}_b", config_file) as conf_b,
+        docker_client.config.create(f"{prefix}_c", config_file) as conf_c,
+    ):
+        # Repeated name filters are alternatives, so both selected configs match.
+        listed = docker_client.config.list(
+            filters=[("name", f"{prefix}_a"), ("name", f"{prefix}_b")]
+        )
+        assert {conf.id for conf in listed} == {conf_a.id, conf_b.id}
+        assert conf_c.id not in {conf.id for conf in listed}
+        # A generator is accepted and the Mapping form selects the same config.
+        listed = docker_client.config.list(
+            filters=(pair for pair in [("name", f"{prefix}_c")])
+        )
+        assert [conf.id for conf in listed] == [conf_c.id]
+        listed = docker_client.config.list(filters={"name": f"{prefix}_c"})
+        assert [conf.id for conf in listed] == [conf_c.id]
+
+
+@pytest.mark.usefixtures("swarm_mode")
+def test_list_configs_with_label_pair_filters(
+    docker_client: DockerClient, tmp_path: Path
+) -> None:
+    config_file = tmp_path / "config.conf"
+    config_file.write_text("hello world")
+    with docker_client.config.create(
+        "my_conf", config_file, labels={"dodo": "dada", "tier": "web"}
+    ) as my_conf:
+        assert docker_client.config.list(filters=[("label", "dodo=dada")]) == [my_conf]
+        assert docker_client.config.list(
+            filters=[("label", "dodo=dada"), ("label", "tier=web")]
+        ) == [my_conf]
+        assert docker_client.config.list(filters=[("label", "dodo=dadu")]) == []
 
 
 @pytest.mark.usefixtures("swarm_mode")

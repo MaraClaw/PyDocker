@@ -62,6 +62,14 @@
   Natural child exit leaves post-exit pipe draining unchanged.
 - Expiry kills and reaps the local CLI before raising `DockerTimeout`, retaining captured output.
   Natural nonzero exits keep stderr-selected `DockerException` types rather than becoming timeouts.
+- Inside `observation()`, a stream or archive launch snapshots the scope once, at launch (a lazy
+  `save` at its first iteration). `_scoped_launch.py` runs the captured path's preflight before
+  `Popen` and telemetry: cancellation, argv and environment limits, and `E2BIG` mapping. The watchdog
+  or `ArchiveDeadline` kills and reaps the CLI on a set token or scope deadline and keeps applying
+  the snapshot after the `with` block exits. Precedence mirrors `_bounded_capture.py`: token, then a
+  command deadline strictly earlier than the scope's (only while the child runs), then the scope.
+  Tokens add only the bounded `CANCEL_CHECK` wait; streamed and archive payloads aren't charged to
+  response accounts.
 - A bare loop `break` doesn't close an owned stream. Use its context manager or call `close()`
   when stopping early, including before the first iteration. Closing cancels only the local CLI,
   not containers, services, or other daemon-managed resources.

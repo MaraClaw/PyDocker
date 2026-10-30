@@ -191,7 +191,18 @@ its publication isn't atomic to concurrent readers.
 `run`. Its deadline is an absolute monotonic time, and nested scopes can only
 tighten the active limits. The scope applies to the current context; it doesn't
 automatically propagate to worker threads. Interactive, uncaptured, and stdin
-modes aren't supported inside it. An explicit capture policy still inherits an
+modes aren't supported inside `run`.
+
+Streams and archive transfers started inside a scope honor it as well: log and
+progress streams, `docker.load`, and `docker.save`. They check cancellation and
+the argv and environment limits before the local CLI starts, keep the scope's
+deadline and cancel tokens after the `with` block exits, and, when the scope
+ends first, kill and reap the CLI and raise `ObservationTimeout` or
+`ObservationCancelled` from iteration. A lazy `save` takes the scope active at
+its first iteration. A per-call `timeout` that is strictly earlier than the
+scope's deadline still raises `DockerTimeout`. Multi-image `pull` and `push`
+run each pool task in its own copy of the calling context, so they behave like
+a single image. Response-byte budgets don't count streamed or archive payloads. An explicit capture policy still inherits an
 outer deadline and cancellation. `bulk_reload(handles, policy=policy)` is
 bounded; when the policy is omitted, an active observation scope applies. Outside
 such a scope, the existing default behavior is unchanged.

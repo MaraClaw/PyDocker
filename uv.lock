@@ -774,7 +774,7 @@ wheels = [
 
 [[package]]
 name = "pywhales"
-version = "0.6.5"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },

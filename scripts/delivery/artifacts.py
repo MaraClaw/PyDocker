@@ -7,7 +7,7 @@ from pathlib import Path
 from . import limits
 from .api import GitHub, require
 from .archives import safe_path, zip_files
-from .models import Artifact, Artifacts, Bundle, Job, Run
+from .models import Artifact, Bundle, Job, Run
 
 
 def sha256(content: bytes) -> str:
@@ -17,16 +17,7 @@ def sha256(content: bytes) -> str:
 
 def inventory(api: GitHub, run: Run) -> tuple[Artifact, ...]:
     """Enumerate the entire run-scoped inventory; names distinguish attempts."""
-    artifacts: list[Artifact] = []
-    page = 1
-    while True:
-        batch = api.get(
-            f"actions/runs/{run.id}/artifacts?per_page=100&page={page}", Artifacts
-        ).artifacts
-        artifacts.extend(batch)
-        if len(batch) < 100:
-            return tuple(artifacts)
-        page += 1
+    return api.pages(f"actions/runs/{run.id}/artifacts", Artifact, "artifacts")
 
 
 def select(artifacts: tuple[Artifact, ...], name: str) -> Artifact:

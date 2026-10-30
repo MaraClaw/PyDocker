@@ -3,7 +3,7 @@
 from typing import Final
 
 from .api import GitHub, require
-from .models import Identity, Job, Jobs, Pull, PullNumber, Run, Workflow
+from .models import Identity, Job, Pull, PullNumber, Run, Workflow
 
 PRODUCER: Final = "python-package.yml"
 PUBLISHER: Final = "python-publish.yml"
@@ -89,17 +89,9 @@ def trusted_run(api: GitHub, run_id: int, workflow: str) -> Run:
 
 def attempt_jobs(api: GitHub, run: Run) -> tuple[Job, ...]:
     """Read all jobs of precisely this attempt, never the run's merged job view."""
-    jobs: list[Job] = []
-    page = 1
-    while True:
-        batch = api.get(
-            f"actions/runs/{run.id}/attempts/{run.run_attempt}/jobs?per_page=100&page={page}",
-            Jobs,
-        ).jobs
-        jobs.extend(batch)
-        if len(batch) < 100:
-            break
-        page += 1
+    jobs = api.pages(
+        f"actions/runs/{run.id}/attempts/{run.run_attempt}/jobs", Job, "jobs"
+    )
     require(
         all(
             job.run_id == run.id
@@ -110,7 +102,7 @@ def attempt_jobs(api: GitHub, run: Run) -> tuple[Job, ...]:
         "job attempt linkage",
     )
     require(len({job.name for job in jobs}) == len(jobs), "ambiguous jobs")
-    return tuple(jobs)
+    return jobs
 
 
 def successful_jobs(

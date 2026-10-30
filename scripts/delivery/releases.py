@@ -2,6 +2,7 @@
 
 from .api import GitHub, json_body, require
 from .models import GitRef, Receipt, Release
+from .notes import matches
 
 
 def tag_commit(api: GitHub, tag: str) -> str | None:
@@ -48,9 +49,15 @@ def release_record(api: GitHub, tag: str) -> Release | None:
 
 
 def release(api: GitHub, document: Receipt) -> None:
-    """Create refs before releases, and verify both after create/conflict races."""
+    """Create refs before releases, and verify both after create/conflict races.
+
+    The sealed notes are the only body ever sent. A draft receives them and its
+    publication in one PATCH, after the tag and state checks. A published release
+    with other text is rejected untouched, and the final body is read back.
+    """
     tag = f"v{document.seal.version}"
     sha = document.seal.producer.sha
+    notes = document.seal.notes
     current = tag_commit(api, tag)
     if current is None:
         response = api.response(
@@ -67,7 +74,7 @@ def release(api: GitHub, document: Receipt) -> None:
                     "tag_name": tag,
                     "name": tag,
                     "target_commitish": sha,
-                    "generate_release_notes": True,
+                    "body": notes,
                     "draft": True,
                     "prerelease": False,
                 }
@@ -85,7 +92,15 @@ def release(api: GitHub, document: Receipt) -> None:
     require(record.tag_name == tag and not record.prerelease, "release state")
     if record.draft:
         response = api.response(
-            f"releases/{record.id}", json_body({"draft": False}), method="PATCH"
+            f"releases/{record.id}",
+            json_body({"body": notes, "draft": False}),
+            method="PATCH",
         )
         require(response.status == 200, "release publication failed")
+    else:
+        require(matches(record.body, notes), "release body mismatch")
     released(api, document)
+    require(
+        matches(api.get(f"releases/tags/{tag}", Release).body, notes),
+        "release body mismatch",
+    )

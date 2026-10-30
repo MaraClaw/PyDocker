@@ -12,6 +12,7 @@ import sys
 import tarfile
 import threading
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -48,7 +49,7 @@ from scripts.delivery.models import (
 from scripts.delivery.notes import section
 from scripts.delivery.pages import verify_pages_tar
 from scripts.delivery.publication import confirm, prepare
-from scripts.delivery.releases import release
+from scripts.delivery.releases import release, released
 from scripts.delivery.trust import CHECKS, PUBLISH_JOB, SEAL_JOB, identity
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -282,14 +283,17 @@ class Service(Transport):
         )
         self.set_artifacts((artifact,), 200)
 
-    def released(self, sha: str | None = None) -> None:
+    def tagged(self, sha: str | None = None) -> None:
         self.put(
             "git/ref/tags/v0.6.1",
             GitRef(object=GitObject(type="commit", sha=sha or self.source.head_sha)),
         )
+
+    def released(self, sha: str | None = None, body: str | None = NOTES) -> None:
+        self.tagged(sha)
         self.put(
             "releases/tags/v0.6.1",
-            Release(id=1, tag_name="v0.6.1", draft=False, prerelease=False),
+            Release(id=1, tag_name="v0.6.1", draft=False, prerelease=False, body=body),
         )
 
 
@@ -547,7 +551,15 @@ def test_create_and_concurrent_release_verify_exact_final_tag(
             )
             return Response(422 if race else 201, b"{}")
         if method == "POST" and url == BASE_URL + "releases":
-            assert body is not None and json.loads(body)["draft"] is True
+            assert body is not None
+            assert json.loads(body) == {
+                "tag_name": "v0.6.1",
+                "name": "v0.6.1",
+                "target_commitish": service.source.head_sha,
+                "body": NOTES,
+                "draft": True,
+                "prerelease": False,
+            }
             service.released()
             service.put(
                 "releases/tags/v0.6.1",
@@ -560,6 +572,8 @@ def test_create_and_concurrent_release_verify_exact_final_tag(
                 .encode(),
             )
         if method == "PATCH" and url == BASE_URL + "releases/1":
+            assert body is not None
+            assert json.loads(body) == {"body": NOTES, "draft": False}
             service.released()
             return Response(200, b"{}")
         return original(method, url, body)
@@ -571,6 +585,211 @@ def test_create_and_concurrent_release_verify_exact_final_tag(
 
     service.api = GitHub(Race(), "owner/repo", 1)
     release(service.api, document)
+
+
+class ReleaseAPI(Transport):
+    """Stateful GitHub release endpoints; other requests use the shared service."""
+
+    def __init__(
+        self,
+        service: Service,
+        current: Release | None = None,
+        *,
+        hidden: bool = False,
+        stored: Callable[[str], str] = str,
+    ) -> None:
+        self.service = service
+        self.current = current
+        self.hidden = hidden
+        self.stored = stored
+        self.writes: list[tuple[str, dict[str, JsonValue]]] = []
+
+    @override
+    def request(self, method: str, url: str, body: bytes | None = None) -> Response:
+        match method, url.removeprefix(BASE_URL):
+            case "GET", "releases/tags/v0.6.1":
+                if self.current and not self.current.draft and not self.hidden:
+                    return Response(200, self.current.model_dump_json().encode())
+                return Response(404, b"{}")
+            case "GET", "releases?per_page=100&page=1":
+                visible = [self.current] if self.current and not self.hidden else []
+                return Response(
+                    200,
+                    json.dumps(
+                        [item.model_dump(mode="json") for item in visible]
+                    ).encode(),
+                )
+            case "POST", "releases":
+                assert body is not None
+                payload = json.loads(body)
+                self.writes.append((method, payload))
+                if self.current is not None:
+                    self.hidden = False
+                    return Response(422, b"{}")
+                self.current = Release(
+                    id=1,
+                    tag_name=payload["tag_name"],
+                    draft=payload["draft"],
+                    prerelease=payload["prerelease"],
+                    body=payload["body"],
+                )
+                return Response(201, self.current.model_dump_json().encode())
+            case "PATCH", "releases/1":
+                assert body is not None and self.current is not None
+                payload = json.loads(body)
+                self.writes.append((method, payload))
+                self.current = self.current.model_copy(
+                    update={
+                        "draft": payload["draft"],
+                        "body": self.stored(payload["body"]),
+                    }
+                )
+                return Response(200, self.current.model_dump_json().encode())
+        return self.service.request(method, url, body)
+
+    def github(self) -> GitHub:
+        return GitHub(self, "owner/repo", 1)
+
+
+def draft(body: str | None = "Generated notes", *, prerelease: bool = False) -> Release:
+    return Release(
+        id=1, tag_name="v0.6.1", draft=True, prerelease=prerelease, body=body
+    )
+
+
+def sealed_release(service: Service) -> Receipt:
+    service.receipted()
+    service.tagged()
+    return receipt(service.api, 200)
+
+
+CREATED = {
+    "tag_name": "v0.6.1",
+    "name": "v0.6.1",
+    "target_commitish": "a" * 40,
+    "body": NOTES,
+    "draft": True,
+    "prerelease": False,
+}
+PUBLISHED = {"body": NOTES, "draft": False}
+
+
+@pytest.mark.parametrize("start", ["absent", "raced-draft", "visible-draft"])
+def test_release_publishes_sealed_notes_with_one_patch(
+    service: Service, start: str
+) -> None:
+    document = sealed_release(service)
+    fake = ReleaseAPI(
+        service,
+        None if start == "absent" else draft(),
+        hidden=start == "raced-draft",
+    )
+    release(fake.github(), document)
+    assert (
+        fake.writes
+        == {
+            "absent": [("POST", CREATED), ("PATCH", PUBLISHED)],
+            "raced-draft": [("POST", CREATED), ("PATCH", PUBLISHED)],
+            "visible-draft": [("PATCH", PUBLISHED)],
+        }[start]
+    )
+    assert fake.current == Release(
+        id=1, tag_name="v0.6.1", draft=False, prerelease=False, body=NOTES
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        NOTES,
+        NOTES.replace("\n", "\r\n") + "\r\n",
+        "\n".join(f"{line}  " for line in NOTES.split("\n")) + "\n\n",
+    ],
+    ids=["exact", "crlf", "trailing-whitespace"],
+)
+def test_published_release_with_matching_body_is_not_patched(
+    service: Service, body: str
+) -> None:
+    document = sealed_release(service)
+    published = Release(
+        id=1, tag_name="v0.6.1", draft=False, prerelease=False, body=body
+    )
+    fake = ReleaseAPI(service, published)
+    release(fake.github(), document)
+    assert fake.writes == []
+    assert fake.current == published
+
+
+@pytest.mark.parametrize(
+    "body",
+    [None, "", "Generated notes", NOTES + "\n\nFull Changelog: ..."],
+    ids=["null", "empty", "generated", "appended"],
+)
+def test_published_release_with_other_body_is_rejected_untouched(
+    service: Service, body: str | None
+) -> None:
+    document = sealed_release(service)
+    published = Release(
+        id=1, tag_name="v0.6.1", draft=False, prerelease=False, body=body
+    )
+    fake = ReleaseAPI(service, published)
+    with pytest.raises(Rejected, match="release body mismatch"):
+        release(fake.github(), document)
+    assert fake.writes == []
+    assert fake.current == published
+
+
+@pytest.mark.parametrize(
+    ("fault", "reason"),
+    [("prerelease", "release state"), ("tag", "tag commit mismatch")],
+)
+def test_draft_is_not_patched_before_tag_and_state_checks(
+    service: Service, fault: str, reason: str
+) -> None:
+    document = sealed_release(service)
+    fake = ReleaseAPI(service, draft(prerelease=fault == "prerelease"))
+    if fault == "tag":
+        service.tagged("c" * 40)
+    with pytest.raises(Rejected, match=reason):
+        release(fake.github(), document)
+    assert fake.writes == []
+
+
+@pytest.mark.parametrize("start", ["absent", "visible-draft"])
+def test_read_back_rejects_a_body_that_differs_after_publication(
+    service: Service, start: str
+) -> None:
+    document = sealed_release(service)
+    fake = ReleaseAPI(
+        service,
+        None if start == "absent" else draft(),
+        stored=lambda body: body + "\n\nGenerated by GitHub",
+    )
+    with pytest.raises(Rejected, match="release body mismatch"):
+        release(fake.github(), document)
+    assert [method for method, _payload in fake.writes].count("PATCH") == 1
+
+
+def test_read_back_accepts_line_ending_and_trailing_whitespace_drift(
+    service: Service,
+) -> None:
+    document = sealed_release(service)
+    fake = ReleaseAPI(
+        service, draft(), stored=lambda body: body.replace("\n", "\r\n") + "  \r\n"
+    )
+    release(fake.github(), document)
+    assert fake.writes == [("PATCH", PUBLISHED)]
+
+
+@pytest.mark.parametrize("body", [None, "", "Hand-edited notes"])
+def test_released_never_compares_release_bodies(
+    service: Service, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str | None
+) -> None:
+    document = sealed_release(service)
+    service.released(body=body)
+    released(service.api, document)
+    site = tmp_path / "site"
+    assert invoke(monkeypatch, "pages", "--run-id", "200", "--output", str(site)) == 0
 
 
 def test_annotated_tag_is_resolved_not_trusted_by_name(service: Service) -> None:

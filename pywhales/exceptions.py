@@ -4,6 +4,7 @@ Exception messages withhold command and captured payload values by default.
 Raw attributes remain available and confidential regardless of message policy.
 """
 
+import re
 from typing import override
 
 
@@ -105,6 +106,22 @@ class NoSuchVolume(DockerException):
     pass
 
 
+class NoSuchConfig(DockerException):
+    """The Swarm config named in the failed command does not exist."""
+
+
+class NoSuchSecret(DockerException):
+    """The Swarm secret named in the failed command does not exist."""
+
+
+class NoSuchPlugin(DockerException):
+    """The daemon plugin named in the failed command does not exist."""
+
+
+class NoSuchContext(DockerException):
+    """The Docker CLI context named in the failed command does not exist."""
+
+
 class DockerTimeout(DockerException):
     """Local CLI timeout after launch-based expiry and process cleanup.
 
@@ -148,31 +165,98 @@ class ObservationCancelled(Exception):
         super().__init__("The observation was cancelled.")
 
 
+# Docker prefixes failures with the daemon marker, optionally led by one
+# whitespace-free token (``docker:`` or a service name in ``service scale``),
+# or with ``Error:``. The bare token is allowed only before the daemon marker.
+_PREFIX = r"(?:(?:\S+: )?Error response from daemon: |Error: )?"
+# Docker resource names contain no whitespace, so a name is one token.
+_NAME = r"\S+"
+_QUOTED_NAME = r'"[^"\s]+"'
+
+
+def _line_start(*phrases: str) -> re.Pattern[str]:
+    """Compile the alternatives of one kind, each anchored at a line start.
+
+    Args:
+        *phrases: Regular expressions for the text following the optional prefix.
+            Each must end with a word character.
+
+    Returns:
+        A case-insensitive pattern matching a line that opens with the prefix and
+        one of the phrases, ended on a word boundary.
+    """
+    alternatives = "|".join(phrases)
+    return re.compile(rf"^{_PREFIX}(?:{alternatives})\b", re.IGNORECASE | re.MULTILINE)
+
+
+# Evaluated in order; the first kind with a matching line wins, whatever the line
+# order. The original kinds keep their historical order and the newer kinds follow.
+_KIND_PATTERNS: tuple[tuple[type[DockerException], re.Pattern[str]], ...] = (
+    (NoSuchImage, _line_start(r"no such image")),
+    (
+        NoSuchService,
+        _line_start(r"no such service", rf"service {_NAME} not found"),
+    ),
+    (NoSuchContainer, _line_start(r"no such container")),
+    (NotASwarmManager, _line_start(r"this node is not a swarm manager")),
+    (
+        NoSuchVolume,
+        _line_start(r"no such volume", rf"get {_NAME}: no such volume"),
+    ),
+    (NoSuchNetwork, _line_start(rf"network {_NAME} not found")),
+    (NoSuchConfig, _line_start(r"no such config", rf"config {_NAME} not found")),
+    (NoSuchSecret, _line_start(r"no such secret", rf"secret {_NAME} not found")),
+    (
+        NoSuchPlugin,
+        _line_start(r"no such plugin", rf"plugin {_QUOTED_NAME} not found"),
+    ),
+    (
+        NoSuchContext,
+        _line_start(
+            rf"context {_QUOTED_NAME}: context not found",
+            rf"context {_QUOTED_NAME} does not exist",
+        ),
+    ),
+)
+
+
 def get_docker_exception_type(output: bytes | None) -> type[DockerException]:
-    """Select an exception class from case-insensitive stderr message patterns.
+    """Select an exception class from the kind phrase opening a stderr line.
+
+    A kind is recognized only when a line starts with its own phrase, compared
+    case-insensitively after an optional ``Error response from daemon: ``,
+    ``<token>: Error response from daemon: ``, or ``Error: `` prefix. The phrases
+    are ``No such <kind>`` for image, service, container, volume, config, secret,
+    and plugin; ``<kind> <name> not found`` for service, network, config, and
+    secret; ``get <name>: no such volume``; ``plugin "<name>" not found``;
+    ``context "<name>": context not found``; ``context "<name>" does not exist``;
+    and ``This node is not a swarm manager``. Resource names contain no
+    whitespace and are matched as a single token after the phrase, so a name,
+    or a file path inside a context message, can't supply another kind's phrase
+    unless the path embeds a line break.
+
+    When several lines name different kinds, the first kind in this order wins,
+    regardless of line order: image, service, container, swarm manager, volume,
+    network, config, secret, plugin, context. Unrecognized stderr, including a
+    Swarm-mode ``volume <name> not found``, ``node <name> not found``, and
+    ``no such task or service``, stays DockerException.
+
+    The classifier reads whatever the CLI wrote to stderr. Application output
+    that ``run`` or ``exec`` forwards there can still begin a line with one of
+    these phrases and be misclassified. No attempt is made to prevent that.
 
     Args:
         output: Captured stderr bytes, or ``None`` when stderr was not captured.
 
     Returns:
-        The first matching specialized failure class, or DockerException for
-        absent, empty, or unrecognized output. No exception is instantiated.
+        The specialized failure class of the highest-precedence matching kind, or
+        DockerException for absent, empty, or unrecognized output. No exception
+        is instantiated.
     """
     if output is None or len(output) == 0:
         return DockerException
-    decoded = output.decode(errors="replace").lower()
-    if "no such image" in decoded:
-        return NoSuchImage
-    if "no such service" in decoded or (
-        "service" in decoded and "not found" in decoded
-    ):
-        return NoSuchService
-    if "no such container" in decoded:
-        return NoSuchContainer
-    if "this node is not a swarm manager" in decoded:
-        return NotASwarmManager
-    if "no such volume" in decoded:
-        return NoSuchVolume
-    if "network" in decoded and "not found" in decoded:
-        return NoSuchNetwork
+    decoded = output.decode(errors="replace")
+    for exception_type, pattern in _KIND_PATTERNS:
+        if pattern.search(decoded) is not None:
+            return exception_type
     return DockerException

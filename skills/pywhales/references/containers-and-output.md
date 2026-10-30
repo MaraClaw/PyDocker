@@ -44,24 +44,38 @@ have the source path on its own host.
 | `docker.execute(container, [...], stream=True)` | Owned `ProcessStream` yielding `(source, bytes)` |
 | `docker.logs(container)` | `str` assembled from stdout/stderr log chunks |
 | `docker.logs(container, stream=True)` | Owned `ProcessStream` yielding `(source, bytes)` |
+| `docker.start(container)` | `None` |
+| `docker.start(container, attach=True)` | `str` containing captured stdout |
+| `docker.start(container, attach=True, stream=True)` | Owned `ProcessStream` yielding `(source, bytes)` |
 | `docker.ps(all=True)` | `list[Container]`, including stopped containers |
 
 For stream tuples, `source` is `"stdout"` or `"stderr"`. Don't decode the tuple;
 decode its byte payload. Don't combine `detach=True` with streaming. For
 `execute`, `tty=True` is also incompatible with streaming. Leave TTY allocation
 off for captured automation; use `interactive=True, tty=True` for an actual
-interactive terminal session.
+interactive terminal session. `start(..., stream=True)` requires `attach=True`,
+and attaching more than one container raises `ValueError`; an empty iterable
+returns `None` without a launch. `docker.start`, `docker.container.start`, and
+`Container.start()` share these rules and their return shapes.
 
-`run`, `execute`, and `logs` each accept a keyword-only `timeout` in positive
-finite seconds, replacing the client's `default_timeout` for that one launch;
-omitting it (`None`) inherits the client default, which is itself `None`
-(unbounded) unless set on `DockerClient(...)`. Expiry kills and reaps the
-local CLI and raises `DockerTimeout`, not a daemon-side container timeout; it
-does not stop a detached container or guarantee cancellation of the command
-inside it. See [Client, setup, and errors](client-and-errors.md) for the
-default-deadline contract. Image pull/inspect preflights and detached-result
-inspection are outside the selected run/execute/logs launch budget; a configured
-client default still applies separately to those launches.
+`run`, `execute`, `logs`, and `start` each accept a keyword-only `timeout` in
+positive finite seconds, replacing the client's `default_timeout` for that one
+launch; omitting it (`None`) inherits the client default, which is itself
+`None` (unbounded) unless set on `DockerClient(...)`. Expiry kills and reaps the
+local CLI and raises `DockerTimeout`, which keeps whatever output was captured.
+It is not a daemon-side container timeout: it does not stop a started or
+detached container or guarantee cancellation of the command inside it. See
+[Client, setup, and errors](client-and-errors.md) for the default-deadline
+contract. Image pull/inspect preflights and detached-result inspection are
+outside the selected run/execute/logs launch budget; a configured client
+default still applies separately to those launches.
+
+`start` takes `timeout` in every mode (unattached, attached and captured, or
+streamed) and through all three entry points, validated before the container
+iterable is consumed. An invalid value raises `ValueError` even for `[]`, while
+a valid one with `[]` returns `None` without a launch. A streamed `start`,
+`run`, `execute`, or `logs` deadline keeps advancing while nobody iterates, so
+exhaust the stream or close it on early exit; closing reaps only the local CLI.
 
 ## Bound Stream Buffering
 

@@ -9,7 +9,12 @@ import pytest
 from pywhales import DockerClient, Secret
 from pywhales.client_config import ParsingError
 from pywhales.components.secret.models import SecretInspectResult
-from pywhales.exceptions import DockerException
+from pywhales.exceptions import (
+    DockerException,
+    NoSuchConfig,
+    NoSuchService,
+    NotASwarmManager,
+)
 
 
 def test_batch_inspect_matches_secret_single_pass_references_and_hydrates_cache() -> (
@@ -179,3 +184,148 @@ def test_swarm_update_auto_lock_managers(
     assert my_secret3.created_at <= date_after_creation
 
     docker_client.secret.remove(my_secret.id)
+
+
+NOT_A_MANAGER = (
+    b"Error response from daemon: This node is not a swarm manager. "
+    b'Use "docker swarm init" or "docker swarm join" to connect this node to swarm '
+    b"and try again."
+)
+SECRET_MISSING = b"Error response from daemon: secret resource not found"
+SECRET_JSON = b'[{"ID":"resource","Spec":{"Name":"named"}}]'
+# Each failure below is not this secret's own not-found error.
+OTHER_FAILURES = [
+    pytest.param(b"permission denied", DockerException, id="command-failure"),
+    pytest.param(NOT_A_MANAGER, NotASwarmManager, id="not-a-swarm-manager"),
+    pytest.param(
+        b"Error response from daemon: config resource not found",
+        NoSuchConfig,
+        id="config-not-found",
+    ),
+    pytest.param(
+        b"Error response from daemon: service resource not found",
+        NoSuchService,
+        id="service-not-found",
+    ),
+]
+
+
+def _secret() -> tuple[DockerClient, Secret]:
+    client = DockerClient()
+    client.client_config._client_call_with_path = ["docker-test"]
+    return client, Secret(client.client_config, "resource", is_immutable_id=True)
+
+
+@pytest.mark.parametrize("missing", [False, True], ids=["removed", "already-missing"])
+def test_secret_cleanup_ignores_only_a_missing_secret(missing: bool) -> None:
+    _, secret = _secret()
+    response = CompletedProcess(
+        [], 1 if missing else 0, b"", SECRET_MISSING if missing else b""
+    )
+    with patch("subprocess.run", return_value=response) as command, secret:
+        pass
+    command.assert_called_once()
+    assert command.call_args.args[0] == ["docker-test", "secret", "remove", "resource"]
+
+
+@pytest.mark.parametrize(("stderr", "error_type"), OTHER_FAILURES)
+def test_secret_cleanup_propagates_other_removal_failures(
+    stderr: bytes, error_type: type[DockerException]
+) -> None:
+    _, secret = _secret()
+    response = CompletedProcess([], 17, b"output", stderr)
+    with (
+        patch("subprocess.run", return_value=response) as command,
+        pytest.raises(DockerException) as raised,
+        secret,
+    ):
+        pass
+    command.assert_called_once()
+    assert type(raised.value) is error_type
+    assert raised.value.return_code == 17
+    assert raised.value.stderr == stderr.decode()
+
+
+@pytest.mark.parametrize(("stderr", "error_type"), OTHER_FAILURES)
+def test_secret_cleanup_failure_joins_the_body_error(
+    stderr: bytes, error_type: type[DockerException]
+) -> None:
+    _, secret = _secret()
+    body = RuntimeError("body")
+    response = CompletedProcess([], 17, b"", stderr)
+    with (
+        patch("subprocess.run", return_value=response),
+        pytest.raises(BaseExceptionGroup) as raised,
+        secret,
+    ):
+        raise body
+    assert raised.value.message == "Secret body and cleanup both failed"
+    assert raised.value.exceptions[0] is body
+    assert type(raised.value.exceptions[1]) is error_type
+
+
+def test_secret_missing_at_cleanup_leaves_the_body_error_alone() -> None:
+    _, secret = _secret()
+    body = RuntimeError("body")
+    response = CompletedProcess([], 1, b"", SECRET_MISSING)
+    with (
+        patch("subprocess.run", return_value=response),
+        pytest.raises(RuntimeError) as raised,
+        secret,
+    ):
+        raise body
+    assert raised.value is body
+
+
+def _exists(client: DockerClient, secret: Secret, *, as_handle: bool) -> bool:
+    return secret.exists() if as_handle else client.secret.exists("resource")
+
+
+@pytest.mark.parametrize("as_handle", [False, True], ids=["cli", "handle"])
+def test_secret_exists_is_true_after_inspect(as_handle: bool) -> None:
+    client, secret = _secret()
+    response = CompletedProcess([], 0, SECRET_JSON, b"")
+    with patch("subprocess.run", return_value=response) as command:
+        found = _exists(client, secret, as_handle=as_handle)
+    assert found is True
+    command.assert_called_once()
+    assert command.call_args.args[0] == ["docker-test", "secret", "inspect", "resource"]
+
+
+@pytest.mark.parametrize("as_handle", [False, True], ids=["cli", "handle"])
+def test_secret_exists_is_false_for_a_missing_secret(as_handle: bool) -> None:
+    client, secret = _secret()
+    response = CompletedProcess([], 1, b"", SECRET_MISSING)
+    with patch("subprocess.run", return_value=response):
+        found = _exists(client, secret, as_handle=as_handle)
+    assert found is False
+
+
+@pytest.mark.parametrize("as_handle", [False, True], ids=["cli", "handle"])
+@pytest.mark.parametrize(("stderr", "error_type"), OTHER_FAILURES)
+def test_secret_exists_propagates_other_failures(
+    as_handle: bool, stderr: bytes, error_type: type[DockerException]
+) -> None:
+    client, secret = _secret()
+    response = CompletedProcess([], 1, b"", stderr)
+    with (
+        patch("subprocess.run", return_value=response),
+        pytest.raises(DockerException) as raised,
+    ):
+        _exists(client, secret, as_handle=as_handle)
+    assert type(raised.value) is error_type
+
+
+@pytest.mark.usefixtures("swarm_mode")
+def test_secret_removed_inside_its_context_exits_cleanly(
+    docker_client: DockerClient, tmp_path: Path
+) -> None:
+    secret_file = tmp_path / "secret.txt"
+    secret_file.write_text("hello")
+    with docker_client.secret.create("removed_in_context", secret_file) as my_secret:
+        assert my_secret.exists()
+        assert docker_client.secret.exists("removed_in_context")
+        my_secret.remove()
+        assert not my_secret.exists()
+    assert not my_secret.exists()
+    assert not docker_client.secret.exists("removed_in_context")

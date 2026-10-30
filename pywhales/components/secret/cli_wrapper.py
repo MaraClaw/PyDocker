@@ -24,6 +24,7 @@ from pywhales.client_config import (
 from pywhales.components._cleanup import resource_cleanup
 from pywhales.components._swarm_inspect import parse_swarm_inspect_results
 from pywhales.components.secret.models import SecretInspectResult, SecretSpec
+from pywhales.exceptions import NoSuchSecret
 from pywhales.utils import (
     ValidPath,
     custom_parse_object_as,
@@ -42,8 +43,9 @@ type SecretListFilter = (
 class Secret(ReloadableObjectFromJson[SecretInspectResult]):
     """Reloadable Swarm secret handle with context-exit removal.
 
-    Cleanup is attempted even if the body raises. If cleanup also fails, both
-    exceptions are preserved together rather than suppressing either failure.
+    Cleanup is attempted even if the body raises, and ignores a secret that is
+    already gone. Other cleanup failures are preserved together with any active
+    body exception rather than suppressing either failure.
     """
 
     def __init__(
@@ -63,7 +65,10 @@ class Secret(ReloadableObjectFromJson[SecretInspectResult]):
         exc_tb: TracebackType | None,
     ) -> None:
         with resource_cleanup(exc_val, "Secret body and cleanup both failed"):
-            self.remove()
+            try:
+                self.remove()
+            except NoSuchSecret:
+                return
 
     @override
     def _fetch_inspect_result_json(self, reference: str) -> dict[str, JsonValue]:
@@ -100,6 +105,10 @@ class Secret(ReloadableObjectFromJson[SecretInspectResult]):
         """
         SecretCLI(self.client_config).remove(self)
 
+    def exists(self) -> bool:
+        """Return whether this secret can still be inspected in the Swarm."""
+        return SecretCLI(self.client_config).exists(self.id)
+
 
 ValidSecret = Secret | str
 
@@ -133,6 +142,23 @@ class SecretCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--template-driver", template_driver)
         full_cmd += [name, file]
         return Secret(self.client_config, run(full_cmd), is_immutable_id=True)
+
+    def exists(self, x: str) -> bool:
+        """Return whether a secret can be inspected.
+
+        Args:
+            x: Secret name or ID to inspect.
+
+        Returns:
+            False when Docker reports NoSuchSecret; True on successful inspection.
+            Other inspection failures propagate, including NotASwarmManager.
+        """
+        try:
+            self.inspect(x)
+        except NoSuchSecret:
+            return False
+        else:
+            return True
 
     @overload
     def inspect(self, x: str) -> Secret: ...

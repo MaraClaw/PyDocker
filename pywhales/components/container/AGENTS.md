@@ -26,12 +26,28 @@
   Both TTY plus streaming and detach plus streaming are invalid combinations.
 - `start()` streaming requires `attach=True` and a single container; attaching multiple
   containers is invalid. Unattached calls return `None`; attached, nonstreamed calls return `str`.
-- `ContainerCLI.logs()`, its root alias `docker.logs()`, and `Container.logs()` accept keyword-only
-  `timeout` for the local logs launch; the handle still returns `str`. Inspect preflight runs outside
-  this deadline. Expiry raises `DockerTimeout` without stopping the container; post-exit draining is unchanged.
 - Logs use the originating client's general `stream_buffer_bytes` at the shared stream boundary,
   including when collecting text. Keep the owned transport closed on collection/decoding failure.
   `follow=True` without `stream=True` can block until the container stops.
+  `Container.logs()` still returns `str`.
+
+## Local Deadlines
+
+- `run`, `execute`, `start`, `copy`, `export`, and `logs` take keyword-only `timeout` on `ContainerCLI`, the matching
+  root aliases (`docker.run`, `docker.start`, and so on), and the `Container` handle (`execute`, `start`, `copy_from`,
+  `copy_to`, `export`, `logs`; there's no handle `run()`). `None` inherits `ClientConfig.default_timeout`.
+  Expiry kills and reaps only the local CLI and raises `DockerTimeout`; it doesn't stop or cancel container-side
+  work. Post-exit draining is unchanged. Parent and runtime guides cover the shared semantics.
+- `start()` validates `timeout` first in every mode (unattached, captured, streamed) and entry point, before the
+  container iterable is consumed or the empty-request return. An invalid value raises `ValueError` even for `[]`;
+  a valid one with `[]` returns `None` without a launch. The multi-container attach and unattached-stream errors
+  come after it. The handle forwards positional `attach`, `interactive`, `stream`, and `detach_keys` unchanged.
+- Preflights stay outside the selected per-launch deadline. `run()` completes `ImageCLI` lookup or pulling and
+  `logs()` completes inspection first; `execute()`, `copy()`, and `export()` finish validation, argv assembly, and
+  executable lookup first. A detached `run()` doesn't budget the returned handle's lookup.
+- Attach and stream ownership is unchanged. Streamed `start()`, `execute()`, `run()`, and `logs()` return owned
+  streams whose deadline advances even when nobody iterates; close them or use the context manager on early exit.
+  TTY output is forwarded and the returned text is empty. `copy()` local paths are on the Python host.
 
 ## Batch Inspection And Top
 
@@ -51,7 +67,10 @@ Paths below are relative to the repository root.
 - `tests/pywhales/components/test_container.py`: mocked top, batch inspection, cleanup races,
   eager-log decoding cleanup, and streaming-log ownership; also contains live component tests.
 - `tests/pywhales/test_container_image_enum_json.py`: mocked filter argv and enum/JSON snapshots.
-- `tests/pywhales/components/test_command_deadlines.py`: launch/log validation, partial output, reaping, and output shapes.
-- `tests/pywhales/components/test_deadline_forwarding.py`: execution/log budgets, handle/root aliases, and unbudgeted preflights.
-- `tests/pywhales/test_command_deadline_types.py`: static run/execute/log overloads, handle forwarding, and aliases.
+- `tests/pywhales/components/test_command_deadlines.py`: launch, log, copy/export, and start validation,
+  partial output, reaping, and output shapes.
+- `tests/pywhales/components/test_deadline_forwarding.py`: run/execute/log budgets, `start` in every mode and entry,
+  empty and invalid start requests, handle/root aliases, and unbudgeted preflights.
+- `tests/pywhales/test_command_deadline_types.py`: static run/execute/log/start/copy/export overloads,
+  handle forwarding, and aliases.
 - `tests/pywhales/test_type_contracts.py`: static inspect and parsed/raw top return contracts.

@@ -28,15 +28,27 @@ Build progress overrides and Compose globals follow [the package guide](../../AG
   `(source, bytes)` with `stream=True`; detached resources retain the originating config.
 - `run()` defaults to `tty=True`. Reject TTY plus streaming, detach plus streaming,
   and detach plus TTY; callers must set `tty=False` for detached or streamed runs.
-- Its keyword-only `timeout` is validated before launch and forwarded to blocking/streaming
-  execution. This local CLI budget isn't a Compose shutdown timeout or `up(wait_timeout=...)`.
 - `ps()` returns container resources. Reject `ps()` and detached `run()` in dry-run mode
   before execution; attached `run(tty=False)` can return preview text instead.
 
+## Local Deadlines
+
+- `run`, `pull`, `push`, `watch`, `logs`, and `events` take keyword-only `timeout`: positive finite seconds from the
+  local CLI launch, or `None` to inherit `ClientConfig.default_timeout`. Expiry kills and reaps only the local CLI and
+  raises `DockerTimeout`; it doesn't stop services, undo pulled or pushed layers, or change post-exit pipe draining.
+  A returned stream's deadline advances while nothing consumes it.
+- `pull()`, `push()`, and `watch()` validate `timeout` before the `[]` no-op: an invalid value raises `ValueError`
+  for `[]` and `None` selections alike, and a valid one with `[]` returns `None` without a launch. `pull()` validates
+  before its quiet/stream conflict check. Blocking `push()` returns `None`; `pull(stream_logs=True)` returns a stream.
+- Dry-run rejections and the `[]` rules in Service Selection are unchanged by timeouts. `watch()` keeps its explicit
+  `--prune=false` or `--prune=true` under a deadline.
+- Local budgets aren't Docker option values: `down()`, `restart()`, and `stop()` `timeout` is the container shutdown
+  grace period, and `up(wait_timeout=...)` is Compose's own wait. Never forward one as the other.
+- Waiting for running or healthy services after launch is `pywhales.convergence` (`capture_compose()`, `wait()`);
+  follow [its guide](../../convergence/AGENTS.md) instead of reimplementing the evaluator here.
+
 ## Logs And Events
 
-- `logs()` and `events()` accept keyword-only `timeout` for a launch-based local CLI deadline.
-  Expiry raises `DockerTimeout`; it doesn't stop services or change post-exit pipe draining.
 - Logs retain collected text or an owned `(source, bytes)` stream. Events retain
   `MappedProcessStream[ComposeEvent]`, parsing stdout JSON only and owning the underlying transport.
 - General `stream_buffer_bytes` is selected at the shared stream boundary, including for collected logs.
@@ -59,6 +71,7 @@ Paths below are relative to `tests/pywhales/`; collection/runtime cautions are i
 - `test_compose_modernization.py`: argv, per-build progress, empty selection, dry-run resources, watch ownership.
 - `test_compose_build_enum_json.py`: nested JSON, enum/string outputs, independent defaults, raw config.
 - `components/test_compose.py`: top layouts/raw/no-op/error cases, logs/events ownership, legacy integration.
-- `components/test_command_deadlines.py` and `components/test_deadline_forwarding.py`: run/log/event deadline execution and forwarding.
+- `components/test_command_deadlines.py` and `components/test_deadline_forwarding.py`: run/log/event/pull/push/watch
+  deadline execution, forwarding, and empty-selection validation.
 - Static contracts: `test_compose_type_contracts.py`, `test_type_contracts.py`,
   `test_command_deadline_types.py`, and `test_enum_json_type_contracts.py`.

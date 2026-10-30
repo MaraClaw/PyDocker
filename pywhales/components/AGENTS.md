@@ -30,6 +30,7 @@ The 18 groups are `buildx`, `compose`, `config`, `container`, `context`, `image`
   in a `BaseExceptionGroup`. Don't swallow either failure or narrow the catch.
   Container, Image, Volume, Network, Config, Secret, Plugin, and Service nest a `try` inside it that
   returns on only their own `NoSuch*` error; every other removal failure still reaches `resource_cleanup`.
+  Context, Builder, and ManifestList use it without that `try`.
   Config, Secret, Plugin, Context, and Service handles expose `exists()`, which is `False` only for
   that own error, so `NotASwarmManager` and other failures propagate.
 - Config, Node, Secret, and Service inspect use `_swarm_inspect.py::parse_swarm_inspect_results`.
@@ -44,14 +45,26 @@ The 18 groups are `buildx`, `compose`, `config`, `container`, `context`, `image`
   Preserve request order and duplicates
   as distinct handles; `[]` returns without executable lookup. Scalar inspect and current-context
   `context.inspect()` behavior stay unchanged; don't apply these positional rules to Swarm reordering.
-- `service.logs()` and `system.events()` accept keyword-only `timeout` for the selected local CLI.
-  Service inspect preflight is outside the deadline; logs retain collected text or owned byte streams.
-  System events retain `MappedProcessStream[DockerEvent]` with stdout-only JSON mapping and transport ownership.
-  There's no `Service.logs()` handle API. General stream budgets and post-exit draining follow the package guide.
 - `top.py` shares table parsing, but Docker top takes `ps_args` and Compose top selects
   services with grouped-container or flat-service output. Keep those grammars separate.
   Parsed tables support scalar columns and at most one final free-text field.
   Unsupported layouts raise `TopParseError`; use explicit `raw=True` instead of guessing.
+
+## Local Deadlines
+
+- A keyword-only `timeout` is positive finite seconds for the selected local CLI launch, or `None` to
+  inherit `ClientConfig.default_timeout`; wrappers call `utils.validate_timeout` first. Expiry, reaping,
+  and stream timing follow [the runtime guide](../AGENTS.md). No deadline undoes daemon or registry work.
+- Container (`run`, `execute`, `start`, `copy`, `export`, `logs`) and Compose (`run`, `pull`, `push`,
+  `watch`, `logs`, `events`) rules live in their child guides. Image transfers and archives and Buildx
+  `build`/`bake`/`prune` also take `timeout`; start from their wrapper signatures.
+- `service.logs()` and `system.events()` take keyword-only `timeout`. Service inspect preflight is outside
+  the deadline; logs keep collected text or owned byte streams. Events keep `MappedProcessStream[DockerEvent]`
+  (stdout-only JSON mapping, transport ownership). There's no `Service.logs()` handle API.
+- `manifest.push()` and `plugin.push()` budget only the push CLI; the manifest-list inspect preflight is
+  outside it. `volume.copy()`/`clone()` apply `timeout` to each helper launch, not as one total.
+- Docker option values aren't local deadlines: `plugin.enable(timeout=...)` (HTTP), container `stop_timeout`
+  and `health_timeout`, Compose `down`/`restart`/`stop` `timeout`, and `up(wait_timeout=...)`.
 
 ## Test Navigation
 
@@ -62,6 +75,6 @@ The 18 groups are `buildx`, `compose`, `config`, `container`, `context`, `image`
 - Wire fixtures live in `tests/pywhales/components/jsons/`; static resource and top
   contracts live in `tests/pywhales/test_type_contracts.py`, with group-specific contracts
   alongside it for Buildx and Compose.
-- Subscription execution/forwarding lives in `components/test_command_deadlines.py` and
-  `components/test_deadline_forwarding.py` under `tests/pywhales/`; static shapes are in
+- Deadline execution/forwarding (launches, transfers, subscriptions) lives in `components/test_command_deadlines.py`
+  and `components/test_deadline_forwarding.py` under `tests/pywhales/`; static shapes are in
   `tests/pywhales/test_command_deadline_types.py`.

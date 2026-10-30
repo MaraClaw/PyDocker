@@ -46,13 +46,25 @@ delivered once through iteration, including after an explicit `close()`.
 Closing cancels only local CLI processes, not registry pushes or daemon-side
 transfers already in progress.
 
-`pull` accepts a keyword-only `timeout` in positive finite seconds, replacing
-`default_timeout` for that call. Each concurrent transfer gets its own
-deadline, and image inspection or executor queueing doesn't consume it. `None`
-inherits the client default rather than disabling it.
-`push` has no `timeout` parameter; its preflight inspection and transfers
-follow the client's `default_timeout` unmodified. `quiet=True` can't be
-combined with `stream_logs=True` on either call.
+`pull` and `push` both accept a keyword-only `timeout` in positive finite
+seconds, timed from each transfer subprocess's own launch and replacing
+`default_timeout` for that call. `None` inherits the client default rather than
+disabling it. Both validate it before anything else, so a boolean, zero,
+negative, or nonfinite value raises `ValueError` before references are consumed
+or inspected, even for `[]`; a valid value with `[]` keeps the empty results
+above. Every blocking pool task gets a fresh deadline, and so does every lazy or
+queued stream child once its worker launches it, never measured from queueing
+or stream creation. Once a child CLI has launched, its deadline keeps advancing
+while nobody iterates. `quiet=True` can't be combined with `stream_logs=True`
+on either call.
+
+`push`'s batch inspection, any image inspection around a pull, and executor
+queueing sit outside the explicit budget; a configured client default still
+governs those inspections as their own launches. Expiry kills and reaps only the
+local transfer CLI and raises `DockerTimeout`, which keeps whatever output was
+captured. It doesn't undo a registry or daemon-side change. A child's
+`DockerTimeout` in a multi-reference stream is that stream's first worker error,
+so the delivery rules above apply and the stream stays closeable.
 
 `docker.manifest.push(..., timeout=30)` and
 `docker.plugin.push(..., timeout=30)` also accept keyword-only local CLI
@@ -97,10 +109,17 @@ telemetry starts. The eager inspection can still emit its own telemetry.
 byte chunks. Path input runs an eager, process-backed progress stream,
 printing decoded lines unless `quiet=True`. Byte or iterator input is written
 to a local CLI's own stdin and fully consumed during the call; these archive
-bytes aren't progress-log records, so a configured `default_timeout` still
-reaps the local CLI even if the input iterator stalls, though the iterator's
-own Python code can't be interrupted. Both forms return `list[str]` of the
-image tags/IDs parsed from `Loaded image` output lines, in output order.
+bytes aren't progress-log records, so the selected deadline still reaps the
+local CLI even if the input iterator stalls, though the iterator's own Python
+code can't be interrupted. Both forms return `list[str]` of the image tags/IDs
+parsed from `Loaded image` output lines, in output order.
+
+`save` and `load` also accept a keyword-only `timeout`, replacing the client
+default for that call (`None` inherits it) and validated before images are
+inspected or input is read. `save` gives its eager inspection and its save CLI
+separate deadlines; for the lazy generator the save clock starts at first
+iteration, using the default as configured at that moment when `timeout` is
+omitted. Expiry kills and reaps the local CLI only.
 
 ## Telemetry Families
 

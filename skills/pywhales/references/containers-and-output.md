@@ -32,6 +32,27 @@ example, with `source = Path.cwd().resolve()`, mount that directory read-only
 and run `["ls", "/work"]`. Import `Path` from `pathlib`. A remote engine must
 have the source path on its own host.
 
+## Container Environment Values
+
+`envs={...}` sets values inside the container. In container `create`, `run`, and
+`execute`, service `create`, and Compose `run` and `execute`, eligible ordinary
+names use `--env KEY`: PyWhales puts the value in that launch's child environment
+for the CLI to forward. Empty values remain empty strings. This doesn't change
+the parent Python environment or use temporary env files.
+
+CLI-control names, including `DOCKER_*`, `COMPOSE_*`, `BUILDX_*`, `BUILDKIT_*`,
+`PATH`, `HOME`, and proxy variables, stay literal `KEY=VALUE` arguments, as do
+names colliding with the effective inherited/client environment or an active
+frozen environment snapshot. Windows case-equivalent names also stay literal.
+These assignments aren't rejected just because they need the literal form.
+
+This reduces eligible values in argv; it doesn't promise that secrets never
+appear there, and a child environment isn't a secret vault. Use the application's
+secret policy. `DockerClient(environment=...)` configures the CLI environment,
+not container values; keep it distinct from `envs`. For Compose, forwarded
+values also enter the Compose CLI's environment and can affect `${NAME}`
+interpolation elsewhere in its configuration.
+
 ## Choose the Result Type
 
 | Call mode | Result |
@@ -48,6 +69,11 @@ have the source path on its own host.
 | `docker.start(container, attach=True)` | `str` containing captured stdout |
 | `docker.start(container, attach=True, stream=True)` | Owned `ProcessStream` yielding `(source, bytes)` |
 | `docker.ps(all=True)` | `list[Container]`, including stopped containers |
+
+Streaming `container.run`, `container.prune(stream_logs=True)`, and
+`service.logs(stream=True)` are also typed as closeable `ProcessStream` returns.
+Container prune is destructive and suppresses confirmation; stream cleanup
+doesn't undo deletions, so require explicit authorization before calling it.
 
 For stream tuples, `source` is `"stdout"` or `"stderr"`. Don't decode the tuple;
 decode its byte payload. Don't combine `detach=True` with streaming. For

@@ -63,6 +63,12 @@ The 18 groups are `buildx`, `compose`, `config`, `container`, `context`, `image`
   (stdout-only JSON mapping, transport ownership). There's no `Service.logs()` handle API.
 - `manifest.push()` and `plugin.push()` budget only the push CLI; the manifest-list inspect preflight is
   outside it. `volume.copy()`/`clone()` apply `timeout` to each helper launch, not as one total.
+- Swarm and plugin calls that wait on the daemon take keyword-only `timeout`, appended after `*` so earlier
+  positionals keep their binding: `service.create/update/rollback/scale` (plus `Service.update`/`scale`),
+  `swarm.ca`/`join`, `stack.deploy`, and `plugin.install`/`upgrade` (plus `Plugin.upgrade`). Validation precedes
+  executable lookup, env-file reads, policy options, and the `scale` inspect. The scale preflight and the
+  post-install plugin inspect are outside the budget; `swarm.ca` budgets its rotate and certificate-read launches
+  separately, and an expired first launch skips the read. No call gains `--detach` defaults or version probes.
 - Docker option values aren't local deadlines: `plugin.enable(timeout=...)` (HTTP), container `stop_timeout`
   and `health_timeout`, Compose `down`/`restart`/`stop` `timeout`, and `up(wait_timeout=...)`.
 

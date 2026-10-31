@@ -1,7 +1,6 @@
 """Preserve complete wire templates while validating required observation fields."""
 
 import hashlib
-import json
 
 from pydantic import (
     BaseModel,
@@ -12,6 +11,7 @@ from pydantic import (
     field_validator,
 )
 
+from pywhales._json import dumps_compat, loads_compat
 from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.convergence._types import Failure, ServiceTarget
 from pywhales.utils import run
@@ -113,11 +113,10 @@ def canonical(value: dict[str, JsonValue], *, template: bool = False) -> str:
     normalized = dict(value)
     if template and normalized.get("Runtime") == "container":
         del normalized["Runtime"]
-    return json.dumps(
+    return dumps_compat(
         normalized,
         sort_keys=True,
         separators=(",", ":"),
-        ensure_ascii=True,
         allow_nan=False,
     )
 
@@ -126,7 +125,7 @@ def fingerprint(service: ServiceWire) -> str:
     """Fingerprint the complete mode and normalized task template."""
     template = canonical(service.spec.template, template=True)
     generation = canonical(
-        {"Mode": service.spec.mode, "TaskTemplate": json.loads(template)}
+        {"Mode": service.spec.mode, "TaskTemplate": loads_compat(template)}
     )
     return hashlib.sha256(generation.encode()).hexdigest()
 

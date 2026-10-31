@@ -1,11 +1,11 @@
 """Versioned canonical intent containing references, never arbitrary payloads."""
 
 import hashlib
-import json
 import re
 from dataclasses import asdict, dataclass
 from typing import Final, Literal
 
+from pywhales._json import dumps_compat
 from pywhales.admission import EndpointIdentity
 from pywhales.reconciliation._errors import InvalidDescription
 
@@ -80,11 +80,10 @@ class DesiredDescription:
     @property
     def desired_hash(self) -> str:
         """Return the versioned SHA-256 of canonical, secret-free metadata."""
-        canonical = json.dumps(
+        canonical = dumps_compat(
             {"schema": HASH_VERSION, "desired": asdict(self)},
             sort_keys=True,
             separators=(",", ":"),
-            ensure_ascii=True,
         ).encode("ascii")
         return f"{HASH_VERSION}:sha256:{hashlib.sha256(canonical).hexdigest()}"
 

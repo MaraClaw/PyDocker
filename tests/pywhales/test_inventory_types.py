@@ -10,6 +10,8 @@ from pywhales._inventory_dispatch import make_resource, resource_kind
 from pywhales.client_config import ClientConfig
 from pywhales.components.buildx.cli_wrapper import Builder
 from pywhales.components.buildx.models import BuilderInspectResult
+from pywhales.components.manifest.cli_wrapper import ManifestList
+from pywhales.components.manifest.models import ManifestListInspectResult
 from pywhales.components.network.models import NetworkInspectResult
 from pywhales.inventory import (
     InspectionPolicy,
@@ -32,6 +34,16 @@ def _check_inventory_types(
     assert_type(
         capture_inventory([request, resource], policy=policy), InventorySnapshot
     )
+    manifest = ManifestList(request.client_config, "example", is_immutable_id=True)
+    assert_type(resource_kind(manifest), InventoryKind)
+    assert_type(manifest._inspect_result, ManifestListInspectResult | None)
+    assert_type(capture_inventory([manifest], policy=policy), InventorySnapshot)
+
+
+def test_manifest_list_is_an_inventory_kind_resource_and_payload() -> None:
+    assert "manifest_list" in get_args(InventoryKind.__value__)
+    assert ManifestList in get_args(InventoryResource.__value__)
+    assert ManifestListInspectResult in get_args(InventoryPayload.__value__)
 
 
 @pytest.mark.parametrize("value", [0, -1, True, 1.5, "1"])

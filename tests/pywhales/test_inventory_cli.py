@@ -27,6 +27,8 @@ from pywhales import (
 )
 from pywhales._inventory_staging import stage_resources
 from pywhales.client_config import ClientConfig, ParsingError, bulk_reload
+from pywhales.components.manifest.cli_wrapper import ManifestList
+from pywhales.components.manifest.models import ManifestListInspectResult
 from pywhales.components.network.models import NetworkInspectResult
 from pywhales.inventory import InventoryResource
 
@@ -64,6 +66,11 @@ elif sys.argv[1:3] == ['network', 'inspect']:
         name = 'alias' if identity == 'alpha-id' else 'beta'
         result.append({'Id': identity, 'Name': name, 'Labels': {'version': 'changed' if changed else 'fresh'}})
     print(json.dumps(result))
+elif sys.argv[1:3] == ['manifest', 'inspect']:
+    if sys.argv[3] == 'broken':
+        print('not json')
+    else:
+        print(json.dumps({'schemaVersion': 2, 'mediaType': 'application/vnd.docker.distribution.manifest.list.v2+json', 'manifests': [{'digest': 'sha256:' + sys.argv[3], 'platform': {'architecture': 'amd64', 'os': 'linux'}}]}))
 else:
     sys.exit(2)
 """
@@ -446,3 +453,85 @@ def test_observation_cancellation_and_deadline_fail_without_launch(
         client.network.list()
     assert str(tmp_path) not in str(error.value)
     launch.assert_not_called()
+
+
+def read_launches(root: Path) -> list[list[str]]:
+    return [
+        json.loads(line) for line in (root / "launches.jsonl").read_text().splitlines()
+    ]
+
+
+def test_manifest_lists_launch_once_per_reference_and_forward_insecure(
+    fake_cli: ClientConfig, tmp_path: Path
+) -> None:
+    roomy = InspectionPolicy(
+        max_references=8, max_argv_bytes=65536, max_response_bytes=65536
+    )
+    insecure = ManifestList(fake_cli, "dup", is_immutable_id=True, insecure=True)
+    secure = ManifestList(fake_cli, "dup", is_immutable_id=True)
+    request = InventoryRequest(
+        kind="manifest_list", references=("dup", "other"), client_config=fake_cli
+    )
+
+    snapshot = capture_inventory([insecure, request, secure], policy=roomy)
+
+    assert [record.id for record in snapshot.records] == [
+        "dup",
+        "dup",
+        "other",
+        "dup",
+    ]
+    assert read_launches(tmp_path) == [
+        ["manifest", "inspect", "dup", "--insecure"],
+        ["manifest", "inspect", "dup"],
+        ["manifest", "inspect", "other"],
+        ["manifest", "inspect", "dup"],
+    ]
+    first = snapshot.records[0].payload
+    assert isinstance(first, ManifestListInspectResult)
+    assert first.name == "dup"
+    assert first.manifests is not None and first.manifests[0].digest == "sha256:dup"
+
+
+@pytest.mark.parametrize("operation", ["capture", "bulk"])
+def test_manifest_list_later_failure_preserves_original_caches(
+    fake_cli: ClientConfig, policy: InspectionPolicy, tmp_path: Path, operation: str
+) -> None:
+    other = ClientConfig(client_call=list(fake_cli.client_call))
+    handles = [
+        ManifestList(fake_cli, "good", is_immutable_id=True),
+        ManifestList(other, "broken", is_immutable_id=True),
+    ]
+    for handle in handles:
+        handle._set_inspect_result(ManifestListInspectResult(name=handle.reference))
+    before = [(h._inspect_result, h._last_refreshed_time) for h in handles]
+
+    with pytest.raises(ParsingError):
+        if operation == "capture":
+            capture_inventory(handles, policy=policy)
+        else:
+            bulk_reload(handles, policy=policy)
+
+    assert [(h._inspect_result, h._last_refreshed_time) for h in handles] == before
+    assert read_launches(tmp_path) == [
+        ["manifest", "inspect", "good"],
+        ["manifest", "inspect", "broken"],
+    ]
+
+
+def test_manifest_list_bulk_reload_publishes_each_distinct_handle_once(
+    fake_cli: ClientConfig, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    first = ManifestList(fake_cli, "same", is_immutable_id=True, insecure=True)
+    sibling = ManifestList(fake_cli, "same", is_immutable_id=True)
+
+    bulk_reload([first, sibling, first], policy=policy)
+
+    assert first._inspect_result is not None and sibling._inspect_result is not None
+    assert first._inspect_result is not sibling._inspect_result
+    assert first._inspect_result == sibling._inspect_result
+    assert first.insecure and not sibling.insecure
+    assert read_launches(tmp_path) == [
+        ["manifest", "inspect", "same", "--insecure"],
+        ["manifest", "inspect", "same"],
+    ]

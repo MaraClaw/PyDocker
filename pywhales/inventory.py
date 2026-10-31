@@ -20,6 +20,8 @@ from pywhales.components.context.cli_wrapper import Context
 from pywhales.components.context.models import ContextInspectResult
 from pywhales.components.image.cli_wrapper import Image
 from pywhales.components.image.models import ImageInspectResult
+from pywhales.components.manifest.cli_wrapper import ManifestList
+from pywhales.components.manifest.models import ManifestListInspectResult
 from pywhales.components.network.cli_wrapper import Network
 from pywhales.components.network.models import NetworkInspectResult
 from pywhales.components.node.cli_wrapper import Node
@@ -48,6 +50,7 @@ type InventoryKind = Literal[
     "plugin",
     "context",
     "builder",
+    "manifest_list",
 ]
 type InventoryResource = (
     Container
@@ -62,6 +65,7 @@ type InventoryResource = (
     | Plugin
     | Context
     | Builder
+    | ManifestList
 )
 type InventoryPayload = (
     ContainerInspectResult
@@ -76,6 +80,7 @@ type InventoryPayload = (
     | PluginInspectResult
     | ContextInspectResult
     | BuilderInspectResult
+    | ManifestListInspectResult
 )
 
 

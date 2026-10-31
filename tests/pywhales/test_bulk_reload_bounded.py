@@ -15,7 +15,21 @@ from pywhales import (
 )
 from pywhales._observation import get_observation
 from pywhales.client_config import ClientConfig, bulk_reload
+from pywhales.components.manifest.cli_wrapper import ManifestList
 from pywhales.inventory import InventoryResource
+
+
+def test_manifest_bounded_response_limit_preserves_all_caches() -> None:
+    code = "import sys; print('{}' if sys.argv[3] == 'a' else 'x' * 300)"
+    config = ClientConfig(_client_call_with_path=[sys.executable, "-c", code])
+    handles = [ManifestList(config, name, is_immutable_id=True) for name in ("a", "b")]
+    before = [(h._inspect_result, h._last_refreshed_time) for h in handles]
+    policy = InspectionPolicy(
+        max_references=5, max_argv_bytes=10000, max_response_bytes=100
+    )
+    with pytest.raises(ObservationLimitError):
+        bulk_reload(handles, policy=policy)
+    assert [(h._inspect_result, h._last_refreshed_time) for h in handles] == before
 
 
 def _inspect_contexts(

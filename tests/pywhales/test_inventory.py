@@ -1,7 +1,7 @@
 import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -11,6 +11,12 @@ from pywhales.client_config import ClientConfig, ParsingError, ReloadableObjectF
 from pywhales.components.buildx.models import BuilderInspectResult
 from pywhales.components.context.cli_wrapper import Context
 from pywhales.components.context.models import ContextInspectResult
+from pywhales.components.manifest.cli_wrapper import (
+    ManifestCLI,
+    ManifestList,
+    _inspect_manifest_list_snapshot,
+)
+from pywhales.components.manifest.models import ManifestListInspectResult
 from pywhales.exceptions import DockerException, ObservationLimitError
 from pywhales.inventory import (
     InspectionPolicy,
@@ -32,6 +38,14 @@ KINDS: tuple[InventoryKind, ...] = (
     "plugin",
     "context",
     "builder",
+    "manifest_list",
+)
+MANIFEST_RESPONSE = json.dumps(
+    {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
+        "manifests": [{"digest": "sha256:abc", "platform": {"os": "linux"}}],
+    }
 )
 LISTING_ARGV = ["mock-docker", "buildx", "ls", "--format", "{{json . }}"]
 POLICY = InspectionPolicy(
@@ -59,6 +73,8 @@ def test_capture_each_kind_uses_plural_inspector(kind: InventoryKind) -> None:
     handle = make_resource(kind, config, "identity")
     if kind == "builder":
         module, result = "buildx", listing(builder_line("identity"))
+    elif kind == "manifest_list":
+        module, result = "manifest", MANIFEST_RESPONSE
     else:
         module = kind
         result = json.dumps([{"Id": "identity", "ID": "identity", "Name": "identity"}])
@@ -81,6 +97,14 @@ def test_capture_each_kind_uses_plural_inspector(kind: InventoryKind) -> None:
     )
     if kind == "builder":
         assert run.call_args.args[0] == LISTING_ARGV
+        return
+    if kind == "manifest_list":
+        assert run.call_args.args[0] == [
+            "mock-docker",
+            "manifest",
+            "inspect",
+            "identity",
+        ]
         return
     suffix = ["inspect", "--type", "task"] if kind == "task" else [kind, "inspect"]
     assert run.call_args.args[0] == ["mock-docker", *suffix, "identity"]
@@ -438,3 +462,193 @@ def test_builder_failure_after_earlier_kind_preserves_every_handle() -> None:
     ):
         capture_inventory([context, builder], policy=POLICY)
     assert context._inspect_result is None and builder._inspect_result is None
+
+
+def run_manifests(*responses: str):  # noqa: ANN201
+    return patch(
+        "pywhales.components.manifest.cli_wrapper.run", side_effect=list(responses)
+    )
+
+
+def manifest_argvs(run: MagicMock) -> list[list[str]]:
+    return [[str(part) for part in call.args[0]] for call in run.call_args_list]
+
+
+def test_manifest_list_launches_one_inspect_per_reference_keeping_order() -> None:
+    config = ClientConfig(_client_call_with_path=["mock-docker"])
+    equal_config = ClientConfig(_client_call_with_path=["mock-docker"])
+    roomy = InspectionPolicy(
+        max_references=10, max_argv_bytes=10000, max_response_bytes=10000
+    )
+    with run_manifests(*[MANIFEST_RESPONSE] * 5) as run:
+        snapshot = capture_inventory(
+            [
+                request("manifest_list", config, "a", "b"),
+                request("manifest_list", equal_config, "c"),
+                request("manifest_list", config, "a", "d"),
+            ],
+            policy=roomy,
+        )
+    assert [record.id for record in snapshot.records] == ["a", "b", "c", "a", "d"]
+    assert all(record.kind == "manifest_list" for record in snapshot.records)
+    assert all(
+        isinstance(record.payload, ManifestListInspectResult)
+        for record in snapshot.records
+    )
+    assert [
+        record.payload.name
+        for record in snapshot.records
+        if isinstance(record.payload, ManifestListInspectResult)
+    ] == list("abcad")
+    assert manifest_argvs(run) == [
+        ["mock-docker", "manifest", "inspect", reference]
+        for reference in ("a", "b", "a", "d", "c")
+    ]
+    assert snapshot.records[0].payload is not snapshot.records[3].payload
+
+
+def test_manifest_list_insecure_flag_follows_the_handle_only() -> None:
+    config = ClientConfig(_client_call_with_path=["mock-docker"])
+    insecure = ManifestList(config, "secure-not", is_immutable_id=True, insecure=True)
+    secure = ManifestList(config, "plain", is_immutable_id=True)
+    with run_manifests(*[MANIFEST_RESPONSE] * 3) as run:
+        capture_inventory(
+            [insecure, secure, request("manifest_list", config, "requested")],
+            policy=POLICY,
+        )
+    assert manifest_argvs(run) == [
+        ["mock-docker", "manifest", "inspect", "secure-not", "--insecure"],
+        ["mock-docker", "manifest", "inspect", "plain"],
+        ["mock-docker", "manifest", "inspect", "requested"],
+    ]
+
+
+def test_manifest_list_staging_keeps_insecure_on_hydrated_handles() -> None:
+    config = ClientConfig(_client_call_with_path=["mock-docker"])
+    insecure = ManifestList(config, "a", is_immutable_id=True, insecure=True)
+    secure = ManifestList(config, "b", is_immutable_id=True)
+    with run_manifests(MANIFEST_RESPONSE, MANIFEST_RESPONSE):
+        staged = stage_resources([insecure, secure], POLICY)
+    assert [
+        handle.insecure for handle in staged if isinstance(handle, ManifestList)
+    ] == [True, False]
+    assert insecure._inspect_result is None and secure._inspect_result is None
+
+
+def test_manifest_list_launch_limits_cover_each_launch_including_insecure() -> None:
+    config = ClientConfig(_client_call_with_path=["mock-docker"])
+    handle = ManifestList(config, "ref", is_immutable_id=True, insecure=True)
+    exact = len(" ".join(["mock-docker", "manifest", "inspect", "ref", "--insecure"]))
+    tight = InspectionPolicy(
+        max_references=1, max_argv_bytes=exact - 1, max_response_bytes=10000
+    )
+    with (
+        run_manifests(MANIFEST_RESPONSE) as run,
+        pytest.raises(ObservationLimitError),
+    ):
+        capture_inventory([handle], policy=tight)
+    run.assert_not_called()
+
+
+def test_manifest_list_late_oversized_reference_fails_before_any_launch() -> None:
+    config = ClientConfig(_client_call_with_path=["mock-docker"])
+    policy = InspectionPolicy(
+        max_references=5, max_argv_bytes=60, max_response_bytes=10000
+    )
+    with (
+        run_manifests(MANIFEST_RESPONSE) as run,
+        pytest.raises(ObservationLimitError),
+    ):
+        capture_inventory(
+            [request("manifest_list", config, "a", "x" * 100)], policy=policy
+        )
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        "",
+        "   \n",
+        "not json",
+        "[]",
+        "null",
+        '"text"',
+        '{"manifests": "nope"}',
+        '{"schemaVersion": "2"}',
+        '{"name": "someone-else"}',
+    ],
+)
+@pytest.mark.parametrize("raw", [False, True])
+def test_manifest_list_malformed_response_raises_parsing_error(
+    response: str, raw: bool
+) -> None:
+    config = ClientConfig(_client_call_with_path=["mock-docker"], raw_diagnostics=raw)
+    handle = ManifestList(config, "private-list", is_immutable_id=True)
+    with run_manifests(response), pytest.raises(ParsingError) as error:
+        capture_inventory([handle], policy=POLICY)
+    assert handle._inspect_result is None
+    assert handle._last_refreshed_time == datetime.min
+    if not raw:
+        assert error.value.__cause__ is None
+        assert error.value.__context__ is None or error.value.__suppress_context__
+        assert "private-list" not in str(error.value)
+        assert response.strip() == "" or response.strip() not in str(error.value)
+
+
+def test_manifest_list_later_group_failure_preserves_every_cache() -> None:
+    config = ClientConfig(_client_call_with_path=["mock-docker"])
+    other = ClientConfig(_client_call_with_path=["mock-docker"])
+    first = ManifestList(config, "first", is_immutable_id=True)
+    first._set_inspect_result(ManifestListInspectResult(name="first"))
+    second = ManifestList(other, "second", is_immutable_id=True)
+    before = [(h._inspect_result, h._last_refreshed_time) for h in (first, second)]
+    with run_manifests(MANIFEST_RESPONSE, "{broken"), pytest.raises(ParsingError):
+        capture_inventory([first, second], policy=POLICY)
+    assert [(h._inspect_result, h._last_refreshed_time) for h in (first, second)] == (
+        before
+    )
+
+
+def test_manifest_list_records_are_detached_from_handles() -> None:
+    config = ClientConfig(_client_call_with_path=["mock-docker"])
+    handle = ManifestList(config, "ref", is_immutable_id=True)
+    original = ManifestListInspectResult(name="ref", schema_version=1)
+    handle._set_inspect_result(original)
+    with run_manifests(MANIFEST_RESPONSE, MANIFEST_RESPONSE):
+        snapshot = capture_inventory([handle, handle], policy=POLICY)
+    first, second = (record.payload for record in snapshot.records)
+    assert isinstance(first, ManifestListInspectResult)
+    assert isinstance(second, ManifestListInspectResult)
+    assert first.manifests is not None and second.manifests is not None
+    first.manifests.clear()
+    assert len(second.manifests) == 1
+    assert handle._inspect_result is original
+    assert original.schema_version == 1
+
+
+def test_strict_manifest_inspect_binds_the_reference_as_the_name() -> None:
+    config = ClientConfig(_client_call_with_path=["mock-docker"])
+    with run_manifests(MANIFEST_RESPONSE) as run:
+        snapshot = _inspect_manifest_list_snapshot(config, "ref", insecure=True)
+    assert snapshot.name == "ref" and snapshot.schema_version == 2
+    assert manifest_argvs(run) == [
+        ["mock-docker", "manifest", "inspect", "ref", "--insecure"]
+    ]
+
+
+def test_strict_manifest_inspect_rejects_missing_reference_without_launch() -> None:
+    config = ClientConfig(_client_call_with_path=["mock-docker"])
+    with run_manifests(MANIFEST_RESPONSE) as run, pytest.raises(ParsingError):
+        _inspect_manifest_list_snapshot(config, "")
+    run.assert_not_called()
+
+
+def test_public_manifest_inspect_stays_lenient() -> None:
+    config = ClientConfig(_client_call_with_path=["mock-docker"])
+    with run_manifests('{"name": "someone-else", "schemaVersion": "2"}') as run:
+        handle = ManifestCLI(config).inspect("ref", insecure=True)
+    assert handle.name == "ref" and handle.insecure
+    assert manifest_argvs(run) == [
+        ["mock-docker", "manifest", "inspect", "ref", "--insecure"]
+    ]

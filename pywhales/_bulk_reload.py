@@ -14,6 +14,10 @@ from pywhales.components.config.cli_wrapper import Config, ConfigCLI
 from pywhales.components.container.cli_wrapper import Container, ContainerCLI
 from pywhales.components.context.cli_wrapper import Context, ContextCLI
 from pywhales.components.image.cli_wrapper import Image, ImageCLI
+from pywhales.components.manifest.cli_wrapper import (
+    ManifestList,
+    _inspect_manifest_list_snapshot,
+)
 from pywhales.components.network.cli_wrapper import Network, NetworkCLI
 from pywhales.components.node.cli_wrapper import Node, NodeCLI
 from pywhales.components.plugin.cli_wrapper import Plugin, PluginCLI
@@ -38,6 +42,7 @@ type SupportedResource = (
     | Plugin
     | Context
     | Builder
+    | ManifestList
 )
 
 
@@ -88,6 +93,44 @@ def _inspect_builders(config: ClientConfig, names: Sequence[str]) -> list[Builde
     return builders
 
 
+def _inspect_manifest_lists(
+    config: ClientConfig,
+    references: Sequence[str],
+    resources: Sequence[SupportedResource],
+) -> list[ManifestList]:
+    """Inspect each manifest list in its own launch, in request order.
+
+    A second positional argument to `manifest inspect` names a manifest inside
+    the list, so references are never batched. Each handle's `insecure` flag
+    stays on its launch, and each result is a newly hydrated handle.
+
+    Args:
+        config: Originating config shared by the whole group.
+        references: Stored identities of `resources`, in the same order.
+        resources: Handles whose `insecure` flags the launches keep.
+
+    Returns:
+        One newly hydrated handle per requested resource.
+
+    Raises:
+        TypeError: If a resource isn't a manifest list.
+        ParsingError: If any single inspection is invalid.
+    """
+    inspected: list[ManifestList] = []
+    for reference, resource in zip(references, resources, strict=True):
+        if not isinstance(resource, ManifestList):
+            raise TypeError("Inspect returned an unexpected resource kind")
+        snapshot = _inspect_manifest_list_snapshot(
+            config, reference, insecure=resource.insecure
+        )
+        manifest_list = ManifestList(
+            config, reference, is_immutable_id=True, insecure=resource.insecure
+        )
+        manifest_list._set_inspect_result(snapshot)
+        inspected.append(manifest_list)
+    return inspected
+
+
 def _inspect_group(
     resources: Sequence[SupportedResource],
 ) -> Sequence[SupportedResource]:
@@ -127,6 +170,8 @@ def _inspect_group(
             return ContextCLI(config).inspect(references)
         case Builder():
             return _inspect_builders(config, references)
+        case ManifestList():
+            return _inspect_manifest_lists(config, references, resources)
         case unreachable:
             assert_never(unreachable)
 
@@ -199,6 +244,8 @@ def _prepare_publication(
             return _publication(target, inspected)
         case Builder() as target, Builder() as inspected:
             return _publication(target, inspected)
+        case ManifestList() as target, ManifestList() as inspected:
+            return _publication(target, inspected)
         case _:
             raise TypeError("Inspect returned an unexpected resource kind")
 
@@ -217,8 +264,10 @@ def bulk_reload(
 
     Args:
         docker_objects: Container, image, network, volume, node, service, config,
-            secret, task, plugin, context, or builder handles. Empty input is a
-            no-op. Each builder group runs one listing and sends no names to argv.
+            secret, task, plugin, context, builder, or manifest-list handles.
+            Empty input is a no-op. Each builder group runs one listing and sends
+            no names to argv. A manifest list takes one launch per handle, and an
+            insecure handle keeps `--insecure` on its launch.
         policy: Optional inspection limits, intersected with an active observation.
 
     Raises:
@@ -245,7 +294,8 @@ def bulk_reload(
             | Task
             | Plugin
             | Context
-            | Builder,
+            | Builder
+            | ManifestList,
         ):
             raise TypeError("Unsupported resource kind for bulk reload")
         _identity(resource)

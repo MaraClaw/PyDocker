@@ -7,7 +7,6 @@ archive-byte iterators have different startup and cleanup contracts.
 from __future__ import annotations
 
 import builtins
-import json
 import os
 from collections import OrderedDict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -36,6 +35,7 @@ from pywhales._execution_policy import (
     execution_timeout,
     get_execution_policy,
 )
+from pywhales._json import loads_compat
 from pywhales.client_config import (
     ClientConfig,
     Command,
@@ -227,7 +227,9 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
     @override
     def _fetch_inspect_result_json(self, reference: str) -> dict[str, JsonValue]:
         json_str = run([*self.docker_cmd, "image", "inspect", reference])
-        return custom_parse_object_as(dict[str, JsonValue], {**json.loads(json_str)[0]})
+        return custom_parse_object_as(
+            dict[str, JsonValue], {**loads_compat(json_str)[0]}
+        )
 
     @override
     def _parse_json_object(

@@ -16,12 +16,14 @@
   Keep shared option forwarding aligned between their separate argument builders.
 - `run()`, `create()`, and `execute()` require an argv sequence for `command`.
   A shell command string raises `TypeError`; don't split it implicitly.
+- Their `envs` share the [runtime environment transport](../../AGENTS.md#container-environment-transport); keep that policy out of separate builders.
 
 ## Output Modes
 
-- Preserve `run()` overloads: detached calls return `Container`, streamed calls yield
-  `(source, bytes)` records, and ordinary foreground calls return `str`.
+- Preserve `run()` overloads: detached calls return `Container`, streamed calls return owned
+  `ProcessStream` of `(source, bytes)`, and ordinary foreground calls return `str`.
   `detach=True` with `stream=True` raises `ValueError`.
+- `prune(stream_logs=True)` also returns `ProcessStream`; blocking prune remains `None`. Close early or use a context manager; local close cannot undo removal.
 - `execute()` returns `None` when detached, `ProcessStream` when streamed, otherwise `str`.
   Both TTY plus streaming and detach plus streaming are invalid combinations.
 - `start()` streaming requires `attach=True` and a single container; attaching multiple
@@ -73,4 +75,4 @@ Paths below are relative to the repository root.
   empty and invalid start requests, handle/root aliases, and unbudgeted preflights.
 - `tests/pywhales/test_command_deadline_types.py`: static run/execute/log/start/copy/export overloads,
   handle forwarding, and aliases.
-- `tests/pywhales/test_type_contracts.py`: static inspect and parsed/raw top return contracts.
+- `tests/pywhales/test_type_contracts.py`: inspect/top and owned prune/run stream contracts; environment branches: `tests/pywhales/components/test_env_forwarding.py` and `test_env_branch_transport.py`.

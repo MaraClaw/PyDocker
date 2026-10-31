@@ -18,8 +18,8 @@
   Pull returns `Image` for a string or an ordered list for an iterable; push returns `None`.
 - Inside `observation()`, only nonstreamed transfers reject `quiet=False`: `run()` raises `ValueError`
   for one reference or many. `stream_logs=True` accepts `quiet=False` there.
-- `pull([])` returns `[]`, or an empty generator with `stream_logs=True`; no child CLI starts.
-  `push([])` returns `None` even with streaming enabled. Preserve this asymmetry.
+- `pull([], stream_logs=True)` returns owned `EmptyImageStream`: empty iteration, context-manager support and idempotent `close()`, without executable lookup or a child.
+  Blocking `pull([])` stays `[]`; `push([])` stays `None` even with streaming enabled. Preserve this asymmetry and the `ImageStream`/`EmptyImageStream` type aliases.
 - Validate `timeout` first: before references are consumed (strings, iterators, and `[]` alike), before
   push inspection, and before any CLI lookup. Empty requests keep their results after a valid timeout.
 - Each transfer is timed from its own launch: every pool task, and every lazy or queued stream child once a
@@ -66,7 +66,8 @@
 
 - `tests/pywhales/test_container_image_enum_json.py`: nested config and graph-driver JSON contracts.
 - `tests/pywhales/components/test_image.py` contains mocked CLI and real child-process stream tests:
-  `test_empty_image_operations_keep_existing_result_shapes`, `test_multiple_image_stream_has_lazy_owned_lifecycle`,
+  `test_empty_image_operations_keep_existing_result_shapes`, `test_empty_pull_stream_is_owned_without_executable_resolution`,
+  `test_multiple_image_stream_has_lazy_owned_lifecycle`,
   `test_multiple_image_stream_keeps_first_original_error`, `test_batch_inspect_image_aliases_and_typed_snapshot`.
 - The same file covers fallback/override snapshots before preflight, lazy queued children, backpressure,
   path-load budgets, and safe/raw archive failures. Deadlines: `test_archive_lazy_save_explicit_timeout_starts_at_first_iteration`,

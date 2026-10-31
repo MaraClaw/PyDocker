@@ -2,6 +2,7 @@
 
 `cli_wrapper.py` defines `ComposeCLI`; `models.py` holds configuration, project, and event models.
 Build progress overrides and Compose globals follow [the package guide](../../AGENTS.md).
+`run`/`execute` `envs` follow its [shared environment transport](../../AGENTS.md#container-environment-transport), including the interpolation caveat.
 
 ## Configuration Models
 
@@ -24,8 +25,8 @@ Build progress overrides and Compose globals follow [the package guide](../../AG
 - `build`, `down`, `pull`, and `up` reject `quiet=True` with `stream_logs=True`.
 - `build(print=True)` still returns `None` when blocking, or an output stream with `stream_logs=True`.
 - Streamed `create()` prints its command only with `raw_diagnostics=True`; returned log records are unchanged.
-- `run()` returns `str` when attached, `Container` when detached, or an iterable of
-  `(source, bytes)` with `stream=True`; detached resources retain the originating config.
+- Record-stream branches of `build`, `create`, `down`, `logs`, `pull`, `run`, `start`, `stop`, and `up` expose owned `ProcessStream`, not generic iterables; records are `(source, bytes)`.
+- `run()` otherwise returns attached `str` or detached `Container` retaining its config. Blocking and `[]` no-op `None` arms stay unchanged; guard optional streams before entering their context.
 - `run()` defaults to `tty=True`. Reject TTY plus streaming, detach plus streaming,
   and detach plus TTY; callers must set `tty=False` for detached or streamed runs.
 - `ps()` returns container resources. Reject `ps()` and detached `run()` in dry-run mode
@@ -44,8 +45,7 @@ Build progress overrides and Compose globals follow [the package guide](../../AG
   `--prune=false` or `--prune=true` under a deadline.
 - Local budgets aren't Docker option values: `down()`, `restart()`, and `stop()` `timeout` is the container shutdown
   grace period, and `up(wait_timeout=...)` is Compose's own wait. Never forward one as the other.
-- Waiting for running or healthy services after launch is `pywhales.convergence` (`capture_compose()`, `wait()`);
-  follow [its guide](../../convergence/AGENTS.md) instead of reimplementing the evaluator here.
+- Read-only readiness and designated one-shot `completion_services` belong to `pywhales.convergence` (`capture_compose()`, `wait()`); follow [its guide](../../convergence/AGENTS.md).
 
 ## Logs And Events
 
@@ -73,5 +73,5 @@ Paths below are relative to `tests/pywhales/`; collection/runtime cautions are i
 - `components/test_compose.py`: top layouts/raw/no-op/error cases, logs/events ownership, legacy integration.
 - `components/test_command_deadlines.py` and `components/test_deadline_forwarding.py`: run/log/event/pull/push/watch
   deadline execution, forwarding, and empty-selection validation.
-- Static contracts: `test_compose_type_contracts.py`, `test_type_contracts.py`,
+- Static contracts: `test_compose_type_contracts.py`, `test_type_contracts.py` (`_check_owned_stream_contracts`),
   `test_command_deadline_types.py`, and `test_enum_json_type_contracts.py`.

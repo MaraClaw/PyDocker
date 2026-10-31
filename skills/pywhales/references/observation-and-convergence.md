@@ -40,7 +40,7 @@ with observation(policy, deadline=monotonic() + 30.0, cancel=cancel):
 
 `InspectionPolicy(max_references=..., max_argv_bytes=..., max_response_bytes=...)`
 requires three positive integers; there's no default policy. Optional
-`max_total_references` and `max_total_response_bytes` default to `None`,
+`max_total_references`, `max_total_response_bytes`, and `max_total_stream_bytes` default to `None`,
 leaving aggregate accounting unbounded. The illustrative limits above aren't
 a universal sizing recommendation. `observation()`
 is a context manager applying those limits, plus an optional absolute
@@ -118,6 +118,15 @@ subject to the captured-output rejection above. Multi-image `pull`/`push` run
 each task in a copy of the calling context, so a non-streaming
 `pull(quiet=False)` inside a scope raises the same `ValueError` for one image
 or many, while `stream_logs=True` accepts `quiet=False` there.
+
+Set `max_total_stream_bytes` to bound combined stream/archive stdout and stderr
+bytes as pipe readers pull them, including buffered read-ahead. Each enclosing
+scope with this field set owns a separate account; each read charges all of them,
+even after the launching scope exits. Captured output never consumes this budget.
+Overflow stops and reaps the local CLI and delivers `ObservationLimitError` with
+reason `total_stream` once. Archive watchdog drains and the stderr read that
+selects a Docker exception are uncharged. Leaving the field unset changes no
+stream or archive accounting.
 
 Aggregate response budgets apply within observation scopes and the bounded
 inventory call. Snapshots aren't daemon transactions or total memory caps.

@@ -1,6 +1,7 @@
+import errno
 import json
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from threading import Event, Thread
 from time import monotonic
 from unittest.mock import patch
@@ -34,6 +35,7 @@ def completion(records: list[TelemetryRecord]) -> CompletionRecord:
     assert len(records) == 2
     completed = records[1]
     assert isinstance(completed, CompletionRecord)
+    assert records[0].schema_version == completed.schema_version == 4
     assert completed.attempt_id == records[0].attempt_id
     assert completed.stdin_bytes is None
     return completed
@@ -394,7 +396,7 @@ def test_scope_stop_finishes_telemetry_once_after_cleanup(stop: str) -> None:
         stream.close()
 
         completed = completion(records)
-        assert completed.outcome == ("timeout" if stop == "deadline" else "failure")
+        assert completed.outcome == ("timeout" if stop == "deadline" else "cancelled")
         assert completed.return_code == stream._process.returncode
         assert completed.stdout_bytes == len(b"ready\n")
         assert list(stream) == []
@@ -415,3 +417,162 @@ def test_close_before_a_scope_stop_finishes_telemetry_as_closed() -> None:
 
     assert list(stream) == []
     assert completion(records).outcome == "closed"
+
+
+def test_close_racing_a_set_cancel_token_reports_cancelled() -> None:
+    records: list[TelemetryRecord] = []
+    cancel = Event()
+    with observation(scope_policy(), cancel=cancel):
+        stream = stream_stdout_and_stderr(command(records, "input()"), pipe_stdin=True)
+
+    cancel.set()
+    stream.close()
+
+    with pytest.raises(ObservationCancelled):
+        next(stream)
+    completed = completion(records)
+    assert completed.outcome == "cancelled"
+    assert completed.return_code == stream._process.returncode
+    assert list(stream) == []
+    assert completion(records) is completed
+
+
+def test_stream_budget_overflow_finishes_telemetry_once_as_limit() -> None:
+    records: list[TelemetryRecord] = []
+    policy = replace(scope_policy(), max_total_stream_bytes=4)
+    with observation(policy):
+        stream = stream_stdout_and_stderr(
+            command(
+                records,
+                "import os,threading; os.write(1,b'abcdefgh'); threading.Event().wait()",
+            )
+        )
+    try:
+        assert stream._released.wait(timeout=3)
+        assert len(records) == 1
+
+        with pytest.raises(ObservationLimitError) as failure:
+            next(stream)
+        stream.close()
+
+        assert failure.value.reason == "total_stream"
+        completed = completion(records)
+        assert completed.outcome == "limit"
+        assert completed.return_code == stream._process.returncode
+        assert (completed.stdout_bytes, completed.stderr_bytes) == (5, 0)
+        assert list(stream) == []
+        assert completion(records) is completed
+    finally:
+        stream.close()
+
+
+def test_close_after_stream_overflow_keeps_the_limit_outcome() -> None:
+    records: list[TelemetryRecord] = []
+    policy = replace(scope_policy(), max_total_stream_bytes=4)
+    with observation(policy):
+        stream = stream_stdout_and_stderr(
+            command(
+                records,
+                "import os,threading; os.write(2,b'abcdefgh'); threading.Event().wait()",
+            )
+        )
+    assert stream._released.wait(timeout=3)
+
+    stream.close()
+
+    assert completion(records).outcome == "limit"
+    with pytest.raises(ObservationLimitError):
+        next(stream)
+    assert completion(records).outcome == "limit"
+
+
+def test_stream_budget_cut_short_by_a_deadline_keeps_the_earlier_stop() -> None:
+    records: list[TelemetryRecord] = []
+    policy = replace(scope_policy(), max_total_stream_bytes=4)
+    with observation(policy, deadline=monotonic() + 0.3):
+        stream = stream_stdout_and_stderr(command(records, "input()"), pipe_stdin=True)
+    with stream, pytest.raises(ObservationTimeout):
+        list(stream)
+
+    assert completion(records).outcome == "timeout"
+
+
+@pytest.mark.parametrize(
+    ("expired", "scope", "reader", "delivered", "outcome"),
+    [
+        (True, ObservationCancelled(), OSError(), DockerTimeout, "timeout"),
+        (
+            False,
+            ObservationLimitError("total_stream", 1, 2),
+            OSError(),
+            ObservationLimitError,
+            "limit",
+        ),
+        (
+            False,
+            ObservationCancelled(),
+            BufferError(),
+            ObservationCancelled,
+            "cancelled",
+        ),
+        (False, ObservationTimeout(), OSError(), ObservationTimeout, "timeout"),
+        (False, None, BufferError(), BufferError, "failure"),
+        (False, None, OSError(), OSError, "failure"),
+    ],
+)
+def test_stream_outcome_matches_the_error_it_delivers(
+    expired: bool,
+    scope: ObservationCancelled | ObservationTimeout | ObservationLimitError | None,
+    reader: OSError | BufferError,
+    delivered: type[BaseException],
+    outcome: str,
+) -> None:
+    # Given every stop recorded at once, which no real race can arrange on demand.
+    records: list[TelemetryRecord] = []
+    stream = stream_stdout_and_stderr(command(records, "input()"), pipe_stdin=True)
+    try:
+        with stream._queue.condition:
+            if expired:
+                stream._expired = True
+                stream._timeout_stdout = b""
+            stream._error = reader
+            if scope is not None:
+                stream._scope_error = scope
+            stream._stop.set()
+            stream._queue.close()
+
+        # When the stream delivers its terminal error.
+        with pytest.raises(delivered):
+            next(stream)
+
+        # Then the completion reports the delivered error's outcome, once.
+        assert completion(records).outcome == outcome
+    finally:
+        stream.close()
+
+
+def test_native_argv_rejection_after_stream_start_reports_limit() -> None:
+    records: list[TelemetryRecord] = []
+    with (
+        patch("pywhales.utils.Popen", side_effect=OSError(errno.E2BIG, "too big")),
+        observation(scope_policy()),
+        pytest.raises(ObservationLimitError) as failure,
+    ):
+        stream_stdout_and_stderr(command(records, "pass"))
+
+    assert failure.value.reason == "native_argv"
+    completed = completion(records)
+    assert (completed.outcome, completed.return_code) == ("limit", None)
+
+
+def test_other_spawn_errors_and_interrupts_stay_failures() -> None:
+    for error in (OSError(errno.ENOENT, "missing"), KeyboardInterrupt()):
+        records: list[TelemetryRecord] = []
+        with (
+            patch("pywhales.utils.Popen", side_effect=error),
+            observation(scope_policy()),
+            pytest.raises(type(error)),
+        ):
+            stream_stdout_and_stderr(command(records, "pass"))
+
+        assert completion(records).outcome == "failure"

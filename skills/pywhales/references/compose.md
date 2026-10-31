@@ -74,13 +74,20 @@ integer seconds; `restart` and `stop` also accept a `timedelta`, truncated to
 whole seconds. These launches can still raise `DockerTimeout` if the client's
 separate `default_timeout` expires.
 
-`run`, `logs`, `pull`, and `events` instead accept a keyword-only `timeout` in
-positive finite seconds that replaces the client's `default_timeout` for that
-one local CLI launch; `None` inherits it. Expiry kills and reaps the local
-Compose CLI and raises `DockerTimeout`; it does not stop services or guarantee
-that daemon-side work stops. Don't confuse the two: `compose.up(wait_timeout=60)`
-is a third, separate concept, the Compose-side `--wait-timeout` bound on
-service readiness, not a local CLI deadline either.
+`run`, `logs`, `pull`, `push`, `watch`, and `events` instead accept a
+keyword-only `timeout` in positive finite seconds that replaces the client's
+`default_timeout` for that one local CLI launch; `None` inherits it. Expiry
+kills and reaps the local Compose CLI and raises `DockerTimeout`, which keeps
+whatever output was captured; it does not stop services, undo pulled or pushed
+layers, or guarantee that daemon-side or registry work stops. `pull`, `push`,
+and `watch` validate it before the empty-selection no-op: an invalid value
+raises `ValueError` even for `services=[]`, while a valid one with `[]` returns
+`None` without a launch. A returned stream's deadline keeps advancing while
+nothing consumes it, so drain it or close it on early exit.
+
+Don't confuse the two: `compose.up(wait_timeout=60)` is a third, separate
+concept, the Compose-side `--wait-timeout` bound on service readiness, not a
+local CLI deadline either.
 
 ## One-Off Commands and TTY Defaults
 
@@ -112,7 +119,19 @@ still returns `None`; stream it if the output must be consumed.
 
 `compose.watch(...)` itself returns an owned `(source, bytes)` stream; it
 doesn't take `stream_logs=True`. It defaults to `prune=False` (explicitly
-forwarded as `--prune=false`), and an explicit empty service list does no work.
+forwarded as `--prune=false`, and `--prune=true` only when requested), and an
+explicit empty service list returns `None` without invoking the CLI. A watch
+can run until stopped: pass a `timeout` or a deliberate stop boundary, and use
+the stream as a context manager. Closing it reaps the local CLI without
+removing running services.
+
+`wait=True` is a Compose CLI option applied during `up`. To check afterward
+that a chosen set of services settled, use the read-only
+`pywhales.convergence.capture_compose()` and `wait()`, documented in
+[Observation budgets and convergence](observation-and-convergence.md). Capture
+takes explicit, distinct service names for the client's configured project, and
+a one-shot container that exited 0 stays a blocker, so select long-running
+services only.
 
 Preview mode is the client global `compose_dry_run=True`, not an `up()` keyword.
 Use a separate preview client with the same files/project settings. It still

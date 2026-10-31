@@ -51,6 +51,60 @@ class StackTarget:
             raise ValueError("Stack target must contain distinct services")
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ComposeService:
+    """One selected Compose service, its config hash and its full container IDs."""
+
+    name: str
+    config_hash: str
+    container_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        """Reject empty names or hashes and empty, blank or duplicate IDs."""
+        ids = self.container_ids
+        if (
+            type(self.name) is not str
+            or not self.name
+            or type(self.config_hash) is not str
+            or not self.config_hash
+            or type(ids) is not tuple
+            or not ids
+            or any(type(identity) is not str or not identity for identity in ids)
+            or len(set(ids)) != len(ids)
+        ):
+            raise ValueError("Compose services need a name, hash and distinct IDs")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ComposeTarget:
+    """Selected Compose services with fixed containers and configuration hashes.
+
+    The target holds full container IDs, so keep it away from untrusted output.
+    One-off ``compose run`` containers are never members. A hash records the
+    service configuration, not its replica count; the container IDs fix that.
+    """
+
+    client_config: ClientConfig = field(repr=False, compare=False)
+    services: tuple[ComposeService, ...]
+
+    def __post_init__(self) -> None:
+        """Reject empty membership, duplicate service names or duplicate IDs."""
+        services = self.services
+        if (
+            type(services) is not tuple
+            or not services
+            or any(type(service) is not ComposeService for service in services)
+        ):
+            raise ValueError("Compose target must contain selected services")
+        identities = [
+            identity for service in services for identity in service.container_ids
+        ]
+        if len({service.name for service in services}) != len(services) or len(
+            set(identities)
+        ) != len(identities):
+            raise ValueError("Compose target must contain distinct services and IDs")
+
+
 @dataclass(frozen=True, slots=True)
 class Success:
     """All fixed services met the captured convergence conditions."""
@@ -74,7 +128,13 @@ class DeadlineDetail:
 
     Each reason counts a service at most once; reasons can overlap. Counts describe
     a past observation over captured membership, not daemon state at expiry. No
-    service identities, task payloads, client settings or failure causes are kept.
+    service identities, task or container payloads, client settings or failure
+    causes are kept.
+
+    The container counts apply to Compose targets. A service is counted when any
+    of its containers has a status other than ``running`` (so a restarting, paused
+    or exited-0 container is also a non-running one), is restarting, is paused, or
+    has a healthcheck whose status is not ``healthy``, including ``starting``.
     """
 
     captured_services: int
@@ -88,6 +148,10 @@ class DeadlineDetail:
     duplicate_node_assignments: int = 0
     missing_node_assignments: int = 0
     outside_approved_nodes: int = 0
+    non_running_containers: int = 0
+    restarting_containers: int = 0
+    paused_containers: int = 0
+    unhealthy_containers: int = 0
 
     def __post_init__(self) -> None:
         """Reject non-integer counts or counts outside captured membership."""
@@ -104,6 +168,10 @@ class DeadlineDetail:
             self.duplicate_node_assignments,
             self.missing_node_assignments,
             self.outside_approved_nodes,
+            self.non_running_containers,
+            self.restarting_containers,
+            self.paused_containers,
+            self.unhealthy_containers,
         )
         if any(
             type(count) is not int or not 0 <= count <= self.captured_services

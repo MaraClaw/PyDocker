@@ -1523,7 +1523,8 @@ def test_start_detach_keys(run_mock: Mock) -> None:
             "--detach-keys",
             "a,b",
             "ctr_name",
-        ]
+        ],
+        timeout=None,
     )
 
 

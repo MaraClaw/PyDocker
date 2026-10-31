@@ -1,12 +1,12 @@
 """Docker CLI manifest-list handles, local assembly, and registry publication."""
 
-import json
 from collections.abc import Iterable
 from types import TracebackType
 from typing import Self, override
 
 from pydantic import JsonValue
 
+from pywhales._json import loads_compat
 from pywhales.client_config import (
     ClientConfig,
     Command,
@@ -54,7 +54,7 @@ class ManifestList(ReloadableObjectFromJson[ManifestListInspectResult]):
         cmd = Command([*self.docker_cmd, "manifest", "inspect", reference])
         cmd.add_flag("--insecure", self.insecure)
         json_str = run(cmd)
-        return custom_parse_object_as(dict[str, JsonValue], {**json.loads(json_str)})
+        return custom_parse_object_as(dict[str, JsonValue], {**loads_compat(json_str)})
 
     @override
     def _parse_json_object(

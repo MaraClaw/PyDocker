@@ -6,7 +6,6 @@ on demand. Inspect parsing follows that config's diagnostic confidentiality
 policy.
 """
 
-import json
 import os
 import shutil
 import tempfile
@@ -21,6 +20,7 @@ import pydantic
 from . import utils
 from ._environment import copy_environment
 from ._execution_policy import PolicyExecutable
+from ._json import dumps_compat
 from ._types import JsonObject
 from .enums import ClientTypeInput, ComposeProgressInput
 from .telemetry import TelemetryObserver
@@ -615,7 +615,7 @@ class ReloadableObjectFromJson[InspectResultT, ReferenceT: str | None = str](
                 ) from None
             fd, json_response_file = tempfile.mkstemp(suffix=".json", text=True)
             with os.fdopen(fd, "w") as f:
-                json.dump(json_object, f, indent=2)
+                f.write(dumps_compat(json_object, indent=2))
 
             raise ParsingError(
                 f"There was an error parsing the json response from the Docker daemon. \n"

@@ -28,14 +28,21 @@ affect only new launches, not a stream already in progress. There's no
 monitoring dependency, global observer, background worker, or network export
 by default.
 
-The vocabulary is closed and currently at `schema_version=3`. `family` is
+The vocabulary is closed and currently at `schema_version=4`. `family` is
 `"captured"`, `"stream"`, `"archive_load"`, or `"archive_save"`, describing
 the shared execution path, never something inferred from argv; see
 [Registry transfers and archives](registry-and-archives.md) for exactly
 which image operations use the archive families. `outcome` on
-`CompletionRecord` is `"success"`, `"failure"`, `"timeout"`, or `"closed"`.
-Each launch attempt has one opaque random `attempt_id`, shared with at most
-one completion.
+`CompletionRecord` is `"success"`, `"failure"`, `"timeout"`, `"closed"`,
+`"cancelled"` (an `ObservationCancelled`), or `"limit"` (an
+`ObservationLimitError` after launch, including a `max_total_stream_bytes`
+overflow or a `native_argv` refusal). `ObservationTimeout` and `DockerTimeout`
+stay `"timeout"` and `KeyboardInterrupt` stays `"failure"`; a rejection before
+launch emits no record. A stream reports the outcome of the error it delivers
+(deadline, then scope stop, then reader error), and `close()` keeps a stop
+recorded before it, such as a set cancel token; with none it reports
+`"closed"`. Each launch attempt has one opaque random `attempt_id`, shared with
+at most one completion.
 
 Records never include commands, arguments, endpoint addresses, environment
 keys or values, stdin/stdout/stderr payloads, or exception text, even with

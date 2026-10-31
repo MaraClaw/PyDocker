@@ -86,7 +86,8 @@ does not expose an artifact job ID; timestamps alone are not treated as proof.
 Job `run_attempt`, when returned by GitHub, must match the scoped endpoint.
 
 Missing, expired, duplicate, unsafe, altered or mismatched evidence is an error.
-Every pagination endpoint is exhausted before selecting a candidate. A newer
+Every pagination endpoint is exhausted, within the caps below, before selecting
+a candidate. A newer
 producer/publisher attempt invalidates an older receipt unless that entire
 latest chain is complete and matching. Rerunning only failed jobs cannot borrow
 checks or material from a previous attempt. Use a full workflow rerun/fresh run
@@ -136,6 +137,35 @@ GitHub rejects release bodies above 125,000 characters. Bytes are never fewer
 than characters, so 120,000 bytes also bounds the characters and leaves 5,000
 of headroom.
 
+### Bounded pagination
+
+`GitHub.pages` in `api.py` is the only list paginator; job, artifact, release
+and commit-pull lookups all use it with the exact `?per_page=100&page=N` query.
+GitHub documents no page depth for these endpoints, so the item caps in
+`limits.py` are not GitHub limits. Each is derived from what this repository's
+workflows produce, with headroom:
+
+| Endpoint | Item cap | Requests allowed | Rationale |
+| --- | ---: | ---: | --- |
+| Attempt jobs | 200 | 3 | One producer attempt has 24 jobs (seven fixed checks, the 16-entry component matrix, the seal); the publisher has one. |
+| Run artifacts | 100 | 2 | Run-scoped across attempts; a producer attempt uploads three and a publisher attempt one, so over 30 full reruns fit. |
+| Releases | 500 | 6 | One release per published version, scanned for an authenticated draft. |
+| Commit pulls | 100 | 2 | A merged-main commit is associated with one merging pull request and rarely more. |
+
+A listing may make `cap // 100 + 1` requests, which leaves room for the empty
+terminator after a final full page. A short page ends the listing; a count never
+does. The paginator rejects too many items, more than 16 MiB of response bodies
+summed over all pages (beside the 64 MiB per-request budget), and a repeated
+item identity (`id`, or `number` for commit pulls). Caps and byte totals are
+inclusive: a value exactly at the limit passes and one past it raises `Rejected`
+with a payload-free reason. A non-200 page fails instead of ending pagination.
+
+Job and artifact envelopes must carry a non-negative integer `total_count` on
+every page. It must not change between pages and must equal the final collected
+count, so silent server truncation fails. The bare-array release and commit-pull
+endpoints have no such field: truncation there remains undetectable, and only
+the caps and duplicate checks apply.
+
 Actual received/read bytes are counted in bounded chunks with a one-byte excess
 probe before accumulation. Exact limits succeed; declared lengths and archive
 sizes only permit early rejection, never exemption from actual accounting.
@@ -150,8 +180,7 @@ standalone tar/site checks have independent budgets; an outer ZIP limit is not
 treated as a nested expansion limit. Only complete verified inventories reach
 consumers, and site extraction is staged before publication into its fresh
 destination. Rejection discards staging. These guarantees cover retained bodies
-and member payloads, **not total parser/decompressor memory or CPU**, cumulative
-pagination, or resources used by the producer-only isolated package installs.
+and member payloads, **not total parser/decompressor memory or CPU** or resources used by the producer-only isolated package installs.
 
 ```bash
 uv run --locked pytest tests/pywhales/test_delivery_workflows.py

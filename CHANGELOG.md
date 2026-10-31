@@ -1,5 +1,65 @@
 # Changelog
 
+## 1.0.6
+
+### New Features
+
+- `InspectionPolicy.max_total_stream_bytes` optionally bounds combined stdout and
+  stderr read by streams and image archive transfers in an observation scope.
+  Nested scopes charge every enclosing stream budget independently of captured
+  response budgets. Overflow stops the local CLI and raises
+  `ObservationLimitError` with reason `total_stream`.
+- Service create, update, rollback, and scale; Swarm CA and join; stack deploy;
+  and plugin install and upgrade accept keyword-only local CLI timeouts. The
+  service update/scale and plugin upgrade handles forward these deadlines.
+  Preflight and postflight inspection remain outside the selected launch budget;
+  each Swarm CA launch receives a fresh budget.
+
+### Behavior Changes
+
+- Buildx builder reload/list, Compose config/ls/events, system disk-free/events/info,
+  and imagetools manifest parsing raise `pywhales.client_config.ParsingError` for
+  malformed responses. This is not a `ValueError` subclass. Safe diagnostics
+  suppress payload-bearing exception chains; `raw_diagnostics=True` chains the
+  original parsing error. Event streams snapshot this setting at launch.
+- Telemetry records use schema version 4. Observation cancellation reports
+  `cancelled`, and observation-limit rejection after launch reports `limit`,
+  including stream-byte budget overflow. Observation deadlines still report
+  `timeout`; stream-buffer errors and `KeyboardInterrupt` remain `failure`.
+  Prelaunch rejections emit no records.
+
+### Internals
+
+- Added an internal JSON utility with a native orjson pair and a standard-library
+  compatible pair. Existing CLI decoders, canonical hashes, diagnostic files,
+  delivery REST helpers, and the overhead benchmark use the compatible pair to
+  preserve accepted inputs, error types, and serialized bytes.
+  The fleet contract and harness, the isolated distribution smoke child, and
+  test oracles stay on the standard library.
+
+## 1.0.5
+
+### New Features
+
+- Capture selected Compose project services and wait for their containers to be
+  running and healthy. Changed membership, service labels, or configuration
+  hashes supersede the capture; a one-shot container that exits 0 remains a
+  blocker.
+- Inventory captures and bulk reloads support Buildx builders. Each builder
+  group uses one strictly parsed listing, and cache updates publish only after
+  all groups succeed.
+- Image and Compose push, container start, Compose watch, and Buildx prune accept
+  per-call timeouts for the local CLI. Each image transfer has its own deadline;
+  the preceding image inspection and queueing are excluded. Timeout does not
+  undo daemon or registry work.
+
+### Release Process
+
+- GitHub delivery pagination now enforces item and byte caps, rejects duplicate
+  identities, and validates consistent `total_count` values for jobs and
+  artifacts. Truncation of bare-array release and commit-pull listings remains
+  undetectable.
+
 ## 1.0.0
 
 ### Behavior Changes

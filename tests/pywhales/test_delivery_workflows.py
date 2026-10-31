@@ -20,13 +20,13 @@ from pathlib import Path
 from typing import IO, BinaryIO, override
 
 import pytest
-from pydantic import BaseModel, JsonValue, ValidationError
+from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 
 from scripts.delivery import __main__ as cli
 from scripts.delivery import api as http
 from scripts.delivery import archives, artifacts, budgets, limits, publication
 from scripts.delivery.api import Curl, GitHub, Rejected, Response, Transport
-from scripts.delivery.artifacts import describe, download, sha256
+from scripts.delivery.artifacts import describe, download, inventory, sha256
 from scripts.delivery.chain import name, producer, receipt, seal
 from scripts.delivery.distributions import inspect, smoke
 from scripts.delivery.models import (
@@ -39,6 +39,7 @@ from scripts.delivery.models import (
     Job,
     Jobs,
     Pull,
+    PullNumber,
     Receipt,
     Release,
     Repository,
@@ -49,8 +50,15 @@ from scripts.delivery.models import (
 from scripts.delivery.notes import section
 from scripts.delivery.pages import verify_pages_tar
 from scripts.delivery.publication import confirm, prepare
-from scripts.delivery.releases import release, released
-from scripts.delivery.trust import CHECKS, PUBLISH_JOB, SEAL_JOB, identity
+from scripts.delivery.releases import release, release_record, released
+from scripts.delivery.trust import (
+    CHECKS,
+    PUBLISH_JOB,
+    SEAL_JOB,
+    attempt_jobs,
+    identity,
+    merged_pull,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 WHEEL = "pywhales-0.6.1-py3-none-any.whl"
@@ -148,7 +156,7 @@ class Service(Transport):
         self.set_jobs(self.jobs)
         self.put(
             "actions/runs/200/attempts/1/jobs?per_page=100&page=1",
-            Jobs(jobs=(self.job(99, PUBLISH_JOB, self.publisher),)),
+            Jobs(total_count=1, jobs=(self.job(99, PUBLISH_JOB, self.publisher),)),
         )
         self.put(
             f"commits/{self.source.head_sha}/pulls?per_page=100&page=1", [{"number": 7}]
@@ -238,13 +246,14 @@ class Service(Transport):
 
     def set_jobs(self, jobs: tuple[Job, ...]) -> None:
         self.put(
-            "actions/runs/100/attempts/1/jobs?per_page=100&page=1", Jobs(jobs=jobs)
+            "actions/runs/100/attempts/1/jobs?per_page=100&page=1",
+            Jobs(total_count=len(jobs), jobs=jobs),
         )
 
     def set_artifacts(self, artifacts: tuple[Artifact, ...], run_id: int = 100) -> None:
         self.put(
             f"actions/runs/{run_id}/artifacts?per_page=100&page=1",
-            Artifacts(artifacts=artifacts),
+            Artifacts(total_count=len(artifacts), artifacts=artifacts),
         )
 
     def artifacts(self) -> tuple[Artifact, ...]:
@@ -399,7 +408,7 @@ def test_rejects_unproven_artifacts(service: Service, fault: str) -> None:
         case "expired":
             artifacts[0] = artifacts[0].model_copy(update={"expired": True})
         case "duplicate":
-            artifacts.append(artifacts[0])
+            artifacts.append(artifacts[0].model_copy(update={"id": 5}))
         case "digest":
             service.routes[("GET", BASE_URL + "actions/artifacts/1/zip")] = Response(
                 200, b"tampered"
@@ -520,7 +529,8 @@ def test_skipped_publisher_job_cannot_substitute_receipt(service: Service) -> No
         update={"conclusion": "skipped"}
     )
     service.put(
-        "actions/runs/200/attempts/1/jobs?per_page=100&page=1", Jobs(jobs=(job,))
+        "actions/runs/200/attempts/1/jobs?per_page=100&page=1",
+        Jobs(total_count=1, jobs=(job,)),
     )
     with pytest.raises(Rejected, match="unsuccessful job"):
         receipt(service.api, 200)
@@ -1090,7 +1100,7 @@ def test_receipt_material_is_not_a_successful_run_substitute(
         case "expired":
             artifacts[0] = artifacts[0].model_copy(update={"expired": True})
         case "duplicate":
-            artifacts.append(artifacts[0])
+            artifacts.append(artifacts[0].model_copy(update={"id": 5}))
         case "tamper":
             service.routes[("GET", BASE_URL + "actions/artifacts/4/zip")] = Response(
                 200, b"tampered receipt"
@@ -1287,15 +1297,21 @@ def test_cli_confirm_exits_nonzero_after_bounded_exhaustion(
 
 
 def test_late_page_duplicate_is_rejected_instead_of_selecting_first(
-    service: Service,
+    service: Service, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(limits, "ARTIFACT_ITEMS", 200)
     artifacts = service.artifacts()
-    first = (artifacts[0],) * 100
+    first = tuple(
+        artifacts[0].model_copy(update={"id": 1000 + index}) for index in range(100)
+    )
+    total = len(first) + len(artifacts)
     service.put(
-        "actions/runs/100/artifacts?per_page=100&page=1", Artifacts(artifacts=first)
+        "actions/runs/100/artifacts?per_page=100&page=1",
+        Artifacts(total_count=total, artifacts=first),
     )
     service.put(
-        "actions/runs/100/artifacts?per_page=100&page=2", Artifacts(artifacts=artifacts)
+        "actions/runs/100/artifacts?per_page=100&page=2",
+        Artifacts(total_count=total, artifacts=artifacts),
     )
     with pytest.raises(Rejected, match="ambiguous artifact"):
         producer(service.api, 100)
@@ -2153,3 +2169,605 @@ def test_pages_rejects_reference_symlink(tmp_path: Path) -> None:
 
     with pytest.raises(Rejected, match="Pages site special file"):
         verify_pages_tar(site, archive)
+
+
+def dumped(model: BaseModel) -> dict[str, JsonValue]:
+    return TypeAdapter(dict[str, JsonValue]).validate_json(model.model_dump_json())
+
+
+def job_item(number: int) -> dict[str, JsonValue]:
+    return dumped(
+        Job(
+            id=number,
+            name=f"job-{number}",
+            run_id=100,
+            run_attempt=1,
+            head_sha="a" * 40,
+            status="completed",
+            conclusion="success",
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
+            completed_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+    )
+
+
+def artifact_item(number: int) -> dict[str, JsonValue]:
+    return dumped(
+        Artifact(
+            id=number,
+            name=f"artifact-{number}",
+            expired=False,
+            digest=f"sha256:{'0' * 64}",
+            created_at=datetime(2026, 1, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 1, 1, 1, tzinfo=UTC),
+            workflow_run=ArtifactRun(
+                id=100,
+                repository_id=1,
+                head_repository_id=1,
+                head_sha="a" * 40,
+                head_branch="main",
+            ),
+        )
+    )
+
+
+@dataclass(frozen=True)
+class Listing:
+    """One paginated endpoint: its cap, path, envelope and item identity."""
+
+    limit: str
+    path: str
+    model: type[BaseModel]
+    envelope: str | None
+    item: Callable[[int], dict[str, JsonValue]]
+
+    def fetch(self, api: GitHub) -> tuple[BaseModel, ...]:
+        return api.pages(self.path, self.model, self.envelope)
+
+    def items(self, start: int, count: int) -> list[JsonValue]:
+        return [self.item(number) for number in range(start, start + count)]
+
+    def page(self, items: list[JsonValue], total: int | None = None) -> Response:
+        if self.envelope is None:
+            return Response(200, json.dumps(items).encode())
+        count = len(items) if total is None else total
+        body = {"total_count": count, self.envelope: items}
+        return Response(200, json.dumps(body).encode())
+
+    def url(self, page: int) -> str:
+        return f"{self.path}?per_page=100&page={page}"
+
+
+LISTINGS = {
+    "jobs": Listing(
+        "JOB_ITEMS", "actions/runs/100/attempts/1/jobs", Job, "jobs", job_item
+    ),
+    "artifacts": Listing(
+        "ARTIFACT_ITEMS",
+        "actions/runs/100/artifacts",
+        Artifact,
+        "artifacts",
+        artifact_item,
+    ),
+    "releases": Listing(
+        "RELEASE_ITEMS",
+        "releases",
+        Release,
+        None,
+        lambda number: {
+            "id": number,
+            "tag_name": f"v{number}",
+            "draft": False,
+            "prerelease": False,
+        },
+    ),
+    "pulls": Listing(
+        "PULL_ITEMS",
+        f"commits/{'a' * 40}/pulls",
+        PullNumber,
+        None,
+        lambda number: {"number": number},
+    ),
+}
+ENVELOPED = [name for name, listing in LISTINGS.items() if listing.envelope is not None]
+
+
+@dataclass
+class Pager(Transport):
+    """Serve each numbered page from a callback and record the requested URLs."""
+
+    respond: Callable[[int], Response]
+    urls: list[str] = field(default_factory=list)
+
+    @override
+    def request(self, method: str, url: str, body: bytes | None = None) -> Response:
+        if "?" not in url:
+            return Response(404, b"{}")
+        self.urls.append(url.removeprefix(BASE_URL))
+        return self.respond(int(url.rsplit("page=", 1)[1]))
+
+    def api(self) -> GitHub:
+        return GitHub(self, "owner/repo", 1)
+
+
+def sequence(listing: Listing, *sizes: int) -> Pager:
+    """Pages of consecutive distinct items with sizes; later pages are empty."""
+    starts = [sum(sizes[:index]) + 1 for index in range(len(sizes))]
+    total = sum(sizes)
+    return Pager(
+        lambda page: listing.page(
+            listing.items(starts[page - 1], sizes[page - 1])
+            if page <= len(sizes)
+            else [],
+            total,
+        )
+    )
+
+
+@pytest.fixture(params=LISTINGS)
+def listing(request: pytest.FixtureRequest) -> Listing:
+    return LISTINGS[request.param]
+
+
+def test_each_endpoint_cap_passes_at_limit_and_fails_one_past(
+    listing: Listing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(limits, listing.limit, 3)
+    exact = sequence(listing, 3)
+    assert len(listing.fetch(exact.api())) == 3
+    assert exact.urls == [listing.url(1)]
+
+    over = Pager(lambda _page: listing.page(listing.items(1, 4)))
+    with pytest.raises(Rejected, match="item budget exceeded"):
+        listing.fetch(over.api())
+    assert over.urls == [listing.url(1)]
+
+
+@pytest.mark.parametrize("pages", [1, 2])
+def test_full_final_page_needs_an_empty_terminator_request(
+    listing: Listing, monkeypatch: pytest.MonkeyPatch, pages: int
+) -> None:
+    monkeypatch.setattr(limits, listing.limit, 100 * pages)
+    server = sequence(listing, *[100] * pages)
+    assert len(listing.fetch(server.api())) == 100 * pages
+    assert server.urls == [listing.url(page) for page in range(1, pages + 2)]
+
+
+def test_item_past_a_full_page_cap_fails_on_the_terminator(
+    listing: Listing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(limits, listing.limit, 100)
+    server = sequence(listing, 100, 1)
+    with pytest.raises(Rejected, match="item budget exceeded"):
+        listing.fetch(server.api())
+    assert server.urls == [listing.url(1), listing.url(2)]
+
+
+@pytest.mark.parametrize("fresh", [False, True])
+def test_server_ignoring_page_is_stopped_within_the_request_budget(
+    listing: Listing, monkeypatch: pytest.MonkeyPatch, fresh: bool
+) -> None:
+    monkeypatch.setattr(limits, listing.limit, 100 if fresh else 200)
+    server = Pager(
+        lambda page: listing.page(listing.items(page if fresh else 1, 100), 100)
+    )
+    reason = "item budget exceeded" if fresh else "repeated item"
+    with pytest.raises(Rejected, match=reason):
+        listing.fetch(server.api())
+    assert server.urls == [listing.url(1), listing.url(2)]
+
+
+@pytest.mark.parametrize("within_page", [False, True])
+def test_repeated_item_identity_is_rejected(
+    listing: Listing, monkeypatch: pytest.MonkeyPatch, within_page: bool
+) -> None:
+    monkeypatch.setattr(limits, listing.limit, 200)
+    first = listing.items(1, 100)
+    second = first[-1:] + listing.items(101, 3)
+    pages = [first + first[:1], second] if within_page else [first, second]
+    server = Pager(lambda page: listing.page(pages[page - 1], 103))
+    with pytest.raises(Rejected, match="repeated item"):
+        listing.fetch(server.api())
+
+
+def test_pull_identity_is_the_number_not_an_id() -> None:
+    listing = LISTINGS["pulls"]
+    server = Pager(lambda _page: listing.page([{"number": 7}, {"number": 7}]))
+    with pytest.raises(Rejected, match="repeated item"):
+        listing.fetch(server.api())
+
+
+def test_cumulative_bytes_pass_at_limit_and_fail_one_past(
+    listing: Listing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(limits, listing.limit, 150)
+    sizes = [len(page.body) for page in sequence_pages(listing, 100, 50)]
+    monkeypatch.setattr(limits, "PAGINATION_BYTES", sum(sizes))
+    exact = sequence(listing, 100, 50)
+    assert len(listing.fetch(exact.api())) == 150
+
+    monkeypatch.setattr(limits, "PAGINATION_BYTES", sum(sizes) - 1)
+    over = sequence(listing, 100, 50)
+    with pytest.raises(Rejected, match="byte budget exceeded"):
+        listing.fetch(over.api())
+    assert over.urls == [listing.url(1), listing.url(2)]
+
+
+def sequence_pages(listing: Listing, *sizes: int) -> list[Response]:
+    server = sequence(listing, *sizes)
+    return [server.respond(page) for page in range(1, len(sizes) + 1)]
+
+
+def test_first_page_alone_is_held_to_the_cumulative_byte_budget(
+    listing: Listing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = sequence_pages(listing, 2)[0].body
+    monkeypatch.setattr(limits, "PAGINATION_BYTES", len(body) - 1)
+    with pytest.raises(Rejected, match="byte budget exceeded"):
+        listing.fetch(sequence(listing, 2).api())
+
+
+@pytest.mark.parametrize("status", [403, 404, 500])
+def test_non_success_page_fails_instead_of_ending_pagination(
+    listing: Listing, status: int
+) -> None:
+    server = Pager(
+        lambda page: (
+            listing.page(listing.items(1, 100), 150)
+            if page == 1
+            else Response(status, b"{}")
+        )
+    )
+    with pytest.raises(Rejected, match="pagination response"):
+        listing.fetch(server.api())
+    assert server.urls == [listing.url(1), listing.url(2)]
+
+
+def test_rejections_carry_no_response_payload(listing: Listing) -> None:
+    secret = "SECRET-TOKEN"
+    malformed = [
+        Response(200, f"not json {secret}".encode()),
+        listing.page([{"bogus": secret}]),
+        Response(200, json.dumps({"total_count": secret}).encode()),
+        Response(200, json.dumps({"total_count": 1, "other": [secret]}).encode()),
+    ]
+    for response in malformed:
+        with pytest.raises(Rejected) as caught:
+            listing.fetch(Pager(lambda _page, response=response: response).api())
+        assert secret not in caught.value.reason
+
+
+@pytest.mark.parametrize("name", ENVELOPED)
+@pytest.mark.parametrize("total", ["absent", "text", "boolean", "negative", "null"])
+def test_envelope_without_a_valid_total_count_is_rejected(
+    name: str, total: str
+) -> None:
+    listing = LISTINGS[name]
+    assert listing.envelope is not None
+    body: dict[str, JsonValue] = {listing.envelope: listing.items(1, 2)}
+    values: dict[str, JsonValue] = {
+        "text": "2",
+        "boolean": True,
+        "negative": -1,
+        "null": None,
+    }
+    if total != "absent":
+        body["total_count"] = values[total]
+    server = Pager(lambda _page: Response(200, json.dumps(body).encode()))
+    with pytest.raises(Rejected, match="total_count missing"):
+        listing.fetch(server.api())
+
+
+@pytest.mark.parametrize("name", ENVELOPED)
+def test_total_count_must_not_drift_between_pages(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    listing = LISTINGS[name]
+    monkeypatch.setattr(limits, listing.limit, 200)
+    server = Pager(
+        lambda page: listing.page(
+            listing.items(100 * (page - 1) + 1, 100 if page == 1 else 5),
+            150 if page == 1 else 105,
+        )
+    )
+    with pytest.raises(Rejected, match="total_count changed"):
+        listing.fetch(server.api())
+    assert server.urls == [listing.url(1), listing.url(2)]
+
+
+@pytest.mark.parametrize("name", ENVELOPED)
+@pytest.mark.parametrize("total", [4, 6])
+def test_final_count_must_equal_total_count(name: str, total: int) -> None:
+    listing = LISTINGS[name]
+    server = Pager(lambda _page: listing.page(listing.items(1, 5), total))
+    with pytest.raises(Rejected, match="total_count mismatch"):
+        listing.fetch(server.api())
+
+
+@pytest.mark.parametrize("name", ENVELOPED)
+def test_server_truncation_to_a_full_page_is_detected(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    listing = LISTINGS[name]
+    monkeypatch.setattr(limits, listing.limit, 200)
+    server = Pager(
+        lambda page: listing.page(listing.items(1, 100) if page == 1 else [], 150)
+    )
+    with pytest.raises(Rejected, match="total_count mismatch"):
+        listing.fetch(server.api())
+    assert server.urls == [listing.url(1), listing.url(2)]
+
+
+@pytest.mark.parametrize("name", ENVELOPED)
+def test_total_count_never_ends_pagination_early(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    listing = LISTINGS[name]
+    monkeypatch.setattr(limits, listing.limit, 200)
+    server = Pager(
+        lambda page: listing.page(listing.items(100 * (page - 1) + 1, 100), 100)
+    )
+    with pytest.raises(Rejected, match="item budget exceeded"):
+        listing.fetch(server.api())
+    assert server.urls == [listing.url(1), listing.url(2), listing.url(3)]
+
+
+def test_model_without_a_policy_cannot_paginate() -> None:
+    server = Pager(lambda _page: Response(200, b"[]"))
+    with pytest.raises(Rejected, match="no item cap"):
+        server.api().pages("things", Repository)
+    assert server.urls == []
+
+
+def test_callers_use_the_bounded_paginator(
+    service: Service, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = service.source
+    monkeypatch.setattr(limits, "JOB_ITEMS", 2)
+    monkeypatch.setattr(limits, "ARTIFACT_ITEMS", 2)
+    monkeypatch.setattr(limits, "RELEASE_ITEMS", 2)
+    monkeypatch.setattr(limits, "PULL_ITEMS", 2)
+    service.set_jobs(service.jobs[:2])
+    service.set_artifacts(service.artifacts()[:2])
+    service.put(
+        f"commits/{run.head_sha}/pulls?per_page=100&page=1",
+        [{"number": 7}, {"number": 8}],
+    )
+    service.put(
+        "releases?per_page=100&page=1",
+        [LISTINGS["releases"].item(number) for number in range(1, 3)],
+    )
+    assert len(attempt_jobs(service.api, run)) == 2
+    assert len(inventory(service.api, run)) == 2
+    assert release_record(service.api, "v9") is None
+    merged_pull(service.api, run)
+
+    service.set_jobs(service.jobs[:3])
+    service.set_artifacts((*service.artifacts(), service.artifacts()[0]))
+    service.put(
+        f"commits/{run.head_sha}/pulls?per_page=100&page=1",
+        [{"number": 7}, {"number": 8}, {"number": 9}],
+    )
+    service.put(
+        "releases?per_page=100&page=1",
+        [LISTINGS["releases"].item(number) for number in range(1, 4)],
+    )
+    with pytest.raises(Rejected, match="item budget exceeded"):
+        attempt_jobs(service.api, run)
+    with pytest.raises(Rejected, match=r"repeated item|item budget exceeded"):
+        inventory(service.api, run)
+    with pytest.raises(Rejected, match="item budget exceeded"):
+        release_record(service.api, "v9")
+    with pytest.raises(Rejected, match="item budget exceeded"):
+        merged_pull(service.api, run)
+
+
+@pytest.mark.parametrize("fault", ["missing", "mismatch"])
+def test_job_and_artifact_callers_reject_unreliable_total_count(
+    service: Service, fault: str
+) -> None:
+    run = service.source
+    jobs: list[JsonValue] = [dumped(job) for job in service.jobs]
+    found: list[JsonValue] = [dumped(item) for item in service.artifacts()]
+    for path, items, key, call in (
+        ("actions/runs/100/attempts/1/jobs", jobs, "jobs", attempt_jobs),
+        ("actions/runs/100/artifacts", found, "artifacts", inventory),
+    ):
+        envelope: dict[str, JsonValue] = {key: items}
+        if fault == "mismatch":
+            envelope["total_count"] = len(items) + 1
+        service.put(f"{path}?per_page=100&page=1", envelope)
+        reason = "total_count missing" if fault == "missing" else "total_count mismatch"
+        with pytest.raises(Rejected, match=reason):
+            call(service.api, run)
+
+
+JSON_BODY_EDGES: dict[str, tuple[JsonValue, bytes]] = {
+    "unicode": (
+        {"text": "caf\u00e9 \u2014 \u65e5\u672c \U0001f600"},
+        b'{"text": "caf\\u00e9 \\u2014 \\u65e5\\u672c \\ud83d\\ude00"}',
+    ),
+    "unpaired-surrogates": ({"text": "\ud800x\udc00"}, b'{"text": "\\ud800x\\udc00"}'),
+    "control-characters": (
+        '\x00\x1f\x7f/"\\',
+        b'"\\u0000\\u001f\\u007f/\\"\\\\"',
+    ),
+    "non-finite": (
+        [float("nan"), float("inf"), float("-inf")],
+        b"[NaN, Infinity, -Infinity]",
+    ),
+    "oversized-integers": (
+        {"n": 2**70, "m": -(2**64)},
+        b'{"n": 1180591620717411303424, "m": -18446744073709551616}',
+    ),
+}
+JSON_NOTES = "### Added\n\n- Caf\u00e9 \u2014 \u65e5\u672c\u8a9e \U0001f600 a\u2028b"
+JSON_NOTES_WIRE = b'"### Added\\n\\n- Caf\\u00e9 \\u2014 \\u65e5\\u672c\\u8a9e \\ud83d\\ude00 a\\u2028b"'
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ({}, b"{}"),
+        ([], b"[]"),
+        (None, b"null"),
+        ("plain", b'"plain"'),
+        (
+            {"ref": "refs/tags/v1", "sha": "a" * 40},
+            b'{"ref": "refs/tags/v1", "sha": "' + b"a" * 40 + b'"}',
+        ),
+        (
+            {"body": "x", "draft": False, "n": [1, 2.5, None, True]},
+            b'{"body": "x", "draft": false, "n": [1, 2.5, null, true]}',
+        ),
+    ],
+)
+def test_json_body_uses_stdlib_default_separators(
+    value: JsonValue, expected: bytes
+) -> None:
+    body = http.json_body(value)
+    assert type(body) is bytes
+    assert body == expected
+
+
+@pytest.mark.parametrize("case", JSON_BODY_EDGES)
+def test_json_body_serializes_arbitrary_json_values_exactly(case: str) -> None:
+    value, expected = JSON_BODY_EDGES[case]
+    body = http.json_body(value)
+    assert body == expected and body.isascii()
+    assert json.dumps(json.loads(body)).encode() == expected
+
+
+def test_parse_item_validates_in_json_mode_for_strict_models() -> None:
+    item = job_item(7)
+    with pytest.raises(ValidationError):
+        Job.model_validate(item)
+
+    parsed = http.parse_item(Job, item)
+
+    assert parsed.id == 7
+    assert parsed.started_at == datetime(2026, 1, 1, tzinfo=UTC)
+    assert parsed.completed_at == datetime(2026, 1, 2, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("body", float("nan")),
+        ("body", float("inf")),
+        ("body", float("-inf")),
+        ("id", float("nan")),
+        ("tag_name", "\ud800"),
+    ],
+    ids=["nan-body", "inf-body", "negative-inf-body", "nan-id", "unpaired-surrogate"],
+)
+def test_parse_item_rejects_non_finite_and_unpaired_surrogate_values(
+    field_name: str, value: JsonValue
+) -> None:
+    item = {**LISTINGS["releases"].item(1), field_name: value}
+
+    with pytest.raises(Rejected) as rejected:
+        http.parse_item(Release, item)
+
+    assert str(rejected.value) == "pagination item malformed"
+
+
+def test_parse_item_keeps_integers_beyond_64_bits_and_unicode_exact() -> None:
+    oversized = 2**70
+    tag = "v\u00e9\u65e5\U0001f600"
+    item = {
+        **LISTINGS["releases"].item(1),
+        "id": oversized,
+        "tag_name": tag,
+        "body": "a\u2028b",
+    }
+
+    release = http.parse_item(Release, item)
+
+    assert type(release.id) is int and release.id == oversized
+    assert release.tag_name == tag and release.body == "a\u2028b"
+    assert http.parse_item(PullNumber, {"number": oversized}).number == oversized
+
+
+def test_pages_keep_distinct_integers_beyond_double_precision() -> None:
+    first, second = 2**70, 2**70 + 1
+    assert float(first) == float(second)
+    listing = LISTINGS["releases"]
+    distinct: list[JsonValue] = [
+        {**listing.item(1), "id": first},
+        {**listing.item(2), "id": second},
+    ]
+    server = Pager(lambda _page: listing.page(distinct))
+
+    found = server.api().pages(listing.path, Release)
+
+    assert [release.id for release in found] == [first, second]
+    assert server.urls == [listing.url(1)]
+
+    repeated: list[JsonValue] = [
+        {**listing.item(1), "id": first},
+        {**listing.item(2), "id": first},
+    ]
+    server = Pager(lambda _page: listing.page(repeated))
+    with pytest.raises(Rejected, match="repeated item"):
+        server.api().pages(listing.path, Release)
+
+
+@pytest.mark.parametrize("token", [b"NaN", b"Infinity", b"-Infinity"])
+def test_pages_reject_non_finite_tokens_inside_items(token: bytes) -> None:
+    body = (
+        b'[{"id": 1, "tag_name": "v1", "draft": false, "prerelease": false, '
+        b'"body": ' + token + b"}]"
+    )
+    server = Pager(lambda _page: Response(200, body))
+
+    with pytest.raises(Rejected, match="pagination item malformed"):
+        server.api().pages("releases", Release)
+
+    assert server.urls == [LISTINGS["releases"].url(1)]
+
+
+@dataclass
+class Recorder(Transport):
+    """Wrap a transport and keep every request body exactly as sent."""
+
+    inner: Transport
+    writes: list[tuple[str, str, bytes]] = field(default_factory=list)
+
+    @override
+    def request(self, method: str, url: str, body: bytes | None = None) -> Response:
+        if body is not None:
+            self.writes.append((method, url.removeprefix(BASE_URL), body))
+        return self.inner.request(method, url, body)
+
+
+def test_release_requests_send_unicode_notes_as_ascii_json_bytes(
+    service: Service,
+) -> None:
+    sealed = sealed_release(service)
+    document = sealed.model_copy(
+        update={"seal": sealed.seal.model_copy(update={"notes": JSON_NOTES})}
+    )
+    fake = ReleaseAPI(service)
+    recorder = Recorder(fake)
+
+    release(GitHub(recorder, "owner/repo", 1), document)
+
+    assert [(method, path) for method, path, _body in recorder.writes] == [
+        ("POST", "releases"),
+        ("PATCH", "releases/1"),
+    ]
+    created, published = (body for _method, _path, body in recorder.writes)
+    assert type(created) is bytes and created.isascii()
+    assert type(published) is bytes and published.isascii()
+    assert created == (
+        b'{"tag_name": "v0.6.1", "name": "v0.6.1", "target_commitish": "'
+        + b"a" * 40
+        + b'", "body": '
+        + JSON_NOTES_WIRE
+        + b', "draft": true, "prerelease": false}'
+    )
+    assert published == b'{"body": ' + JSON_NOTES_WIRE + b', "draft": false}'
+    assert fake.current == Release(
+        id=1, tag_name="v0.6.1", draft=False, prerelease=False, body=JSON_NOTES
+    )

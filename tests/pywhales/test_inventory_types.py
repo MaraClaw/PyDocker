@@ -6,7 +6,10 @@ from unittest.mock import patch
 
 import pytest
 
+from pywhales._inventory_dispatch import make_resource, resource_kind
 from pywhales.client_config import ClientConfig
+from pywhales.components.buildx.cli_wrapper import Builder
+from pywhales.components.buildx.models import BuilderInspectResult
 from pywhales.components.network.models import NetworkInspectResult
 from pywhales.inventory import (
     InspectionPolicy,
@@ -25,6 +28,7 @@ def _check_inventory_types(
 ) -> None:
     assert_type(request.kind, InventoryKind)
     assert_type(request.references, tuple[str, ...])
+    assert_type(policy.max_total_stream_bytes, int | None)
     assert_type(
         capture_inventory([request, resource], policy=policy), InventorySnapshot
     )
@@ -34,6 +38,20 @@ def _check_inventory_types(
 def test_policy_rejects_invalid_limits(value: int) -> None:
     with pytest.raises(ValueError):
         InspectionPolicy(max_references=value, max_argv_bytes=1, max_response_bytes=1)
+
+
+def test_policy_leaves_the_stream_total_unset_unless_given() -> None:
+    bounds = InspectionPolicy(max_references=1, max_argv_bytes=1, max_response_bytes=1)
+    assert bounds.max_total_stream_bytes is None
+    assert (
+        InspectionPolicy(
+            max_references=1,
+            max_argv_bytes=1,
+            max_response_bytes=1,
+            max_total_stream_bytes=7,
+        ).max_total_stream_bytes
+        == 7
+    )
 
 
 def test_request_does_not_resolve_executable_and_is_frozen() -> None:
@@ -76,4 +94,31 @@ def test_network_record_uses_network_inspect_model() -> None:
     record = InventoryRecord(kind="network", id="id", payload=model)
     snapshot = InventorySnapshot(records=(record,), started_at=now, finished_at=now)
     assert NetworkInspectResult in get_args(InventoryPayload.__value__)
+    assert snapshot.records[0].payload is model
+
+
+def test_builder_is_an_inventory_kind_resource_and_payload() -> None:
+    assert "builder" in get_args(InventoryKind.__value__)
+    assert Builder in get_args(InventoryResource.__value__)
+    assert BuilderInspectResult in get_args(InventoryPayload.__value__)
+    request = InventoryRequest(
+        kind="builder", references=("ci",), client_config=ClientConfig()
+    )
+    assert request.kind == "builder"
+
+
+@pytest.mark.parametrize("kind", get_args(InventoryKind.__value__))
+def test_every_kind_round_trips_through_dispatch(kind: InventoryKind) -> None:
+    config = ClientConfig()
+    resource = make_resource(kind, config, "identity")
+    assert resource_kind(resource) == kind
+    assert type(resource) in get_args(InventoryResource.__value__)
+    assert resource.client_config is config
+
+
+def test_builder_record_uses_builder_inspect_model() -> None:
+    model = BuilderInspectResult.model_validate({"Name": "ci", "Driver": "docker"})
+    now = datetime.now(UTC)
+    record = InventoryRecord(kind="builder", id="ci", payload=model)
+    snapshot = InventorySnapshot(records=(record,), started_at=now, finished_at=now)
     assert snapshot.records[0].payload is model

@@ -1,6 +1,5 @@
 """Bounded curl transport and paginated typed REST access."""
 
-import json
 import os
 import selectors
 import subprocess
@@ -9,10 +8,12 @@ import time
 from dataclasses import dataclass
 from typing import Protocol, override
 
-from pydantic import BaseModel, JsonValue, TypeAdapter
+from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
+
+from pywhales._json import dumps_compat
 
 from . import limits
-from .models import Repository
+from .models import Artifact, Job, PullNumber, Release, Repository
 
 
 @dataclass(slots=True)
@@ -150,6 +151,43 @@ class Curl:
         return Response(int(output[-3:]), bytes(output[:-4]))
 
 
+def listed(model: type[BaseModel]) -> tuple[str, int]:
+    """Return a listed model's identity field and its current item cap."""
+    if model is Job:
+        return "id", limits.JOB_ITEMS
+    if model is Artifact:
+        return "id", limits.ARTIFACT_ITEMS
+    if model is Release:
+        return "id", limits.RELEASE_ITEMS
+    if model is PullNumber:
+        return "number", limits.PULL_ITEMS
+    raise Rejected("pagination model has no item cap")
+
+
+def page_items(body: bytes, envelope: str | None) -> tuple[list[JsonValue], int | None]:
+    """Split one page into raw items and its `total_count`, without echoing input."""
+    try:
+        if envelope is None:
+            return TypeAdapter(list[JsonValue]).validate_json(body), None
+        wrapper = TypeAdapter(dict[str, JsonValue]).validate_json(body)
+    except ValidationError:
+        raise Rejected("pagination response malformed") from None
+    total, raw = wrapper.get("total_count"), wrapper.get(envelope)
+    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+        raise Rejected("pagination total_count missing")
+    if not isinstance(raw, list):
+        raise Rejected("pagination response malformed")
+    return raw, total
+
+
+def parse_item[T: BaseModel](model: type[T], item: JsonValue) -> T:
+    """Validate one listed item; the typed error would echo the rejected input."""
+    try:
+        return model.model_validate_json(dumps_compat(item))
+    except ValidationError:
+        raise Rejected("pagination item malformed") from None
+
+
 @dataclass(frozen=True, slots=True)
 class GitHub:
     """Repository-scoped API access with an externally anchored repository ID."""
@@ -175,19 +213,43 @@ class GitHub:
         require(response.status == 200, f"github response: {path}: {response.status}")
         return model.model_validate_json(response.body)
 
-    def pages[T: BaseModel](self, path: str, model: type[T]) -> tuple[T, ...]:
-        """Fetch every page, including bare-array endpoints."""
+    def pages[T: BaseModel](
+        self, path: str, model: type[T], envelope: str | None = None
+    ) -> tuple[T, ...]:
+        """Fetch every page of a bounded listing, failing closed on any anomaly.
+
+        Bare-array endpoints pass no envelope. Otherwise the response is an object
+        whose `envelope` array holds the items and whose `total_count` must be
+        present and stable, and must equal the final collected count. That count
+        can only reject; the end of the listing is always the first short page.
+        """
+        key, cap = listed(model)
         items: list[T] = []
-        page = 1
-        while True:
-            response = self.response(f"{path}?per_page=100&page={page}")
+        seen: set[object] = set()
+        received = 0
+        total: int | None = None
+        for page in range(1, cap // limits.PAGE_ITEMS + 2):
+            response = self.response(f"{path}?per_page={limits.PAGE_ITEMS}&page={page}")
             require(response.status == 200, "pagination response")
-            raw = TypeAdapter(list[JsonValue]).validate_json(response.body)
-            batch = [model.model_validate(item) for item in raw]
+            received += len(response.body)
+            require(
+                received <= limits.PAGINATION_BYTES, "pagination byte budget exceeded"
+            )
+            raw, count = page_items(response.body, envelope)
+            if count is not None:
+                require(total in {None, count}, "pagination total_count changed")
+                total = count
+            require(len(items) + len(raw) <= cap, "pagination item budget exceeded")
+            batch = [parse_item(model, item) for item in raw]
+            for item in batch:
+                identity = getattr(item, key)
+                require(identity not in seen, "pagination repeated item")
+                seen.add(identity)
             items.extend(batch)
-            if len(batch) < 100:
+            if len(raw) < limits.PAGE_ITEMS:
+                require(total in {None, len(items)}, "pagination total_count mismatch")
                 return tuple(items)
-            page += 1
+        raise Rejected("pagination page budget exceeded")
 
     def identity(self) -> Repository:
         """Anchor authority in the invoking repository, never artifact metadata."""
@@ -203,4 +265,4 @@ class GitHub:
 
 def json_body(value: JsonValue) -> bytes:
     """Serialize a REST request without executing supplied content."""
-    return json.dumps(value).encode()
+    return dumps_compat(value).encode()

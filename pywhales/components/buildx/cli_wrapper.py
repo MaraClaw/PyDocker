@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import builtins
 import datetime as dt
-import json
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -25,13 +24,16 @@ from typing import (
 from pydantic import JsonValue, TypeAdapter
 
 import pywhales.components.image.cli_wrapper
+from pywhales._json import loads_compat
 from pywhales.client_config import (
     ClientConfig,
     Command,
     DockerCLICaller,
+    ParsingError,
     ReloadableObject,
 )
 from pywhales.components._cleanup import resource_cleanup
+from pywhales.components._json_output import JsonOutputParser
 from pywhales.components.buildx.imagetools.cli_wrapper import ImagetoolsCLI
 from pywhales.components.buildx.models import BuilderInspectResult, BuilderNode
 from pywhales.enums import BuildxBuildCall
@@ -53,6 +55,17 @@ type BakeResult = dict[str, dict[str, dict[str, JsonValue]]]
 type BuildxOptions = Mapping[str, str | Path]
 type BuildxPruneFilter = tuple[str, str]
 _BAKE_RESULT_ADAPTER: Final = TypeAdapter(BakeResult)
+
+
+def _parse_builder_line(line: str) -> BuilderInspectResult:
+    return BuilderInspectResult(**loads_compat(line))
+
+
+def _parse_builder_entry(line: str) -> tuple[str, BuilderInspectResult]:
+    result = _parse_builder_line(line)
+    if result.name is None:
+        raise ValueError("Builder listing entry has no name")
+    return result.name, result
 
 
 class Builder(ReloadableObject[BuilderInspectResult]):
@@ -88,13 +101,15 @@ class Builder(ReloadableObject[BuilderInspectResult]):
             [*self.docker_cmd, "buildx", "ls", "--format", "{{json . }}"]
         )
         inspect_str = run(full_cmd)
-        lines = inspect_str.splitlines()
-        for line in lines:
-            builder_inspect_result = BuilderInspectResult(**json.loads(line))
+        raw = self.client_config.raw_diagnostics
+        parser = JsonOutputParser("builder listing", raw)
+        for line in inspect_str.splitlines():
+            builder_inspect_result = parser.parse(_parse_builder_line, line)
             if builder_inspect_result.name == reference:
                 return builder_inspect_result
+        label = f"the name {reference}" if raw else "that name"
         raise ValueError(
-            f"Could not find a builder with the name {reference}, this should "
+            f"Could not find a builder with {label}, this should "
             f"never happen unless you are quickly creating and deleting builders. "
             f"Please open an issue at https://github.com/MaraClaw/PyWhales/issues"
         )
@@ -133,6 +148,54 @@ class Builder(ReloadableObject[BuilderInspectResult]):
 
 
 ValidBuilder = str | Builder
+
+
+def parse_builder_listing(
+    output: str, *, raw_diagnostics: bool = False
+) -> dict[str, BuilderInspectResult]:
+    """Parse a whole builder listing into snapshots keyed by exact builder name.
+
+    Only byte-identical lines collapse, because the template also renders node
+    rows. The listing is validated completely before any snapshot is returned.
+    Safe mode withholds names and doesn't chain input-bearing parse errors.
+
+    Args:
+        output: Captured line-delimited JSON from `buildx ls --format "{{json . }}"`.
+        raw_diagnostics: Whether to include names and chain the raw parse error.
+
+    Returns:
+        Snapshots in listing order, each under its nonempty name.
+
+    Raises:
+        ParsingError: If any line is not a builder object, has a null or empty
+            name, or shares a name with a different line.
+    """
+    snapshots: dict[str, BuilderInspectResult] = {}
+    for line in dict.fromkeys(output.splitlines()):
+        try:
+            snapshot = BuilderInspectResult.model_validate_json(line, strict=True)
+        except ValueError as err:
+            if raw_diagnostics:
+                raise ParsingError("Invalid builder listing line") from err
+            raise ParsingError("Invalid builder listing line") from None
+        name = snapshot.name
+        if name is None or name == "":
+            raise ParsingError("Builder listing entry has no name")
+        if name in snapshots:
+            detail = f" for {name!r}" if raw_diagnostics else ""
+            raise ParsingError(f"Conflicting builder listing entries{detail}")
+        snapshots[name] = snapshot
+    return snapshots
+
+
+def list_builder_snapshots(
+    client_config: ClientConfig,
+) -> dict[str, BuilderInspectResult]:
+    """Run one builder listing and strictly parse it; no names enter argv."""
+    output = run(
+        Command([*client_config.docker_cmd, "buildx", "ls", "--format", "{{json . }}"])
+    )
+    return parse_builder_listing(output, raw_diagnostics=client_config.raw_diagnostics)
 
 
 class BuildxCLI(DockerCLICaller):
@@ -1001,7 +1064,14 @@ class BuildxCLI(DockerCLICaller):
         )
 
     def list(self) -> builtins.list[Builder]:
-        """Return available builders with seeded snapshots and unspecified order."""
+        """Return available builders with seeded snapshots and unspecified order.
+
+        Raises:
+            ParsingError: If a listing line is malformed, has an unexpected
+                shape, or names no builder. Safe mode withholds the payload and
+                chains no cause; a client with `raw_diagnostics=True` chains the
+                original error.
+        """
         full_cmd = Command(
             [*self.docker_cmd, "buildx", "ls", "--format", "{{json . }}"]
         )
@@ -1009,13 +1079,11 @@ class BuildxCLI(DockerCLICaller):
         lines = output.splitlines()
         lines = set(lines)
 
-        inpect_results = [BuilderInspectResult(**json.loads(line)) for line in lines]
+        parser = JsonOutputParser("builder listing", self.client_config.raw_diagnostics)
+        inspect_results = [parser.parse(_parse_builder_entry, line) for line in lines]
         result = []
-        for inspect_result in inpect_results:
-            assert inspect_result.name is not None
-            builder = Builder(
-                self.client_config, inspect_result.name, is_immutable_id=True
-            )
+        for name, inspect_result in inspect_results:
+            builder = Builder(self.client_config, name, is_immutable_id=True)
             builder._set_inspect_result(inspect_result)
             result.append(builder)
         return result
@@ -1027,6 +1095,7 @@ class BuildxCLI(DockerCLICaller):
         filters: Mapping[str, str] | Iterable[BuildxPruneFilter] = MappingProxyType({}),
         *,
         stream_logs: Literal[True],
+        timeout: float | None = None,
     ) -> MappedProcessStream[str]: ...
 
     @overload
@@ -1035,6 +1104,8 @@ class BuildxCLI(DockerCLICaller):
         all: bool = False,
         filters: Mapping[str, str] | Iterable[BuildxPruneFilter] = MappingProxyType({}),
         stream_logs: Literal[False] = False,
+        *,
+        timeout: float | None = None,
     ) -> None: ...
 
     @overload
@@ -1043,6 +1114,8 @@ class BuildxCLI(DockerCLICaller):
         all: bool = False,
         filters: Mapping[str, str] | Iterable[BuildxPruneFilter] = MappingProxyType({}),
         stream_logs: bool = False,
+        *,
+        timeout: float | None = None,
     ) -> MappedProcessStream[str] | None: ...
 
     def prune(
@@ -1050,6 +1123,8 @@ class BuildxCLI(DockerCLICaller):
         all: bool = False,
         filters: Mapping[str, str] | Iterable[BuildxPruneFilter] = MappingProxyType({}),
         stream_logs: bool = False,
+        *,
+        timeout: float | None = None,
     ) -> MappedProcessStream[str] | None:
         """Remove build cache on the current builder.
 
@@ -1066,6 +1141,10 @@ class BuildxCLI(DockerCLICaller):
                 combination it rejects as a `DockerException`.
             stream_logs: Return owned decoded output instead of waiting for the
                 local CLI to finish.
+            timeout: Positive finite seconds from local CLI launch, replacing the
+                client default; `None` inherits it. This is a local deadline only
+                and is not passed to Buildx's own `prune --timeout` flag. Timing
+                advances while stream consumption pauses.
 
         Returns:
             An owned stream of text chunks when `stream_logs=True`; otherwise
@@ -1075,16 +1154,21 @@ class BuildxCLI(DockerCLICaller):
             TypeError: If filters is a string, bytes, or an iterable containing
                 anything but ``(key, value)`` tuples of strings. Raised before
                 the Docker executable is looked up.
+            ValueError: `timeout` is not positive and finite. Checked before
+                filters are consumed.
             DockerException: If the CLI rejects the command, for example because
                 of repeated filter keys.
+            DockerTimeout: The local CLI exceeds its deadline and is killed and
+                reaped without undoing cache removal.
         """
+        validate_timeout(timeout)
         filter_args = format_filters_for_cli(filters)
         full_cmd = Command([*self.docker_cmd, "buildx", "prune", "--force"])
         full_cmd.add_flag("--all", all)
         full_cmd.add_args_iterable_or_single("--filter", filter_args)
         if stream_logs:
-            return stream_buildx_logs(full_cmd)
-        run(full_cmd)
+            return stream_buildx_logs(full_cmd, timeout=timeout)
+        run(full_cmd, timeout=timeout)
 
     def remove(self, builder: Builder | str) -> None:
         """Remove a builder.

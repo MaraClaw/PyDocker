@@ -19,6 +19,8 @@ from pywhales.components.compose.models import ComposeEvent
 from pywhales.components.container.cli_wrapper import ExecuteArgs, RunArgs
 from pywhales.components.image.streams import EmptyImageStream, ImageStream
 from pywhales.components.plugin.cli_wrapper import Plugin
+from pywhales.components.service.cli_wrapper import Service
+from pywhales.components.stack.cli_wrapper import Stack
 from pywhales.components.system.models import DockerEvent
 from pywhales.utils import MappedProcessStream, ProcessStream
 
@@ -363,3 +365,143 @@ def _check_volume_transfer_deadlines(
     assert_type(client.volume.copy((volume, "/src"), "dst", timeout=timeout), None)
     assert_type(client.volume.clone(volume, timeout=timeout), Volume)
     assert_type(volume.clone(timeout=timeout), Volume)
+
+
+def _check_image_push_deadlines(
+    client: DockerClient, timeout: float | None, flag: bool
+) -> None:
+    assert_type(client.image.push("app", timeout=timeout), None)
+    assert_type(client.image.push(["app"], timeout=timeout), None)
+    assert_type(client.push("app", timeout=timeout), None)
+    assert_type(docker.push(["app"], timeout=timeout), None)
+    assert_type(
+        client.image.push("app", stream_logs=True, timeout=timeout), ImageStream
+    )
+    assert_type(client.image.push("app", True, True, timeout=timeout), ImageStream)
+    assert_type(
+        client.image.push(["app"], stream_logs=True, timeout=timeout),
+        ImageStream | None,
+    )
+    assert_type(
+        client.image.push(["app"], True, True, timeout=timeout), ImageStream | None
+    )
+    assert_type(
+        client.image.push("app", stream_logs=flag, timeout=timeout), ImageStream | None
+    )
+    assert_type(docker.push(["app"], False, flag, timeout=timeout), ImageStream | None)
+
+
+def _check_container_start_deadlines(
+    client: DockerClient, container: Container, timeout: float | None, flag: bool
+) -> None:
+    assert_type(client.container.start("app", timeout=timeout), None)
+    assert_type(
+        client.container.start(["app"], flag, flag, flag, timeout=timeout),
+        None | str | ProcessStream,
+    )
+    assert_type(client.container.start("app", True, timeout=timeout), str)
+    assert_type(
+        client.container.start("app", True, stream=True, timeout=timeout), ProcessStream
+    )
+    assert_type(
+        client.container.start("app", flag, stream=flag, timeout=timeout),
+        str | ProcessStream | None,
+    )
+    assert_type(client.start("app", True, timeout=timeout), str)
+    assert_type(docker.start("app", True, stream=True, timeout=timeout), ProcessStream)
+    assert_type(container.start(timeout=timeout), None)
+    assert_type(container.start(True, timeout=timeout), str)
+    assert_type(container.start(True, stream=True, timeout=timeout), ProcessStream)
+    assert_type(
+        container.start(flag, flag, flag, "keys", timeout=timeout),
+        str | ProcessStream | None,
+    )
+
+
+def _check_compose_push_and_watch_deadlines(
+    client: DockerClient, timeout: float | None
+) -> None:
+    assert_type(client.compose.push(timeout=timeout), None)
+    assert_type(client.compose.push(["web"], timeout=timeout), None)
+    assert_type(client.compose.watch(timeout=timeout), ProcessStream | None)
+    assert_type(
+        client.compose.watch("web", no_up=True, prune=True, timeout=timeout),
+        ProcessStream | None,
+    )
+
+
+def _check_buildx_prune_deadlines(
+    client: DockerClient, timeout: float | None, flag: bool
+) -> None:
+    assert_type(client.buildx.prune(timeout=timeout), None)
+    assert_type(client.buildx.prune(True, {}, False, timeout=timeout), None)
+    assert_type(
+        client.buildx.prune(stream_logs=True, timeout=timeout),
+        MappedProcessStream[str],
+    )
+    assert_type(
+        client.buildx.prune(stream_logs=flag, timeout=timeout),
+        MappedProcessStream[str] | None,
+    )
+
+
+def _check_service_deadlines(
+    client: DockerClient, service: Service, timeout: float | None
+) -> None:
+    assert_type(client.service.create("app", None, timeout=timeout), Service)
+    assert_type(
+        client.service.create("app", ["cmd"], (), (), (), True, timeout=timeout),
+        Service,
+    )
+    assert_type(client.service.update("app", timeout=timeout), None)
+    assert_type(
+        client.service.update("app", True, True, "img", True, True, 2, timeout=timeout),
+        None,
+    )
+    assert_type(client.service.rollback("app", detach=True, timeout=timeout), None)
+    assert_type(client.service.scale({"app": 2}, timeout=timeout), None)
+    assert_type(client.service.scale({service: 2}, True, timeout=timeout), None)
+    assert_type(service.update(timeout=timeout), None)
+    assert_type(service.update(True, True, "img", True, True, 2, timeout=timeout), None)
+    assert_type(service.scale(2, timeout=timeout), None)
+    assert_type(service.scale(2, True, timeout=timeout), None)
+
+
+def _check_swarm_deadlines(client: DockerClient, timeout: float | None) -> None:
+    assert_type(client.swarm.ca(rotate=True, timeout=timeout), str | None)
+    assert_type(
+        client.swarm.ca(None, None, None, True, None, True, timeout=timeout),
+        str | None,
+    )
+    assert_type(client.swarm.join("10.0.0.1:2377", timeout=timeout), None)
+    assert_type(
+        client.swarm.join(
+            "10.0.0.1:2377", None, "active", None, None, "t", timeout=timeout
+        ),
+        None,
+    )
+
+
+def _check_stack_deadlines(client: DockerClient, timeout: float | None) -> None:
+    assert_type(client.stack.deploy("web", timeout=timeout), Stack)
+    assert_type(
+        client.stack.deploy("web", (), True, "never", True, (), {}, timeout=timeout),
+        Stack,
+    )
+
+
+def _check_plugin_install_deadlines(
+    client: DockerClient, plugin: Plugin, timeout: float | None
+) -> None:
+    assert_type(client.plugin.install("plug", timeout=timeout), Plugin)
+    assert_type(
+        client.plugin.install("plug", {}, "alias", True, False, timeout=timeout),
+        Plugin,
+    )
+    assert_type(client.plugin.upgrade("plug", timeout=timeout), None)
+    assert_type(
+        client.plugin.upgrade(plugin, "remote", False, True, timeout=timeout), None
+    )
+    assert_type(plugin.upgrade(timeout=timeout), None)
+    assert_type(plugin.upgrade("remote", False, True, timeout=timeout), None)
+    assert_type(plugin.enable(7), None)

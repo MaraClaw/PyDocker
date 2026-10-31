@@ -1,11 +1,11 @@
 import json
 import sys
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from inspect import Parameter, signature
 from pathlib import Path
 from typing import Literal, assert_never, get_overloads
-from unittest.mock import Mock
+from unittest.mock import Mock, PropertyMock
 
 import pytest
 from pytest_mock import MockerFixture
@@ -16,7 +16,7 @@ from pywhales._execution_policy import (
     execution_timeout,
     get_execution_policy,
 )
-from pywhales.client_config import ClientConfig
+from pywhales.client_config import ClientConfig, DockerCLICaller
 from pywhales.components.buildx import cli_wrapper as buildx
 from pywhales.components.compose import cli_wrapper as compose
 from pywhales.components.container import cli_wrapper as container
@@ -25,9 +25,12 @@ from pywhales.components.manifest import cli_wrapper as manifest
 from pywhales.components.plugin import cli_wrapper as plugin
 from pywhales.components.plugin.cli_wrapper import Plugin
 from pywhales.components.service import cli_wrapper as service
+from pywhales.components.service.cli_wrapper import Service
+from pywhales.components.stack import cli_wrapper as stack
+from pywhales.components.swarm import cli_wrapper as swarm
 from pywhales.components.system import cli_wrapper as system
 from pywhales.exceptions import DockerTimeout
-from pywhales.utils import run
+from pywhales.utils import ProcessStream, run, stream_stdout_and_stderr
 
 
 @pytest.fixture
@@ -586,3 +589,660 @@ def test_execution_timeout_is_isolated_between_concurrent_threads() -> None:
 
     assert seen == {"a": 1.0, "b": 2.0}
     assert _scoped_default(config) == 9.0
+
+
+def _inspect_reply(args: Sequence[object]) -> str:
+    names = [str(arg) for arg in args][3:]
+    return json.dumps([{"Id": "sha256:" + name} for name in names])
+
+
+def _short_child(
+    *_: object, timeout: float | None = None, **__: object
+) -> ProcessStream:
+    return stream_stdout_and_stderr(
+        [sys.executable, "-c", "print('x')"], timeout=timeout
+    )
+
+
+def _is_push(args: Sequence[object]) -> bool:
+    return [str(arg) for arg in args][1:3] == ["image", "push"]
+
+
+@pytest.mark.parametrize("timeout", [None, 2.5])
+@pytest.mark.parametrize("names", [["one"], ["one", "two", "three"]])
+def test_image_push_blocking_launches_receive_budget_and_inspect_does_not(
+    client: DockerClient,
+    mocker: MockerFixture,
+    names: list[str],
+    timeout: float | None,
+) -> None:
+    def execute(args: Sequence[object], **kwargs: object) -> str:
+        if _is_push(args):
+            assert kwargs["timeout"] == timeout
+            return ""
+        assert "timeout" not in kwargs
+        return _inspect_reply(args)
+
+    commands = mocker.patch.object(image, "run", side_effect=execute)
+
+    assert client.image.push(names, quiet=True, timeout=timeout) is None
+
+    pushes = [call for call in commands.call_args_list if _is_push(call.args[0])]
+    assert len(pushes) == len(names)
+    assert len(commands.call_args_list) == len(names) + 1
+
+
+@pytest.mark.parametrize("timeout", [None, 2.5])
+@pytest.mark.parametrize("names", [["one"], ["one", "two", "three"]])
+def test_image_push_stream_children_receive_budget_and_inspect_does_not(
+    client: DockerClient,
+    mocker: MockerFixture,
+    names: list[str],
+    timeout: float | None,
+) -> None:
+    def inspect(args: Sequence[object], **kwargs: object) -> str:
+        assert "timeout" not in kwargs
+        return _inspect_reply(args)
+
+    mocker.patch.object(image, "run", side_effect=inspect)
+    launch = mocker.patch.object(
+        image, "stream_stdout_and_stderr", side_effect=_short_child
+    )
+
+    stream = client.image.push(names, stream_logs=True, timeout=timeout)
+    assert stream is not None
+    with stream:
+        assert sorted(name for name, _ in stream) == sorted(names)
+
+    assert [call.kwargs["timeout"] for call in launch.call_args_list] == [
+        timeout
+    ] * len(names)
+
+
+def test_multi_image_stream_defers_every_child_launch_to_first_consumption(
+    client: DockerClient, mocker: MockerFixture
+) -> None:
+    mocker.patch.object(
+        image, "run", side_effect=lambda args, **_: _inspect_reply(args)
+    )
+    launch = mocker.patch.object(
+        image, "stream_stdout_and_stderr", side_effect=_short_child
+    )
+
+    stream = client.image.push(["one", "two"], stream_logs=True, timeout=2.5)
+    assert stream is not None
+
+    launch.assert_not_called()
+    with stream:
+        list(stream)
+    assert [call.kwargs["timeout"] for call in launch.call_args_list] == [2.5, 2.5]
+
+
+@pytest.mark.parametrize("timeout", [0.0, -1.0, float("nan"), float("inf"), True])
+def test_image_push_validates_before_consuming_or_inspecting(
+    client: DockerClient, mocker: MockerFixture, timeout: float
+) -> None:
+    commands = mocker.patch.object(image, "run")
+    consumed: list[str] = []
+
+    def references() -> Iterator[str]:
+        consumed.append("read")
+        yield "one"
+
+    for argument in ([], "one", references()):
+        with pytest.raises(ValueError):
+            client.image.push(argument, timeout=timeout)
+
+    assert consumed == []
+    commands.assert_not_called()
+
+
+def test_image_push_empty_request_returns_none_after_valid_timeout(
+    client: DockerClient, mocker: MockerFixture
+) -> None:
+    commands = mocker.patch.object(image, "run")
+    launch = mocker.patch.object(image, "stream_stdout_and_stderr")
+
+    assert client.image.push([], timeout=2.5) is None
+    assert client.push([], stream_logs=True, timeout=2.5) is None
+
+    commands.assert_not_called()
+    launch.assert_not_called()
+
+
+@pytest.mark.parametrize("timeout", [None, 2.5])
+@pytest.mark.parametrize("mode", ["unattached", "captured", "streamed"])
+@pytest.mark.parametrize("entry", ["cli", "root", "handle"])
+def test_container_start_forwards_budget_for_every_mode_and_entry(
+    client: DockerClient,
+    mocker: MockerFixture,
+    entry: Literal["cli", "root", "handle"],
+    mode: Literal["unattached", "captured", "streamed"],
+    timeout: float | None,
+) -> None:
+    streamed = mode == "streamed"
+    execute = mocker.patch.object(
+        container, "stream_stdout_and_stderr" if streamed else "run", return_value="out"
+    )
+    attach = mode != "unattached"
+    handle = Container(client.client_config, "workload", is_immutable_id=True)
+
+    match entry:
+        case "cli":
+            client.container.start("workload", attach, stream=streamed, timeout=timeout)
+        case "root":
+            client.start("workload", attach, stream=streamed, timeout=timeout)
+        case "handle":
+            handle.start(attach, stream=streamed, timeout=timeout)
+        case unreachable:
+            assert_never(unreachable)
+
+    execute.assert_called_once()
+    assert execute.call_args.kwargs == {"timeout": timeout}
+    assert [str(arg) for arg in execute.call_args.args[0]][1:3] == [
+        "container",
+        "start",
+    ]
+
+
+def test_container_handle_start_forwards_positional_options_and_deadline(
+    client: DockerClient, mocker: MockerFixture
+) -> None:
+    handle = Container(client.client_config, "workload", is_immutable_id=True)
+    start = mocker.patch.object(container.ContainerCLI, "start", return_value="out")
+
+    assert handle.start(True, True, False, "ctrl-x", timeout=2.5) == "out"
+
+    start.assert_called_once_with(handle, True, True, False, "ctrl-x", timeout=2.5)
+
+
+@pytest.mark.parametrize("timeout", [0.0, -1.0, float("nan"), float("inf"), True])
+def test_container_start_validates_before_consuming_or_launching(
+    client: DockerClient, mocker: MockerFixture, timeout: float
+) -> None:
+    commands = mocker.patch.object(container, "run")
+    launch = mocker.patch.object(container, "stream_stdout_and_stderr")
+    consumed: list[str] = []
+
+    def references() -> Iterator[str]:
+        consumed.append("read")
+        yield "workload"
+
+    for argument in ([], "workload", references()):
+        with pytest.raises(ValueError):
+            client.container.start(argument, timeout=timeout)
+    handle = Container(client.client_config, "workload", is_immutable_id=True)
+    with pytest.raises(ValueError):
+        handle.start(timeout=timeout)
+
+    assert consumed == []
+    commands.assert_not_called()
+    launch.assert_not_called()
+
+
+def test_container_start_empty_request_returns_none_after_valid_timeout(
+    client: DockerClient, mocker: MockerFixture
+) -> None:
+    commands = mocker.patch.object(container, "run")
+
+    assert client.container.start([], timeout=2.5) is None
+
+    commands.assert_not_called()
+
+
+@pytest.mark.parametrize("timeout", [None, 2.5])
+@pytest.mark.parametrize("prune", [False, True])
+def test_compose_watch_forwards_budget_and_keeps_explicit_prune(
+    client: DockerClient, mocker: MockerFixture, prune: bool, timeout: float | None
+) -> None:
+    launch = mocker.patch.object(
+        compose, "stream_stdout_and_stderr", return_value="stream"
+    )
+
+    assert client.compose.watch("web", prune=prune, timeout=timeout) == "stream"
+
+    assert launch.call_args.kwargs == {"timeout": timeout}
+    assert f"--prune={str(prune).lower()}" in [str(a) for a in launch.call_args.args[0]]
+
+
+@pytest.mark.parametrize("timeout", [0.0, True, float("nan")])
+def test_compose_watch_and_push_validate_before_empty_selection(
+    client: DockerClient, mocker: MockerFixture, timeout: float
+) -> None:
+    commands = mocker.patch.object(compose, "run")
+    launch = mocker.patch.object(compose, "stream_stdout_and_stderr")
+
+    for call in (
+        lambda: client.compose.watch([], timeout=timeout),
+        lambda: client.compose.watch(timeout=timeout),
+        lambda: client.compose.push([], timeout=timeout),
+        lambda: client.compose.push(timeout=timeout),
+    ):
+        with pytest.raises(ValueError):
+            call()
+
+    commands.assert_not_called()
+    launch.assert_not_called()
+
+
+def test_compose_watch_and_push_empty_services_skip_launch_with_valid_timeout(
+    client: DockerClient, mocker: MockerFixture
+) -> None:
+    commands = mocker.patch.object(compose, "run")
+    launch = mocker.patch.object(compose, "stream_stdout_and_stderr")
+
+    assert client.compose.watch([], timeout=2.5) is None
+    assert client.compose.push([], timeout=2.5) is None
+
+    commands.assert_not_called()
+    launch.assert_not_called()
+
+
+@pytest.mark.parametrize("timeout", [None, 2.5])
+def test_compose_push_forwards_budget(
+    client: DockerClient, mocker: MockerFixture, timeout: float | None
+) -> None:
+    commands = mocker.patch.object(compose, "run", return_value="")
+
+    assert client.compose.push(["web"], timeout=timeout) is None
+
+    assert commands.call_args.kwargs == {"timeout": timeout}
+    assert [str(arg) for arg in commands.call_args.args[0]][-2:] == ["push", "web"]
+
+
+@pytest.mark.parametrize("timeout", [None, 2.5])
+@pytest.mark.parametrize("stream", [False, True])
+def test_buildx_prune_forwards_budget_without_a_cli_timeout_flag(
+    client: DockerClient, mocker: MockerFixture, stream: bool, timeout: float | None
+) -> None:
+    execute = mocker.patch.object(
+        buildx, "stream_buildx_logs" if stream else "run", return_value="out"
+    )
+
+    client.buildx.prune(
+        all=True, filters={"until": "1h"}, stream_logs=stream, timeout=timeout
+    )
+
+    execute.assert_called_once()
+    assert execute.call_args.kwargs == {"timeout": timeout}
+    argv = [str(arg) for arg in execute.call_args.args[0]]
+    assert argv[1:] == [
+        "buildx",
+        "prune",
+        "--force",
+        "--all",
+        "--filter",
+        "until=1h",
+    ]
+
+
+@pytest.mark.parametrize("timeout", [0.0, True, float("inf")])
+def test_buildx_prune_validates_before_filters_and_launch(
+    client: DockerClient, mocker: MockerFixture, timeout: float
+) -> None:
+    commands = mocker.patch.object(buildx, "run")
+    launch = mocker.patch.object(buildx, "stream_buildx_logs")
+    consumed: list[str] = []
+
+    def filters() -> Iterator[tuple[str, str]]:
+        consumed.append("read")
+        yield ("until", "1h")
+
+    for stream in (False, True):
+        with pytest.raises(ValueError):
+            client.buildx.prune(filters=filters(), stream_logs=stream, timeout=timeout)
+
+    assert consumed == []
+    commands.assert_not_called()
+    launch.assert_not_called()
+
+
+def test_long_launch_deadlines_are_keyword_only_in_every_overload(
+    client: DockerClient,
+) -> None:
+    handle = Container(client.client_config, "workload", is_immutable_id=True)
+    for method in (
+        image.ImageCLI.push,
+        client.image.push,
+        client.push,
+        container.ContainerCLI.start,
+        client.container.start,
+        client.start,
+        container.Container.start,
+        handle.start,
+        compose.ComposeCLI.watch,
+        client.compose.watch,
+        compose.ComposeCLI.push,
+        client.compose.push,
+        buildx.BuildxCLI.prune,
+        client.buildx.prune,
+    ):
+        for variant in (method, *get_overloads(method)):
+            parameter = signature(variant).parameters["timeout"]
+            assert parameter.kind is Parameter.KEYWORD_ONLY
+            assert parameter.default is None or (
+                variant is not method and parameter.default is Ellipsis
+            )
+
+
+def test_long_launch_aliases_expose_the_same_signatures(client: DockerClient) -> None:
+    assert signature(client.push) == signature(client.image.push)
+    assert signature(client.start) == signature(client.container.start)
+    assert client.push.__func__ is image.ImageCLI.push
+    assert client.start.__func__ is container.ContainerCLI.start
+
+
+def _service_inspect(args: Sequence[object], **kwargs: object) -> str:
+    assert "timeout" not in kwargs
+    return json.dumps([{"ID": "workload", "Spec": {"Name": "workload"}}])
+
+
+@pytest.mark.parametrize("timeout", [None, 2.5])
+@pytest.mark.parametrize("operation", ["create", "update", "rollback", "scale"])
+def test_service_calls_forward_budget_and_keep_scale_preflight_unbudgeted(
+    client: DockerClient,
+    mocker: MockerFixture,
+    operation: Literal["create", "update", "rollback", "scale"],
+    timeout: float | None,
+) -> None:
+    def execute(args: Sequence[object], **kwargs: object) -> str:
+        if [str(arg) for arg in args][1:3] == ["service", "inspect"]:
+            return _service_inspect(args, **kwargs)
+        assert kwargs["timeout"] == timeout
+        return "service-id"
+
+    commands = mocker.patch.object(service, "run", side_effect=execute)
+
+    match operation:
+        case "create":
+            client.service.create("app", None, timeout=timeout)
+        case "update":
+            client.service.update("workload", timeout=timeout)
+        case "rollback":
+            client.service.rollback("workload", timeout=timeout)
+        case "scale":
+            client.service.scale({"workload": 2}, timeout=timeout)
+        case unreachable:
+            assert_never(unreachable)
+
+    launched = [call for call in commands.call_args_list if "timeout" in call.kwargs]
+    assert len(launched) == 1
+    assert [str(arg) for arg in launched[0].args[0]][1:3] == ["service", operation]
+    assert len(commands.call_args_list) == (2 if operation == "scale" else 1)
+
+
+@pytest.mark.parametrize("method", ["update", "scale"])
+def test_service_handle_forwards_budget_to_the_cli(
+    client: DockerClient, mocker: MockerFixture, method: Literal["update", "scale"]
+) -> None:
+    handle = Service(client.client_config, "workload", is_immutable_id=True)
+    forwarded = mocker.patch.object(service.ServiceCLI, method)
+
+    if method == "update":
+        handle.update(force=True, timeout=2.5)
+    else:
+        handle.scale(3, True, timeout=2.5)
+
+    forwarded.assert_called_once()
+    assert forwarded.call_args.kwargs["timeout"] == 2.5
+    assert forwarded.call_args.args[0] == (
+        handle if method == "update" else {handle: 3}
+    )
+
+
+@pytest.mark.parametrize("timeout", [0.0, -1.0, float("nan"), float("inf"), True])
+def test_service_calls_validate_before_lookup_inspect_and_policy_options(
+    client: DockerClient, mocker: MockerFixture, timeout: float
+) -> None:
+    commands = mocker.patch.object(service, "run")
+    lookup = mocker.patch.object(
+        DockerCLICaller, "docker_cmd", new_callable=PropertyMock
+    )
+    options = mocker.patch.object(service, "update_options")
+    handle = Service(client.client_config, "workload", is_immutable_id=True)
+
+    for call in (
+        lambda: client.service.create("app", None, timeout=timeout),
+        lambda: client.service.update("workload", timeout=timeout),
+        lambda: client.service.rollback("workload", timeout=timeout),
+        lambda: client.service.scale({}, timeout=timeout),
+        lambda: client.service.scale({"workload": 2}, timeout=timeout),
+        lambda: handle.update(timeout=timeout),
+        lambda: handle.scale(2, timeout=timeout),
+    ):
+        with pytest.raises(ValueError):
+            call()
+
+    commands.assert_not_called()
+    lookup.assert_not_called()
+    options.assert_not_called()
+
+
+@pytest.mark.parametrize("timeout", [None, 2.5])
+@pytest.mark.parametrize("detach", [False, True])
+def test_swarm_ca_forwards_the_same_budget_to_each_launch(
+    client: DockerClient, mocker: MockerFixture, detach: bool, timeout: float | None
+) -> None:
+    commands = mocker.patch.object(swarm, "run", return_value="certificate")
+
+    result = client.swarm.ca(rotate=True, detach=detach, timeout=timeout)
+
+    assert result == (None if detach else "certificate")
+    assert len(commands.call_args_list) == (1 if detach else 2)
+    assert all(call.kwargs == {"timeout": timeout} for call in commands.call_args_list)
+
+
+def test_swarm_ca_first_expiry_skips_the_certificate_read(
+    client: DockerClient, mocker: MockerFixture
+) -> None:
+    commands = mocker.patch.object(
+        swarm, "run", side_effect=DockerTimeout(["docker-test"], -9)
+    )
+
+    with pytest.raises(DockerTimeout):
+        client.swarm.ca(rotate=True, timeout=2.5)
+
+    commands.assert_called_once()
+
+
+@pytest.mark.parametrize("timeout", [None, 2.5])
+def test_swarm_join_forwards_budget(
+    client: DockerClient, mocker: MockerFixture, timeout: float | None
+) -> None:
+    commands = mocker.patch.object(swarm, "run", return_value="")
+
+    client.swarm.join("10.0.0.1:2377", token="secret", timeout=timeout)
+
+    assert commands.call_args.kwargs == {"timeout": timeout}
+    assert [str(arg) for arg in commands.call_args.args[0]][1:3] == ["swarm", "join"]
+
+
+@pytest.mark.parametrize("timeout", [None, 2.5])
+def test_stack_deploy_forwards_budget_with_environment(
+    client: DockerClient, mocker: MockerFixture, timeout: float | None
+) -> None:
+    commands = mocker.patch.object(stack, "run", return_value="")
+
+    deployed = client.stack.deploy("web", variables={"TAG": "v1"}, timeout=timeout)
+
+    assert deployed.name == "web"
+    assert commands.call_args.kwargs == {
+        "capture_stdout": False,
+        "env": {"TAG": "v1"},
+        "timeout": timeout,
+    }
+
+
+@pytest.mark.parametrize("timeout", [0.0, -1.0, float("nan"), float("inf"), True])
+def test_stack_deploy_validates_before_command_lookup_and_env_files(
+    client: DockerClient, mocker: MockerFixture, timeout: float
+) -> None:
+    commands = mocker.patch.object(stack, "run")
+    read = mocker.patch.object(stack, "read_env_files")
+    lookup = mocker.patch.object(
+        DockerCLICaller, "docker_cmd", new_callable=PropertyMock
+    )
+
+    with pytest.raises(ValueError):
+        client.stack.deploy("web", env_files=[Path("a.env")], timeout=timeout)
+
+    read.assert_not_called()
+    lookup.assert_not_called()
+    commands.assert_not_called()
+
+
+@pytest.mark.parametrize("timeout", [None, 2.5])
+@pytest.mark.parametrize("operation", ["install", "upgrade", "handle_upgrade"])
+def test_plugin_install_and_upgrade_forward_budget_not_a_docker_flag(
+    client: DockerClient,
+    mocker: MockerFixture,
+    operation: Literal["install", "upgrade", "handle_upgrade"],
+    timeout: float | None,
+) -> None:
+    def execute(args: Sequence[object], **kwargs: object) -> str:
+        if [str(arg) for arg in args][1:3] == ["plugin", "inspect"]:
+            assert "timeout" not in kwargs
+            return '[{"Id":"plugin-id","Name":"my-plugin"}]'
+        return ""
+
+    commands = mocker.patch.object(plugin, "run", side_effect=execute)
+
+    match operation:
+        case "install":
+            client.plugin.install("my-plugin", timeout=timeout)
+        case "upgrade":
+            client.plugin.upgrade("my-plugin", timeout=timeout)
+        case "handle_upgrade":
+            Plugin(client.client_config, "my-plugin", is_immutable_id=True).upgrade(
+                timeout=timeout
+            )
+        case unreachable:
+            assert_never(unreachable)
+
+    launched = [call for call in commands.call_args_list if "timeout" in call.kwargs]
+    assert len(launched) == 1
+    assert launched[0].kwargs == {"timeout": timeout}
+    assert not any("timeout" in str(arg) for arg in launched[0].args[0])
+    assert len(commands.call_args_list) == (2 if operation == "install" else 1)
+
+
+def test_plugin_handle_upgrade_forwards_positional_options_and_budget(
+    client: DockerClient, mocker: MockerFixture
+) -> None:
+    handle = Plugin(client.client_config, "my-plugin", is_immutable_id=True)
+    upgrade = mocker.patch.object(plugin.PluginCLI, "upgrade")
+
+    handle.upgrade("remote", False, True, timeout=2.5)
+
+    upgrade.assert_called_once_with(handle, "remote", False, True, timeout=2.5)
+
+
+@pytest.mark.parametrize("timeout", [0.0, -1.0, float("nan"), float("inf"), True])
+def test_plugin_install_and_upgrade_validate_before_command_lookup(
+    client: DockerClient, mocker: MockerFixture, timeout: float
+) -> None:
+    commands = mocker.patch.object(plugin, "run")
+    lookup = mocker.patch.object(
+        DockerCLICaller, "docker_cmd", new_callable=PropertyMock
+    )
+    handle = Plugin(client.client_config, "my-plugin", is_immutable_id=True)
+
+    for call in (
+        lambda: client.plugin.install("my-plugin", timeout=timeout),
+        lambda: client.plugin.upgrade("my-plugin", timeout=timeout),
+        lambda: handle.upgrade(timeout=timeout),
+    ):
+        with pytest.raises(ValueError):
+            call()
+
+    commands.assert_not_called()
+    lookup.assert_not_called()
+
+
+def test_plugin_enable_timeout_stays_docker_option_without_local_deadline(
+    client: DockerClient, mocker: MockerFixture
+) -> None:
+    commands = mocker.patch.object(plugin, "run", return_value="")
+
+    client.plugin.enable("my-plugin", timeout=7)
+    Plugin(client.client_config, "my-plugin", is_immutable_id=True).enable(timeout=9)
+
+    first, second = commands.call_args_list
+    assert [str(arg) for arg in first.args[0]][1:] == [
+        "plugin",
+        "enable",
+        "--timeout",
+        "7",
+        "my-plugin",
+    ]
+    assert [str(arg) for arg in second.args[0]][-3:-1] == ["--timeout", "9"]
+    assert first.kwargs == second.kwargs == {}
+
+
+def test_swarm_and_plugin_deadlines_are_keyword_only_and_append_to_old_signatures(
+    client: DockerClient,
+) -> None:
+    handle = Service(client.client_config, "workload", is_immutable_id=True)
+    plugin_handle = Plugin(client.client_config, "plug", is_immutable_id=True)
+    for method in (
+        service.ServiceCLI.create,
+        client.service.create,
+        service.ServiceCLI.update,
+        client.service.update,
+        service.ServiceCLI.rollback,
+        client.service.rollback,
+        service.ServiceCLI.scale,
+        client.service.scale,
+        service.Service.update,
+        handle.update,
+        service.Service.scale,
+        handle.scale,
+        swarm.SwarmCLI.ca,
+        client.swarm.ca,
+        swarm.SwarmCLI.join,
+        client.swarm.join,
+        stack.StackCLI.deploy,
+        client.stack.deploy,
+        plugin.PluginCLI.install,
+        client.plugin.install,
+        plugin.PluginCLI.upgrade,
+        client.plugin.upgrade,
+        plugin.Plugin.upgrade,
+        plugin_handle.upgrade,
+    ):
+        parameter = signature(method).parameters["timeout"]
+        assert parameter.kind is Parameter.KEYWORD_ONLY
+        assert parameter.default is None
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        service.ServiceCLI.create,
+        service.ServiceCLI.scale,
+        swarm.SwarmCLI.ca,
+        swarm.SwarmCLI.join,
+        stack.StackCLI.deploy,
+        plugin.PluginCLI.install,
+        plugin.PluginCLI.upgrade,
+        plugin.Plugin.upgrade,
+        service.Service.scale,
+    ],
+)
+def test_added_deadline_keeps_every_earlier_parameter_positional(
+    method: Callable[..., object],
+) -> None:
+    parameters = list(signature(method).parameters.values())
+
+    assert parameters[-1].name == "timeout"
+    assert all(
+        parameter.kind in (Parameter.POSITIONAL_OR_KEYWORD,)
+        for parameter in parameters[:-1]
+        if parameter.name != "self"
+    )
+
+
+def test_plugin_enable_has_no_local_deadline_parameter(client: DockerClient) -> None:
+    for method in (plugin.PluginCLI.enable, plugin.Plugin.enable):
+        parameter = signature(method).parameters["timeout"]
+        assert parameter.kind is Parameter.POSITIONAL_OR_KEYWORD

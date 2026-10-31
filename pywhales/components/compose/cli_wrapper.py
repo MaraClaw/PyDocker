@@ -6,7 +6,6 @@ originating configuration; returned output is not diagnostic redaction output.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import timedelta
 from pathlib import Path
@@ -18,7 +17,9 @@ from typing_extensions import TypedDict
 
 import pywhales.components.container.cli_wrapper
 import pywhales.components.volume.cli_wrapper
+from pywhales._json import loads_compat
 from pywhales.client_config import Command, DockerCLICaller
+from pywhales.components._json_output import JsonOutputParser
 from pywhales.components.compose.models import (
     ComposeConfig,
     ComposeEvent,
@@ -45,6 +46,39 @@ from pywhales.utils import (
 )
 
 type ComposeLsFilter = tuple[Literal["name"], str]
+
+
+def _parse_config(output: str) -> ComposeConfig:
+    return ComposeConfig(**loads_compat(output))
+
+
+def _parse_config_json(output: str) -> dict[str, JsonValue]:
+    return custom_parse_object_as(dict[str, JsonValue], loads_compat(output))
+
+
+def _parse_projects(output: str) -> list[ComposeProject]:
+    return [
+        ComposeProject(
+            name=proj["Name"],
+            created=parse_ls_status_count(proj["Status"], "created"),
+            running=parse_ls_status_count(proj["Status"], "running"),
+            restarting=parse_ls_status_count(proj["Status"], "restarting"),
+            exited=parse_ls_status_count(proj["Status"], "exited"),
+            paused=parse_ls_status_count(proj["Status"], "paused"),
+            dead=parse_ls_status_count(proj["Status"], "dead"),
+            config_files=[
+                Path(path)
+                for path in proj.get("ConfigFiles", "").split(",")
+                if "ConfigFiles" in proj
+            ]
+            or None,
+        )
+        for proj in loads_compat(output)
+    ]
+
+
+def _parse_event(record: bytes) -> ComposeEvent:
+    return ComposeEvent(**loads_compat(record))
 
 
 class ComposeRunArgs(TypedDict, total=False, closed=True):
@@ -262,13 +296,19 @@ class ComposeCLI(DockerCLICaller):
         Returns:
             The typed configuration by default, or the complete decoded JSON
             dictionary when `return_json=True`.
+
+        Raises:
+            ParsingError: If the output is malformed or has an unexpected shape.
+                Safe mode withholds the payload and chains no cause; a client
+                with `raw_diagnostics=True` chains the original error.
         """
         full_cmd = Command([*self.docker_compose_cmd, "config", "--format", "json"])
         result = run(full_cmd, capture_stdout=True)
+        parser = JsonOutputParser("compose config", self.client_config.raw_diagnostics)
         if return_json:
-            return custom_parse_object_as(dict[str, JsonValue], json.loads(result))
+            return parser.parse(_parse_config_json, result)
         else:
-            return ComposeConfig(**json.loads(result))
+            return parser.parse(_parse_config, result)
 
     @overload
     def create(
@@ -752,30 +792,19 @@ class ComposeCLI(DockerCLICaller):
             TypeError: If filters is a string, bytes, or an iterable containing
                 anything but ``(key, value)`` tuples of strings. Raised before
                 the Docker executable is looked up.
+            ParsingError: If the output is malformed or has an unexpected shape.
+                Safe mode withholds the payload and chains no cause; a client
+                with `raw_diagnostics=True` chains the original error.
         """
         filter_args = format_filters_for_cli(filters)
         full_cmd = Command([*self.docker_compose_cmd, "ls", "--format", "json"])
         full_cmd.add_flag("--all", all)
         full_cmd.add_args_iterable_or_single("--filter", filter_args)
 
-        return [
-            ComposeProject(
-                name=proj["Name"],
-                created=parse_ls_status_count(proj["Status"], "created"),
-                running=parse_ls_status_count(proj["Status"], "running"),
-                restarting=parse_ls_status_count(proj["Status"], "restarting"),
-                exited=parse_ls_status_count(proj["Status"], "exited"),
-                paused=parse_ls_status_count(proj["Status"], "paused"),
-                dead=parse_ls_status_count(proj["Status"], "dead"),
-                config_files=[
-                    Path(path)
-                    for path in proj.get("ConfigFiles", "").split(",")
-                    if "ConfigFiles" in proj
-                ]
-                or None,
-            )
-            for proj in json.loads(run(full_cmd))
-        ]
+        parser = JsonOutputParser(
+            "compose project list", self.client_config.raw_diagnostics
+        )
+        return parser.parse(_parse_projects, run(full_cmd))
 
     def publish(
         self,
@@ -897,7 +926,12 @@ class ComposeCLI(DockerCLICaller):
         else:
             run(full_cmd, capture_stdout=False, capture_stderr=False, timeout=timeout)
 
-    def push(self, services: list[str] | None = None) -> None:
+    def push(
+        self,
+        services: list[str] | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> None:
         """Push service images.
 
         Args:
@@ -905,13 +939,23 @@ class ComposeCLI(DockerCLICaller):
                 services will be pushed. If no services are specified (`None`, the default
                 behavior) all images of all services are pushed.
                 If an empty list is provided, then the function call is a no-op.
+            timeout: Positive finite seconds from local CLI launch, replacing the
+                client default; `None` inherits it. Validated before selecting
+                services, even for an empty request.
+
+        Raises:
+            ValueError: `timeout` is not positive and finite.
+            DockerTimeout: The local CLI exceeds its deadline and is killed and
+                reaped, without undoing pushed layers or guaranteeing that
+                registry or daemon-side work stops.
         """
+        validate_timeout(timeout)
         full_cmd = Command([*self.docker_compose_cmd, "push"])
         if services == []:
             return
         elif services is not None:
             full_cmd += services
-        run(full_cmd)
+        run(full_cmd, timeout=timeout)
 
     def restart(
         self,
@@ -1348,14 +1392,20 @@ class ComposeCLI(DockerCLICaller):
             DockerTimeout: The local events CLI exceeds its deadline and is
                 killed and reaped.
             DockerException: The local events CLI exits unsuccessfully.
+            ParsingError: Raised once, during iteration, by the first malformed
+                or unexpected stdout record, after the CLI is closed and reaped.
+                The client's `raw_diagnostics` flag is read at launch: safe mode
+                withholds the payload and chains no cause, raw mode chains the
+                original error.
         """
         full_cmd = [*self.docker_compose_cmd, "events", "--json", *services]
 
+        parser = JsonOutputParser("compose event", self.client_config.raw_diagnostics)
         stream = stream_stdout_and_stderr(full_cmd, timeout=timeout)
         return MappedProcessStream(
             stream,
             (
-                ComposeEvent(**json.loads(content))
+                parser.parse(_parse_event, content)
                 for origin, content in stream
                 if origin == "stdout"
             ),
@@ -1613,6 +1663,7 @@ class ComposeCLI(DockerCLICaller):
         no_up: bool = False,
         quiet: bool = False,
         prune: bool = False,
+        timeout: float | None = None,
     ) -> ProcessStream | None:
         """Watch source changes and rebuild or refresh Compose services.
 
@@ -1626,6 +1677,10 @@ class ComposeCLI(DockerCLICaller):
             quiet: Hide build output; other watch messages can still be streamed.
             prune: Prune dangling images on rebuild. Defaults to `False`, explicitly
                 overriding the CLI's pruning default to avoid shared-image cleanup.
+            timeout: Positive finite seconds from local CLI launch, replacing the
+                client default; `None` inherits it. Timing advances while stream
+                consumption pauses. Validated before selecting services, even
+                for an empty request.
 
         Returns:
             `None` for `services=[]`; otherwise an owned stream of
@@ -1635,8 +1690,12 @@ class ComposeCLI(DockerCLICaller):
             removing running services.
 
         Raises:
+            ValueError: `timeout` is not positive and finite.
             DockerException: The local watch CLI exits unsuccessfully.
+            DockerTimeout: The local watch CLI exceeds its deadline and is killed
+                and reaped without stopping services.
         """
+        validate_timeout(timeout)
         if services == []:
             return None
         full_cmd = Command([*self.docker_compose_cmd, "watch"])
@@ -1645,7 +1704,7 @@ class ComposeCLI(DockerCLICaller):
         full_cmd.append(f"--prune={str(prune).lower()}")
         if services is not None:
             full_cmd += to_list(services)
-        return stream_stdout_and_stderr(full_cmd)
+        return stream_stdout_and_stderr(full_cmd, timeout=timeout)
 
     def version(self) -> str:
         """Return the Docker Compose version text reported by the CLI."""

@@ -7,7 +7,6 @@ distinct execution modes. Local CLI cleanup does not remove daemon resources.
 from __future__ import annotations
 
 import builtins
-import json
 import shlex
 import textwrap
 from collections.abc import Iterable, Mapping, Sequence
@@ -28,6 +27,7 @@ from typing_extensions import TypedDict
 import pywhales.components.image.cli_wrapper
 import pywhales.components.network.cli_wrapper
 import pywhales.components.volume.cli_wrapper
+from pywhales._json import loads_compat
 from pywhales.client_config import (
     ClientConfig,
     Command,
@@ -141,7 +141,7 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
     ) -> dict[str, pydantic.JsonValue]:
         json_str = run([*self.docker_cmd, "container", "inspect", reference])
         return custom_parse_object_as(
-            dict[str, pydantic.JsonValue], {**json.loads(json_str)[0]}
+            dict[str, pydantic.JsonValue], {**loads_compat(json_str)[0]}
         )
 
     @override
@@ -568,6 +568,8 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         interactive: bool = False,
         stream: bool = False,
         detach_keys: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> None: ...
 
     @overload
@@ -577,6 +579,8 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         interactive: bool = False,
         stream: Literal[False] = False,
         detach_keys: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> str: ...
 
     @overload
@@ -587,6 +591,7 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         *,
         stream: Literal[True],
         detach_keys: str | None = None,
+        timeout: float | None = None,
     ) -> ProcessStream: ...
 
     @overload
@@ -596,6 +601,8 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         interactive: bool = False,
         stream: bool = False,
         detach_keys: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> str | ProcessStream | None: ...
 
     def start(
@@ -604,20 +611,35 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
         interactive: bool = False,
         stream: bool = False,
         detach_keys: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> str | ProcessStream | None:
         """Start this container.
 
         See the [`docker.container.start`](../sub-commands/container.md#start) command for
         information about the arguments.
 
+        Args:
+            attach: Attach stdout/stderr and forward signals.
+            interactive: Attach stdin (ensure it is open).
+            stream: Return an owned output stream; requires `attach=True`.
+            detach_keys: Override the key sequence for detaching a container.
+            timeout: Positive finite seconds from the start CLI's own launch,
+                replacing the client default; `None` inherits it.
+
         Returns:
             `None` without attachment, captured stdout when attached without
             streaming, or an owned `(source, bytes)` stream when streaming.
             Streaming requires `attach=True`; close the eager stream on early
             exit or use its context manager to release the local CLI.
+
+        Raises:
+            ValueError: `timeout` is not positive and finite.
+            DockerTimeout: The local start CLI exceeds its deadline and is
+                killed and reaped; the container is not stopped.
         """
         return ContainerCLI(self.client_config).start(
-            self, attach, interactive, stream, detach_keys
+            self, attach, interactive, stream, detach_keys, timeout=timeout
         )
 
     def stop(self, time: int | timedelta | None = None) -> None:
@@ -2249,6 +2271,8 @@ class ContainerCLI(DockerCLICaller):
         interactive: bool = False,
         stream: bool = False,
         detach_keys: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> None: ...
 
     @overload
@@ -2259,6 +2283,8 @@ class ContainerCLI(DockerCLICaller):
         interactive: bool = False,
         stream: Literal[False] = False,
         detach_keys: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> str: ...
 
     @overload
@@ -2270,6 +2296,7 @@ class ContainerCLI(DockerCLICaller):
         *,
         stream: Literal[True],
         detach_keys: str | None = None,
+        timeout: float | None = None,
     ) -> ProcessStream: ...
 
     @overload
@@ -2280,6 +2307,8 @@ class ContainerCLI(DockerCLICaller):
         interactive: bool = False,
         stream: bool = False,
         detach_keys: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> str | ProcessStream | None: ...
 
     def start(
@@ -2289,6 +2318,8 @@ class ContainerCLI(DockerCLICaller):
         interactive: bool = False,
         stream: bool = False,
         detach_keys: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> str | ProcessStream | None:
         """Start one or more created or stopped containers.
 
@@ -2305,6 +2336,10 @@ class ContainerCLI(DockerCLICaller):
             interactive: Attach stdin (ensure it is open).
             stream: Return an owned output stream; requires attach=True.
             detach_keys: Override the key sequence for detaching a container.
+            timeout: Positive finite seconds from the start CLI's own launch,
+                replacing the client default; `None` inherits it. Timing
+                advances while stream consumption pauses. Validated before
+                containers are consumed, even for empty input.
 
         Returns:
             None for empty input or unattached execution; captured text when
@@ -2312,9 +2347,13 @@ class ContainerCLI(DockerCLICaller):
             ("stdout" or "stderr", bytes) records.
 
         Raises:
-            ValueError: If attaching multiple containers or streaming unattached.
+            ValueError: If attaching multiple containers, streaming unattached,
+                or `timeout` is not positive and finite.
             NoSuchContainer: If a selected container does not exist.
+            DockerTimeout: The local start CLI exceeds its deadline and is
+                killed and reaped without stopping the container.
         """
+        validate_timeout(timeout)
         container_list = (
             [containers]
             if isinstance(containers, str | Container)
@@ -2337,11 +2376,11 @@ class ContainerCLI(DockerCLICaller):
         full_cmd += container_list
 
         if stream:
-            return stream_stdout_and_stderr(full_cmd)
+            return stream_stdout_and_stderr(full_cmd, timeout=timeout)
         elif attach:
-            return run(full_cmd)
+            return run(full_cmd, timeout=timeout)
         else:
-            run(full_cmd)
+            run(full_cmd, timeout=timeout)
 
     def stats(
         self,
@@ -2382,7 +2421,7 @@ class ContainerCLI(DockerCLICaller):
             full_cmd.extend(containers_list)
 
         stats_output = run(full_cmd)
-        return [ContainerStats(json.loads(x)) for x in stats_output.splitlines()]
+        return [ContainerStats(loads_compat(x)) for x in stats_output.splitlines()]
 
     def stop(
         self,

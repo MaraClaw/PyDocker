@@ -5,9 +5,10 @@ description: >-
   and scripts. Use when translating docker run/build/compose commands into Python,
   managing containers or images with pywhales, pulling/pushing/saving/loading
   images, using Buildx or Compose from Python, adding telemetry or admission
-  limits, waiting for Swarm service/stack convergence, or troubleshooting
-  pywhales usage, output types, streaming, and cleanup. This skill is for
-  consuming pywhales, not developing or contributing to the library.
+  limits, bounding batch inspection, waiting for Swarm service/stack or Compose
+  project convergence, or troubleshooting pywhales usage, output types,
+  streaming, and cleanup. This skill is for consuming pywhales, not developing
+  or contributing to the library.
 compatibility: >-
   Python >=3.14.10 with pywhales installed; Docker CLI on PATH and a reachable
   Docker engine. Compose and Buildx plugins are required for their commands.
@@ -17,7 +18,7 @@ compatibility: >-
 
 Use the Python API that wraps the Docker CLI. Don't substitute Docker SDK APIs
 or treat the `pywhales` console command as a Docker command runner.
-This guidance targets PyWhales 0.6.5; check installed support before using newer options.
+This guidance targets PyWhales 1.0.5; recheck installed support when versions differ.
 
 Work in the user's application or script with the installed package. A PyWhales
 repository checkout, changes to its internals, and its contributor test suite
@@ -48,7 +49,7 @@ are not part of this workflow.
 | Building images, selecting exporters, streaming builds, or checking Dockerfiles | [Buildx](references/buildx.md) |
 | Selecting Compose files/projects, building services, running jobs, or managing a stack | [Compose](references/compose.md) |
 | Observing executions with sanitized telemetry or bounding concurrent work with admission | [Telemetry and admission](references/telemetry-and-admission.md) |
-| Bounding batch inspection, waiting for Swarm convergence, or evaluating opt-in application reconciliation | [Observation budgets and convergence](references/observation-and-convergence.md) |
+| Bounding batch inspection or inventory capture, waiting for Swarm service/stack or Compose project convergence, or evaluating opt-in application reconciliation | [Observation budgets and convergence](references/observation-and-convergence.md) |
 | Checking installed API support and verifying the user's automation | [Usage validation](references/validation.md) |
 
 ## Quick Translation

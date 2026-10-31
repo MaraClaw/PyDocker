@@ -1,15 +1,20 @@
 """Buildx registry-manifest operations that do not pull local images."""
 
-import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
 from typing import Literal, overload
 
+from pywhales._json import loads_compat
 from pywhales.client_config import Command, DockerCLICaller
+from pywhales.components._json_output import JsonOutputParser
 from pywhales.utils import run
 
 from .models import Manifest
+
+
+def _parse_manifest(output: str) -> Manifest:
+    return Manifest(**loads_compat(output))
 
 
 class ImagetoolsCLI(DockerCLICaller):
@@ -23,12 +28,20 @@ class ImagetoolsCLI(DockerCLICaller):
 
         Returns:
             The parsed raw registry manifest, not a local image handle.
+
+        Raises:
+            ParsingError: If the output is malformed or has an unexpected shape.
+                Safe mode withholds the payload and chains no cause; a client
+                with `raw_diagnostics=True` chains the original error.
         """
         full_cmd = Command(
             [*self.docker_cmd, "buildx", "imagetools", "inspect", "--raw", name]
         )
         result = run(full_cmd)
-        return Manifest(**json.loads(result))
+        parser = JsonOutputParser(
+            "imagetools manifest", self.client_config.raw_diagnostics
+        )
+        return parser.parse(_parse_manifest, result)
 
     @overload
     def create(
@@ -133,4 +146,7 @@ class ImagetoolsCLI(DockerCLICaller):
 
         result = run(full_cmd)
         if dry_run:
-            return Manifest(**json.loads(result))
+            parser = JsonOutputParser(
+                "imagetools manifest", self.client_config.raw_diagnostics
+            )
+            return parser.parse(_parse_manifest, result)

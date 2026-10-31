@@ -1,10 +1,17 @@
 """Preserve complete wire templates while validating required observation fields."""
 
 import hashlib
-import json
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    TypeAdapter,
+    field_validator,
+)
 
+from pywhales._json import dumps_compat, loads_compat
 from pywhales.client_config import ClientConfig, ParsingError
 from pywhales.convergence._types import Failure, ServiceTarget
 from pywhales.utils import run
@@ -50,16 +57,66 @@ class TaskWire(BaseModel):
     spec: dict[str, JsonValue] | None = Field(default=None, alias="Spec")
 
 
+class ContainerHealth(BaseModel):
+    model_config = ConfigDict(strict=True)
+    status: str = Field(alias="Status", min_length=1)
+
+
+class ContainerState(BaseModel):
+    model_config = ConfigDict(strict=True)
+    status: str = Field(alias="Status", min_length=1)
+    restarting: bool = Field(alias="Restarting")
+    paused: bool = Field(alias="Paused")
+    health: ContainerHealth | None = Field(default=None, alias="Health")
+
+
+class ComposeLabels(BaseModel):
+    """Only the Compose labels evaluation needs; every other label is dropped."""
+
+    model_config = ConfigDict(strict=True)
+    service: str = Field(alias="com.docker.compose.service", min_length=1)
+    config_hash: str | None = Field(
+        default=None, alias="com.docker.compose.config-hash"
+    )
+    oneoff: str | None = Field(default=None, alias="com.docker.compose.oneoff")
+
+
+class ContainerConfig(BaseModel):
+    model_config = ConfigDict(strict=True)
+    labels: ComposeLabels = Field(alias="Labels")
+    healthcheck: bool = Field(default=False, alias="Healthcheck")
+
+    @field_validator("healthcheck", mode="before")
+    @classmethod
+    def configured_healthcheck(cls, value: object) -> bool:
+        """Retain only check presence, never its command or environment values."""
+        if value is None:
+            return False
+        check = TypeAdapter(dict[str, JsonValue]).validate_python(value, strict=True)
+        test = TypeAdapter(list[str]).validate_python(
+            check.get("Test", []), strict=True
+        )
+        return bool(test) and test[0] != "NONE"
+
+
+class ContainerWire(BaseModel):
+    """Container identity, state and Compose labels; environment and command drop."""
+
+    model_config = ConfigDict(strict=True)
+    id: str = Field(alias="Id", min_length=1)
+    state: ContainerState = Field(alias="State")
+    config: ContainerConfig = Field(alias="Config")
+
+
 def canonical(value: dict[str, JsonValue], *, template: bool = False) -> str:
     """Serialize a complete JSON object, normalizing only the default runtime."""
     normalized = dict(value)
     if template and normalized.get("Runtime") == "container":
         del normalized["Runtime"]
-    return json.dumps(
+    return dumps_compat(
         normalized,
         sort_keys=True,
         separators=(",", ":"),
-        ensure_ascii=True,
         allow_nan=False,
     )
 
@@ -68,7 +125,7 @@ def fingerprint(service: ServiceWire) -> str:
     """Fingerprint the complete mode and normalized task template."""
     template = canonical(service.spec.template, template=True)
     generation = canonical(
-        {"Mode": service.spec.mode, "TaskTemplate": json.loads(template)}
+        {"Mode": service.spec.mode, "TaskTemplate": loads_compat(template)}
     )
     return hashlib.sha256(generation.encode()).hexdigest()
 
@@ -88,6 +145,26 @@ def inspect_task(config: ClientConfig, task_id: str) -> TaskWire:
     results = TypeAdapter(list[TaskWire]).validate_json(payload)
     if len(results) != 1 or results[0].id != task_id:
         raise ParsingError("Task inspect identity mismatch")
+    return results[0]
+
+
+def list_compose_ids(config: ClientConfig, services: tuple[str, ...]) -> list[str]:
+    """List the project's container IDs for the selected services, stopped included."""
+    output = run([*config.get_compose_command(), "ps", "--all", "--quiet", *services])
+    identities = output.splitlines()
+    if any(not identity for identity in identities) or len(identities) != len(
+        set(identities)
+    ):
+        raise ParsingError("Invalid container listing")
+    return identities
+
+
+def inspect_container(config: ClientConfig, container_id: str) -> ContainerWire:
+    """Inspect exactly one listed container, requiring its full ID in the reply."""
+    payload = run([*config.docker_cmd, "inspect", "--type", "container", container_id])
+    results = TypeAdapter(list[ContainerWire]).validate_json(payload)
+    if len(results) != 1 or results[0].id != container_id:
+        raise ParsingError("Container inspect identity mismatch")
     return results[0]
 
 

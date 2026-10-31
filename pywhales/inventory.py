@@ -10,6 +10,8 @@ from datetime import datetime
 from typing import Literal, get_args
 
 from pywhales.client_config import ClientConfig
+from pywhales.components.buildx.cli_wrapper import Builder
+from pywhales.components.buildx.models import BuilderInspectResult
 from pywhales.components.config.cli_wrapper import Config
 from pywhales.components.config.models import ConfigInspectResult
 from pywhales.components.container.cli_wrapper import Container
@@ -45,6 +47,7 @@ type InventoryKind = Literal[
     "task",
     "plugin",
     "context",
+    "builder",
 ]
 type InventoryResource = (
     Container
@@ -58,6 +61,7 @@ type InventoryResource = (
     | Task
     | Plugin
     | Context
+    | Builder
 )
 type InventoryPayload = (
     ContainerInspectResult
@@ -71,6 +75,7 @@ type InventoryPayload = (
     | TaskInspectResult
     | PluginInspectResult
     | ContextInspectResult
+    | BuilderInspectResult
 )
 
 
@@ -86,13 +91,19 @@ def _valid_references(references: object) -> bool:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class InspectionPolicy:
-    """Positive caller-supplied limits for an observation."""
+    """Positive caller-supplied limits for an observation.
+
+    ``max_total_stream_bytes`` caps the stdout and stderr bytes that streams and
+    archive transfers started inside the scope read; captured output counts
+    against ``max_total_response_bytes`` instead. ``None`` leaves a total unset.
+    """
 
     max_references: int
     max_argv_bytes: int
     max_response_bytes: int
     max_total_references: int | None = None
     max_total_response_bytes: int | None = None
+    max_total_stream_bytes: int | None = None
 
     def __post_init__(self) -> None:
         """Reject non-integer, boolean, and nonpositive limits."""
@@ -103,7 +114,11 @@ class InspectionPolicy:
         ):
             if type(value) is not int or value <= 0:
                 raise ValueError("Inspection limits must be positive integers")
-        for value in (self.max_total_references, self.max_total_response_bytes):
+        for value in (
+            self.max_total_references,
+            self.max_total_response_bytes,
+            self.max_total_stream_bytes,
+        ):
             if value is not None and (type(value) is not int or value <= 0):
                 raise ValueError("Inspection limits must be positive integers")
 

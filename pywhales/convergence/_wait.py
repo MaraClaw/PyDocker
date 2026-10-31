@@ -9,9 +9,15 @@ from pydantic import ValidationError
 
 from pywhales._observation import check_observation, observation
 from pywhales.client_config import ClientNotFoundError, ParsingError
-from pywhales.convergence._service import ServiceObservation, check_service
+from pywhales.convergence._compose import (
+    capture_project,
+    validate_selection,
+    wait_compose,
+)
+from pywhales.convergence._service import ServiceObservation, check_service, summarize
 from pywhales.convergence._types import (
     Cancelled,
+    ComposeTarget,
     Deadline,
     DeadlineDetail,
     Failure,
@@ -101,18 +107,62 @@ def capture_service(
         return Failure(reason="observation", service_id=service_id, cause=error)
 
 
+def capture_compose(
+    client: DockerClient,
+    services: tuple[str, ...],
+    *,
+    policy: InspectionPolicy,
+    timeout: float,
+    cancel: Event | None = None,
+) -> ComposeTarget | Failure | Deadline | Cancelled:
+    """Capture selected services of the client's configured Compose project.
+
+    Records each service's full container IDs and ``com.docker.compose.config-hash``
+    label from a listing that includes stopped containers, ignoring one-off
+    ``compose run`` containers. The client's project, files and profiles select the
+    project. A hash doesn't cover replica count; the fixed container IDs do, so a
+    later scale-up or recreate reads as ``superseded``.
+
+    Args:
+        client: Client whose configuration selects the Compose project.
+        services: Explicit, distinct service names; never inferred by discovery.
+            Select only long-running services. A one-shot service that exited 0 is a
+            blocker like any container that isn't ``running``, so ``wait`` can't
+            succeed while it is selected.
+        policy: Required observation limits.
+        timeout: Positive finite total seconds for capture.
+        cancel: Optional cancellation event.
+
+    Returns:
+        A target; ``unsupported`` if a selected service has no containers or its
+        containers carry different config hashes; ``malformed`` for unusable CLI
+        output; or another typed failure, deadline, or cancellation outcome.
+
+    Raises:
+        ValueError: If the timeout is invalid, services isn't a nonempty tuple of
+            distinct nonempty names, or the client is in dry-run mode.
+    """
+    _positive(timeout)
+    validate_selection(client.client_config, services)
+    scope = observation(policy, deadline=time.monotonic() + timeout, cancel=cancel)
+    return capture_project(client.client_config, services, scope)
+
+
 def wait(
-    target: ServiceTarget | StackTarget,
+    target: ServiceTarget | StackTarget | ComposeTarget,
     *,
     policy: InspectionPolicy,
     timeout: float,
     poll_interval: float,
     cancel: Event | None = None,
 ) -> Outcome:
-    """Wait for the captured service or fixed stack membership without mutation.
+    """Wait for the captured service, stack or Compose membership without mutation.
 
     Args:
-        target: Captured service generation or explicitly fixed stack membership.
+        target: Captured service generation, explicitly fixed stack membership, or
+            Compose services. Compose re-lists the project each cycle: containers
+            must be ``running``, not restarting or paused, and ``healthy`` if they
+            have a healthcheck; membership or config-hash changes are ``superseded``.
         policy: Required per-launch observation bounds.
         timeout: Positive finite total seconds from entry.
         poll_interval: Positive finite seconds between observations.
@@ -124,10 +174,15 @@ def wait(
         the deadline and stops only local CLI processes, not daemon-side work.
         Deadline detail retains only the latest complete cycle after all applicable
         generation rechecks, never a partial cycle or a fresh inspection at expiry.
+        Unusable Compose output is ``malformed`` with no cause.
     """
     _positive(timeout)
     _positive(poll_interval)
     deadline = time.monotonic() + timeout
+    if isinstance(target, ComposeTarget):
+        return wait_compose(
+            target, observation(policy, deadline=deadline, cancel=cancel), poll_interval
+        )
     targets = (target,) if isinstance(target, ServiceTarget) else target.services
     current: str | None = None
     last_complete: DeadlineDetail | None = None
@@ -185,34 +240,7 @@ def wait(
                             ready = False
                             rechecked_updates += 1
                 check_observation(state)
-                last_complete = DeadlineDetail(
-                    captured_services=len(targets),
-                    missing_ready_slots=sum(
-                        item.missing_ready_slots for item in observations
-                    ),
-                    duplicate_slots=sum(item.duplicate_slots for item in observations),
-                    stale_templates=sum(item.stale_templates for item in observations),
-                    non_running_tasks=sum(
-                        item.non_running_tasks for item in observations
-                    ),
-                    invalid_task_shape=sum(
-                        item.invalid_task_shape for item in observations
-                    ),
-                    ongoing_updates=sum(item.ongoing_updates for item in observations)
-                    + rechecked_updates,
-                    missing_ready_nodes=sum(
-                        item.missing_ready_nodes for item in observations
-                    ),
-                    duplicate_node_assignments=sum(
-                        item.duplicate_node_assignments for item in observations
-                    ),
-                    missing_node_assignments=sum(
-                        item.missing_node_assignments for item in observations
-                    ),
-                    outside_approved_nodes=sum(
-                        item.outside_approved_nodes for item in observations
-                    ),
-                )
+                last_complete = summarize(observations, rechecked_updates)
                 if ready:
                     return Success()
                 next_poll = time.monotonic() + poll_interval

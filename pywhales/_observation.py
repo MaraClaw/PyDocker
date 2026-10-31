@@ -29,6 +29,28 @@ class _ResponseAccount:
     lock: Lock = field(default_factory=Lock, repr=False, compare=False)
 
 
+@dataclass(slots=True)
+class _StreamAccount(_ResponseAccount):
+    """Track the stream and archive bytes read during one observation scope.
+
+    Kept apart from the scope's response account: captured output never counts
+    here, and stream bytes never count against ``max_total_response_bytes``.
+    """
+
+
+def _charge(accounts: tuple[_ResponseAccount, ...], size: int, reason: str) -> None:
+    """Charge every account under its own lock before reporting any overflow."""
+    exceeded: tuple[int, int] | None = None
+    for account in accounts:
+        with account.lock:
+            account.consumed += size
+            consumed = account.consumed
+        if consumed > account.limit and exceeded is None:
+            exceeded = (account.limit, consumed)
+    if exceeded is not None:
+        raise ObservationLimitError(reason, *exceeded)
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ObservationState:
     """Effective nested limits and all active cancellation tokens."""
@@ -37,6 +59,21 @@ class ObservationState:
     deadline: float | None
     cancel_tokens: tuple[Event, ...]
     response_accounts: tuple[_ResponseAccount, ...]
+    stream_accounts: tuple[_StreamAccount, ...] = ()
+
+    @property
+    def binds_launches(self) -> bool:
+        """Whether a stream or archive launched here keeps enforcing this state.
+
+        A launch retains the snapshot only when it has something to enforce after
+        the scope's ``with`` block exits: a deadline, a cancel token, or a stream
+        budget. Only a deadline or a token ever needs a timed wait.
+        """
+        return (
+            self.deadline is not None
+            or bool(self.cancel_tokens)
+            or bool(self.stream_accounts)
+        )
 
     def response_allowance(self, command_remaining: int) -> int:
         """Return the tightest remaining command or scope allowance."""
@@ -61,15 +98,38 @@ class ObservationState:
         charge is lost and the first account to overflow reports the total it
         reached at that charge.
         """
-        exceeded: tuple[int, int] | None = None
-        for account in self.response_accounts:
-            with account.lock:
-                account.consumed += size
-                consumed = account.consumed
-            if consumed > account.limit and exceeded is None:
-                exceeded = (account.limit, consumed)
-        if exceeded is not None:
-            raise ObservationLimitError("total_response", *exceeded)
+        _charge(self.response_accounts, size, "total_response")
+
+    def stream_allowance(self, request: int) -> int:
+        """Return the largest read that still flags overflow at its first excess byte.
+
+        Args:
+            request: Bytes the caller would otherwise read.
+
+        Returns:
+            ``request``, or fewer bytes so that no stream account passes its limit
+            by more than one byte, and at least one.
+        """
+        return max(
+            1,
+            min(
+                (
+                    request,
+                    *(
+                        account.limit - account.consumed + 1
+                        for account in self.stream_accounts
+                    ),
+                )
+            ),
+        )
+
+    def charge_stream(self, size: int) -> None:
+        """Charge stream or archive bytes to every enclosing stream account.
+
+        Shares ``charge_response``'s locking and first-overflow reporting, but
+        raises reason ``total_stream`` and never touches a response account.
+        """
+        _charge(self.stream_accounts, size, "total_stream")
 
 
 _current_observation: ContextVar[ObservationState | None] = ContextVar(
@@ -124,6 +184,7 @@ def observation(
         raise ValueError("Observation deadline must be finite")
     parent = get_observation()
     response_limit = policy.max_total_response_bytes
+    stream_limit = policy.max_total_stream_bytes
     if parent is not None:
         policy = InspectionPolicy(
             max_references=min(parent.policy.max_references, policy.max_references),
@@ -137,6 +198,9 @@ def observation(
             max_total_response_bytes=_minimum_optional(
                 parent.policy.max_total_response_bytes, policy.max_total_response_bytes
             ),
+            max_total_stream_bytes=_minimum_optional(
+                parent.policy.max_total_stream_bytes, policy.max_total_stream_bytes
+            ),
         )
     deadlines = tuple(
         value
@@ -145,6 +209,7 @@ def observation(
     )
     tokens = parent.cancel_tokens if parent is not None else ()
     accounts = parent.response_accounts if parent is not None else ()
+    stream_accounts = parent.stream_accounts if parent is not None else ()
     state = ObservationState(
         policy=policy,
         deadline=min(deadlines) if deadlines else None,
@@ -153,6 +218,11 @@ def observation(
             (*accounts, _ResponseAccount(response_limit))
             if response_limit is not None
             else accounts
+        ),
+        stream_accounts=(
+            (*stream_accounts, _StreamAccount(stream_limit))
+            if stream_limit is not None
+            else stream_accounts
         ),
     )
     token = _current_observation.set(state)

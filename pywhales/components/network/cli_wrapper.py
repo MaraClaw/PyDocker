@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import builtins
-import json
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from types import MappingProxyType, TracebackType
@@ -17,6 +16,7 @@ from typing import (
 from pydantic import JsonValue
 
 import pywhales.components.container.cli_wrapper
+from pywhales._json import loads_compat
 from pywhales.client_config import (
     ClientConfig,
     Command,
@@ -79,7 +79,9 @@ class Network(ReloadableObjectFromJson[NetworkInspectResult]):
     @override
     def _fetch_inspect_result_json(self, reference: str) -> dict[str, JsonValue]:
         json_str = run([*self.docker_cmd, "network", "inspect", reference])
-        return custom_parse_object_as(dict[str, JsonValue], {**json.loads(json_str)[0]})
+        return custom_parse_object_as(
+            dict[str, JsonValue], {**loads_compat(json_str)[0]}
+        )
 
     @override
     def _parse_json_object(

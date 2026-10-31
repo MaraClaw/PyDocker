@@ -2360,7 +2360,11 @@ def test_push_duplicate_images(ctr_client: DockerClient) -> None:
         inspect_images.assert_called_once_with(["busybox:1"])
         push_multiple_tags.assert_not_called()
         push_single_tag.assert_called_once_with(
-            tag_or_repo="busybox:1", quiet=True, stream_logs=False, buffer_bytes=None
+            tag_or_repo="busybox:1",
+            quiet=True,
+            stream_logs=False,
+            buffer_bytes=None,
+            timeout=None,
         )
 
 

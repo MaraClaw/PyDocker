@@ -15,9 +15,9 @@ from time import sleep
 from unittest.mock import patch
 
 import pytest
-from pydantic import ValidationError
 
 from pywhales import DockerClient
+from pywhales.client_config import ParsingError
 from pywhales.components.system.cli_wrapper import DiskFreeResult
 from pywhales.components.system.models import DockerEvent, SystemInfo
 from pywhales.exceptions import DockerException, NoSuchContainer
@@ -136,13 +136,10 @@ def test_info_executes_json_format_and_parses_schema() -> None:
 
 
 @pytest.mark.parametrize(
-    "output,error",
-    [
-        (b"not-json", json.JSONDecodeError),
-        (b'{"Containers":"not-a-count"}', ValidationError),
-    ],
+    "output",
+    [b"not-json", b'{"Containers":"not-a-count"}'],
 )
-def test_info_rejects_malformed_output(output: bytes, error: type[ValueError]) -> None:
+def test_info_rejects_malformed_output(output: bytes) -> None:
     client = DockerClient()
     client.client_config._client_call_with_path = ["fake-docker"]
     with (
@@ -150,7 +147,7 @@ def test_info_rejects_malformed_output(output: bytes, error: type[ValueError]) -
             "subprocess.run",
             return_value=subprocess.CompletedProcess([], 0, output, b""),
         ),
-        pytest.raises(error),
+        pytest.raises(ParsingError),
     ):
         client.system.info()
 
@@ -419,7 +416,7 @@ def test_owned_system_events_release_child_on_parse_error(payload: str) -> None:
     ):
         stream = DockerClient().system.events()
 
-        with pytest.raises((json.JSONDecodeError, ValidationError)):
+        with pytest.raises(ParsingError):
             next(stream)
 
         assert raw._process.poll() is not None

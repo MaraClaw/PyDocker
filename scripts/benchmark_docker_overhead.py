@@ -12,7 +12,6 @@ No subprocess is started. This is not a Docker build speed benchmark.
 from __future__ import annotations
 
 import argparse
-import json
 import platform
 import subprocess
 import sys
@@ -29,6 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pywhales import DockerClient
+from pywhales._json import dumps_compat
 
 IMAGE_ID: Final = "sha256:" + "a" * 64
 
@@ -93,7 +93,7 @@ class SimulatedExecution:
                 Path(command[command.index("--iidfile") + 1]).write_text(IMAGE_ID)
             output = b""
         elif command[1:3] == ("image", "inspect"):
-            output = json.dumps([{"Id": IMAGE_ID}]).encode()
+            output = dumps_compat([{"Id": IMAGE_ID}]).encode()
         else:
             raise RuntimeError(command)
         return subprocess.CompletedProcess(list(args), 0, stdout=output, stderr=b"")
@@ -239,7 +239,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     except ValidationError as error:
         parser.error(str(error))
     report = run_benchmark(options)
-    print(json.dumps(asdict(report), indent=2))
+    print(dumps_compat(asdict(report), indent=2))
 
 
 if __name__ == "__main__":

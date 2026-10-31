@@ -77,8 +77,9 @@ class Job(APIModel):
 
 
 class Jobs(APIModel):
-    """One page of authoritative jobs."""
+    """One page of authoritative jobs with the listing's `total_count`."""
 
+    total_count: Annotated[int, Field(ge=0)]
     jobs: tuple[Job, ...]
 
 
@@ -105,8 +106,9 @@ class Artifact(APIModel):
 
 
 class Artifacts(APIModel):
-    """One page of run-scoped artifacts."""
+    """One page of run-scoped artifacts with the listing's `total_count`."""
 
+    total_count: Annotated[int, Field(ge=0)]
     artifacts: tuple[Artifact, ...]
 
 

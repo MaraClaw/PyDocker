@@ -11,7 +11,7 @@ from typing import override
 import pywhales.components.service.cli_wrapper
 import pywhales.components.task.cli_wrapper
 from pywhales.client_config import ClientConfig, Command, DockerCLICaller
-from pywhales.utils import ValidPath, read_env_files, run, to_list
+from pywhales.utils import ValidPath, read_env_files, run, to_list, validate_timeout
 
 
 class Stack:
@@ -69,6 +69,8 @@ class StackCLI(DockerCLICaller):
         with_registry_auth: bool = False,
         env_files: Sequence[ValidPath] = (),
         variables: Mapping[str, str] = MappingProxyType({}),
+        *,
+        timeout: float | None = None,
     ) -> Stack:
         """Deploy a stack from Compose files.
 
@@ -93,11 +95,21 @@ class StackCLI(DockerCLICaller):
                 compose.
             variables: Environment overrides for interpolating Compose file
                 variables, taking precedence over values loaded from `env_files`.
+            timeout: Positive finite seconds from the deploy CLI's own launch,
+                replacing the client default; None inherits it. It is validated
+                before the executable is resolved or any env file is read.
 
         Returns:
             A named stack handle after the deploy CLI exits, not a guarantee that
             all deployed service tasks have converged.
+
+        Raises:
+            ValueError: If timeout is a Boolean or is neither None nor a positive
+                finite number of seconds.
+            DockerTimeout: If the CLI exceeds its deadline. It is killed and reaped,
+                without undoing the deploy or guaranteeing daemon-side work stops.
         """
+        validate_timeout(timeout)
         full_cmd = Command([*self.docker_cmd, "stack", "deploy"])
 
         full_cmd.add_args_iterable_or_single("--compose-file", compose_files)
@@ -109,7 +121,7 @@ class StackCLI(DockerCLICaller):
         env = read_env_files([Path(x) for x in env_files])
         env.update(variables)
 
-        run(full_cmd, capture_stdout=False, env=env)
+        run(full_cmd, capture_stdout=False, env=env, timeout=timeout)
         return Stack(self.client_config, name)
 
     def list(self) -> builtins.list[Stack]:

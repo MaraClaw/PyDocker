@@ -7,7 +7,6 @@ archive-byte iterators have different startup and cleanup contracts.
 from __future__ import annotations
 
 import builtins
-import json
 import os
 from collections import OrderedDict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -36,6 +35,7 @@ from pywhales._execution_policy import (
     execution_timeout,
     get_execution_policy,
 )
+from pywhales._json import loads_compat
 from pywhales.client_config import (
     ClientConfig,
     Command,
@@ -227,7 +227,9 @@ class Image(ReloadableObjectFromJson[ImageInspectResult]):
     @override
     def _fetch_inspect_result_json(self, reference: str) -> dict[str, JsonValue]:
         json_str = run([*self.docker_cmd, "image", "inspect", reference])
-        return custom_parse_object_as(dict[str, JsonValue], {**json.loads(json_str)[0]})
+        return custom_parse_object_as(
+            dict[str, JsonValue], {**loads_compat(json_str)[0]}
+        )
 
     @override
     def _parse_json_object(
@@ -1089,6 +1091,8 @@ class ImageCLI(DockerCLICaller):
         x: str | Iterable[str],
         quiet: bool = False,
         stream_logs: Literal[False] = False,
+        *,
+        timeout: float | None = None,
     ) -> None: ...
 
     @overload
@@ -1098,6 +1102,7 @@ class ImageCLI(DockerCLICaller):
         quiet: bool = False,
         *,
         stream_logs: Literal[True],
+        timeout: float | None = None,
     ) -> ImageStream: ...
 
     @overload
@@ -1106,6 +1111,8 @@ class ImageCLI(DockerCLICaller):
         x: str,
         quiet: bool,
         stream_logs: Literal[True],
+        *,
+        timeout: float | None = None,
     ) -> ImageStream: ...
 
     @overload
@@ -1115,6 +1122,7 @@ class ImageCLI(DockerCLICaller):
         quiet: bool = False,
         *,
         stream_logs: Literal[True],
+        timeout: float | None = None,
     ) -> ImageStream | None: ...
 
     @overload
@@ -1123,6 +1131,8 @@ class ImageCLI(DockerCLICaller):
         x: Iterable[str],
         quiet: bool,
         stream_logs: Literal[True],
+        *,
+        timeout: float | None = None,
     ) -> ImageStream | None: ...
 
     @overload
@@ -1131,6 +1141,8 @@ class ImageCLI(DockerCLICaller):
         x: str | Iterable[str],
         quiet: bool = False,
         stream_logs: bool = False,
+        *,
+        timeout: float | None = None,
     ) -> ImageStream | None: ...
 
     def push(
@@ -1138,6 +1150,8 @@ class ImageCLI(DockerCLICaller):
         x: str | Iterable[str],
         quiet: bool = False,
         stream_logs: bool = False,
+        *,
+        timeout: float | None = None,
     ) -> ImageStream | None:
         """Push image references to a registry after local inspection.
 
@@ -1165,6 +1179,10 @@ class ImageCLI(DockerCLICaller):
             quiet: Don't print anything.
             stream_logs: Return owned `(image_reference, bytes)` progress records
                 instead of waiting for all transfers to complete.
+            timeout: Positive finite seconds from each transfer subprocess's own
+                launch, replacing the client default; `None` inherits it. The
+                batch image inspection and executor queueing do not consume this
+                budget, and each concurrent transfer gets its own deadline.
 
         Returns:
             An owned stream of `(image_reference, bytes)` progress records with
@@ -1173,13 +1191,19 @@ class ImageCLI(DockerCLICaller):
             returns `None` in both modes, without starting a transfer CLI.
 
         Raises:
-            ValueError: `quiet=True` is combined with `stream_logs=True`, or an
+            ValueError: `quiet=True` is combined with `stream_logs=True`, or
+                `timeout` is not positive and finite. Booleans are rejected
+                before consuming references, even for an empty request. An
                 observation is active and `quiet=False` without streaming.
             NoSuchImage: A locally inspected reference does not exist.
             DockerException: Inspection or a push command fails.
+            DockerTimeout: A transfer subprocess exceeds its own deadline; it is
+                killed and reaped without undoing the push or guaranteeing that
+                registry or daemon-side work stops.
             BufferError: A streamed record or retained stderr exceeds the selected
                 byte budget. Multi-image failure also cancels sibling transfers.
         """
+        validate_timeout(timeout)
         if quiet and stream_logs:
             raise ValueError(
                 "It's not possible to have stream_logs=True and quiet=True at the same time. "
@@ -1204,6 +1228,7 @@ class ImageCLI(DockerCLICaller):
                 quiet=quiet,
                 stream_logs=stream_logs,
                 buffer_bytes=buffer_bytes,
+                timeout=timeout,
             )
         else:
             return self._push_multiple_tags(
@@ -1211,6 +1236,7 @@ class ImageCLI(DockerCLICaller):
                 quiet=quiet,
                 stream_logs=stream_logs,
                 buffer_bytes=buffer_bytes,
+                timeout=timeout,
             )
 
     def _push_multiple_tags(
@@ -1220,6 +1246,7 @@ class ImageCLI(DockerCLICaller):
         stream_logs: bool,
         *,
         buffer_bytes: int | None,
+        timeout: float | None = None,
     ) -> ImageStream | None:
         if stream_logs:
             return self._push_multiple_tags_stream(
@@ -1227,11 +1254,12 @@ class ImageCLI(DockerCLICaller):
                 quiet=quiet,
                 stream_logs=stream_logs,
                 buffer_bytes=buffer_bytes,
+                timeout=timeout,
             )
         else:
 
             def push_one(tag_or_repo: str) -> None:
-                self._push_single_tag(tag_or_repo, quiet, stream_logs)
+                self._push_single_tag(tag_or_repo, quiet, stream_logs, timeout=timeout)
 
             map_in_contexts(push_one, tags_or_repos)
             return None
@@ -1243,10 +1271,15 @@ class ImageCLI(DockerCLICaller):
         stream_logs: bool,
         *,
         buffer_bytes: int | None,
+        timeout: float | None = None,
     ) -> MultiImageStream:
         def start(tag_or_repo: str) -> MappedProcessStream[tuple[str, bytes]]:
             child = self._push_single_tag(
-                tag_or_repo, quiet, True, buffer_bytes=buffer_bytes
+                tag_or_repo,
+                quiet,
+                True,
+                buffer_bytes=buffer_bytes,
+                timeout=timeout,
             )
             assert child is not None
             return child
@@ -1264,17 +1297,20 @@ class ImageCLI(DockerCLICaller):
         stream_logs: bool,
         *,
         buffer_bytes: int | None = None,
+        timeout: float | None = None,
     ) -> MappedProcessStream[tuple[str, bytes]] | None:
         full_cmd = Command([*self.docker_cmd, "image", "push"])
         full_cmd.add_flag("--quiet", quiet)
         full_cmd.append(tag_or_repo)
         if stream_logs:
-            stream = stream_stdout_and_stderr(full_cmd, buffer_bytes=buffer_bytes)
+            stream = stream_stdout_and_stderr(
+                full_cmd, buffer_bytes=buffer_bytes, timeout=timeout
+            )
             return MappedProcessStream(
                 stream, ((tag_or_repo, line) for _, line in stream)
             )
         else:
-            run(full_cmd, capture_stdout=quiet, capture_stderr=quiet)
+            run(full_cmd, capture_stdout=quiet, capture_stderr=quiet, timeout=timeout)
             return None
 
     def remove(

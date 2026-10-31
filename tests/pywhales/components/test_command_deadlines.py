@@ -11,6 +11,7 @@ import os
 import sys
 from collections.abc import Iterable
 from pathlib import Path
+from time import perf_counter, sleep
 from typing import Literal, assert_never
 
 import pytest
@@ -19,6 +20,8 @@ from pytest_mock import MockerFixture
 from pywhales import Container, DockerClient, Image, utils
 from pywhales.components.buildx.cli_wrapper import BakeResult
 from pywhales.components.compose.models import ComposeEvent
+from pywhales.components.plugin.cli_wrapper import Plugin
+from pywhales.components.service.cli_wrapper import Service
 from pywhales.components.system.models import DockerEvent
 from pywhales.exceptions import DockerException, DockerTimeout
 from pywhales.utils import MappedProcessStream, ProcessStream
@@ -47,6 +50,7 @@ def client(tmp_path: Path) -> DockerClient:
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
 record = Path(sys.argv[1])
@@ -62,6 +66,9 @@ def selected(name):
     return bool(prefix) and args[:len(prefix)] == prefix
 
 
+for words, seconds in json.loads(os.environ.get('PYWHALES_TEST_DELAYS', '{}')).items():
+    if set(words.split()) <= set(args):
+        time.sleep(seconds)
 if selected('PYWHALES_TEST_BLOCK_ON'):
     threading.Event().wait(60)
 if selected('PYWHALES_TEST_FAIL_ON'):
@@ -72,13 +79,19 @@ if args[:2] == ['buildx', 'inspect']:
 elif args[:2] == ['buildx', 'ls']:
     print(json.dumps({'Name': 'selected', 'Driver': 'docker'}))
 elif args[:2] == ['image', 'inspect']:
-    print('[{"Id":"sha256:built"}]')
+    names = [name for name in args[2:] if not name.startswith('-')]
+    print(json.dumps([
+        {'Id': name if name.startswith('sha256:') else 'sha256:' + name}
+        for name in names
+    ]))
 elif args[:2] == ['manifest', 'inspect']:
     print('{}')
 elif args[:2] == ['container', 'inspect']:
     print('[{"Id":"container-id","HostConfig":{"AutoRemove":false},"State":{"Running":false}}]')
 elif args[:2] == ['service', 'inspect']:
     print('[{"ID":"service-id","Spec":{"Name":"workload"}}]')
+elif args[:2] == ['plugin', 'inspect']:
+    print('[{"Id":"plugin-id","Name":"plug"}]')
 else:
     if '--iidfile' in args:
         Path(args[args.index('--iidfile') + 1]).write_text('sha256:built')
@@ -92,7 +105,7 @@ else:
         print('container-id', flush=True)
     block = os.environ.get('PYWHALES_TEST_BLOCK')
     if block == '1' or (block == 'print' and '--print' in args):
-        if 'logs' in args or 'events' in args:
+        if {'logs', 'events', 'push', 'start', 'watch', 'prune'} & set(args):
             os.write(2, b'diagnostic\\xff')
         threading.Event().wait(60)
 """
@@ -856,3 +869,709 @@ def test_volume_copy_cleanup_timeout_still_removes_scratch_image(
     ]
     assert_reaped(tmp_path, ["container", "rm"])
     assert client.client_config.default_timeout == default
+
+
+type LongLaunch = Literal[
+    "image_push",
+    "root_push",
+    "container_start",
+    "root_start",
+    "handle_start",
+    "compose_push",
+    "compose_watch",
+    "buildx_prune",
+]
+EAGER_LAUNCHES: tuple[LongLaunch, ...] = (
+    "image_push",
+    "root_push",
+    "container_start",
+    "root_start",
+    "handle_start",
+    "compose_push",
+    "buildx_prune",
+)
+STREAM_LAUNCHES: tuple[LongLaunch, ...] = (
+    "image_push",
+    "root_push",
+    "container_start",
+    "root_start",
+    "handle_start",
+    "compose_watch",
+    "buildx_prune",
+)
+LAUNCH_PREFIX: dict[LongLaunch, list[str]] = {
+    "image_push": ["image", "push"],
+    "root_push": ["image", "push"],
+    "container_start": ["container", "start"],
+    "root_start": ["container", "start"],
+    "handle_start": ["container", "start"],
+    "compose_push": ["compose", "push"],
+    "compose_watch": ["compose", "watch"],
+    "buildx_prune": ["buildx", "prune"],
+}
+BAD_TIMEOUTS = [0.0, -1.0, float("inf"), float("-inf"), float("nan"), True, False]
+
+
+def launch_long(
+    client: DockerClient,
+    operation: LongLaunch,
+    *,
+    timeout: float | None,
+    stream: bool = False,
+) -> object:
+    """Dispatch a push, start, watch, or prune scenario with its selected deadline.
+
+    Args:
+        client: Client configured to run the local Python driver.
+        operation: Entry point to exercise. Push and prune capture output when
+            blocking; attached starts return text; watch always streams.
+        timeout: Per-launch duration in seconds, or None to inherit the default.
+        stream: Return an owned output stream instead of an eager result.
+
+    Returns:
+        None for eager push, unattached results and prune, captured text for an
+        attached start, or a caller-owned stream.
+
+    Raises:
+        ValueError: If timeout is not a finite positive duration or None.
+        DockerTimeout: If an eager launch exceeds its deadline. Streams report
+            expiry when consumed or exited.
+    """
+    match operation:
+        case "image_push":
+            return client.image.push(
+                "built", quiet=not stream, stream_logs=stream, timeout=timeout
+            )
+        case "root_push":
+            return client.push(
+                "built", quiet=not stream, stream_logs=stream, timeout=timeout
+            )
+        case "container_start":
+            return client.container.start(
+                "workload", True, stream=stream, timeout=timeout
+            )
+        case "root_start":
+            return client.start("workload", True, stream=stream, timeout=timeout)
+        case "handle_start":
+            return Container(
+                client.client_config, "workload", is_immutable_id=True
+            ).start(True, stream=stream, timeout=timeout)
+        case "compose_push":
+            return client.compose.push(timeout=timeout)
+        case "compose_watch":
+            return client.compose.watch("web", timeout=timeout)
+        case "buildx_prune":
+            return client.buildx.prune(stream_logs=stream, timeout=timeout)
+        case unreachable:
+            assert_never(unreachable)
+
+
+def first_record(operation: LongLaunch) -> object:
+    """Return the record the driver's first stdout line becomes for an operation."""
+    if operation in ("image_push", "root_push"):
+        return ("built", b"container-id\n")
+    if operation == "buildx_prune":
+        return "container-id\n"
+    return ("stdout", b"container-id\n")
+
+
+def owned_stream(result: object) -> ProcessStream | MappedProcessStream[object]:
+    """Return a launched stream typed for use as a context manager."""
+    assert isinstance(result, (ProcessStream, MappedProcessStream))
+    return result
+
+
+def owned_process(result: object) -> ProcessStream:
+    """Return the process stream beneath a launched stream, asserting ownership."""
+    assert isinstance(result, (ProcessStream, MappedProcessStream))
+    return result._stream if isinstance(result, MappedProcessStream) else result
+
+
+def launches_of(tmp_path: Path) -> list[list[str]]:
+    """Return recorded driver argv, or an empty list when nothing launched."""
+    record = tmp_path / "launches.jsonl"
+    return launched(tmp_path) if record.exists() else []
+
+
+@pytest.mark.parametrize("timeout", BAD_TIMEOUTS)
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("operation", STREAM_LAUNCHES)
+def test_invalid_long_launch_timeout_precedes_every_launch(
+    client: DockerClient,
+    tmp_path: Path,
+    operation: LongLaunch,
+    stream: bool,
+    timeout: float,
+) -> None:
+    with pytest.raises(ValueError):
+        launch_long(client, operation, timeout=timeout, stream=stream)
+
+    assert launches_of(tmp_path) == []
+
+
+@pytest.mark.parametrize("timeout", BAD_TIMEOUTS)
+def test_invalid_long_launch_timeout_precedes_compose_push_and_empty_requests(
+    client: DockerClient, tmp_path: Path, timeout: float
+) -> None:
+    consumed: list[str] = []
+
+    def references() -> Iterable[str]:
+        consumed.append("read")
+        yield "built"
+
+    for call in (
+        lambda: client.compose.push(timeout=timeout),
+        lambda: client.compose.push([], timeout=timeout),
+        lambda: client.compose.watch([], timeout=timeout),
+        lambda: client.container.start([], timeout=timeout),
+        lambda: client.start(references(), timeout=timeout),
+        lambda: client.image.push([], timeout=timeout),
+        lambda: client.push(references(), timeout=timeout),
+        lambda: client.buildx.prune(filters=iter([("until", "1h")]), timeout=timeout),
+    ):
+        with pytest.raises(ValueError):
+            call()
+
+    assert consumed == []
+    assert launches_of(tmp_path) == []
+
+
+def test_empty_long_launches_return_none_without_a_child(
+    client: DockerClient, tmp_path: Path
+) -> None:
+    assert client.image.push([], timeout=5) is None
+    assert client.image.push([], stream_logs=True, timeout=5) is None
+    assert client.container.start([], timeout=5) is None
+    assert client.compose.push([], timeout=5) is None
+    assert client.compose.watch([], timeout=5) is None
+
+    assert launches_of(tmp_path) == []
+
+
+@pytest.mark.parametrize("timeout", [None, 5.0])
+@pytest.mark.parametrize("operation", EAGER_LAUNCHES)
+def test_eager_long_launches_preserve_results(
+    client: DockerClient, operation: LongLaunch, timeout: float | None
+) -> None:
+    result = launch_long(client, operation, timeout=timeout)
+
+    if operation in ("container_start", "root_start", "handle_start"):
+        assert result == "container-id"
+    else:
+        assert result is None
+
+
+@pytest.mark.parametrize("operation", STREAM_LAUNCHES)
+def test_long_launch_streams_preserve_records_and_close(
+    client: DockerClient, operation: LongLaunch
+) -> None:
+    result = launch_long(client, operation, timeout=5, stream=True)
+
+    with owned_stream(result) as stream:
+        assert list(stream) == [first_record(operation)]
+    assert_released(owned_process(result))
+
+
+def test_unattached_start_and_detached_forms_use_their_own_launch(
+    client: DockerClient, tmp_path: Path
+) -> None:
+    client.start("workload", timeout=5)
+    Container(client.client_config, "workload", is_immutable_id=True).start(timeout=5)
+
+    assert [args[:2] for args in launches_of(tmp_path)] == [["container", "start"]] * 2
+
+
+@pytest.mark.parametrize("prune", [False, True])
+def test_watch_keeps_explicit_prune_value_with_a_deadline(
+    client: DockerClient, tmp_path: Path, prune: bool
+) -> None:
+    watch = client.compose.watch(["web"], prune=prune, timeout=5)
+    assert watch is not None
+    with watch:
+        list(watch)
+
+    assert f"--prune={str(prune).lower()}" in launches_of(tmp_path)[0]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_buildx_prune_deadline_is_local_and_not_a_cli_flag(
+    client: DockerClient, tmp_path: Path, stream: bool
+) -> None:
+    result = client.buildx.prune(all=True, stream_logs=stream, timeout=5)
+    if stream:
+        assert isinstance(result, MappedProcessStream)
+        with result:
+            list(result)
+
+    argv = launches_of(tmp_path)[0]
+    assert argv[:2] == ["buildx", "prune"]
+    assert "--force" in argv
+    assert not any("timeout" in arg for arg in argv)
+
+
+@pytest.mark.parametrize("operation", EAGER_LAUNCHES)
+def test_eager_long_launch_timeout_keeps_partial_output_and_reaps_child(
+    client: DockerClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: LongLaunch,
+) -> None:
+    monkeypatch.setenv("PYWHALES_TEST_BLOCK", "1")
+    prefix = LAUNCH_PREFIX[operation]
+
+    with pytest.raises(DockerTimeout) as expired:
+        launch_long(client, operation, timeout=1.0)
+
+    assert expired.value.stdout is not None
+    assert "container-id" in expired.value.stdout
+    assert expired.value.stderr == "diagnostic\ufffd"
+    assert all(word in expired.value.docker_command for word in prefix)
+    assert_reaped(tmp_path, prefix)
+
+
+@pytest.mark.parametrize("operation", EAGER_LAUNCHES)
+def test_eager_long_launch_inherits_the_client_default_when_timeout_is_none(
+    client: DockerClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: LongLaunch,
+) -> None:
+    monkeypatch.setenv("PYWHALES_TEST_BLOCK", "1")
+    client.client_config.default_timeout = 0.8
+
+    with pytest.raises(DockerTimeout):
+        launch_long(client, operation, timeout=None)
+
+    assert_reaped(tmp_path, LAUNCH_PREFIX[operation])
+
+
+@pytest.mark.parametrize(
+    ("operation", "stream"),
+    [(operation, False) for operation in EAGER_LAUNCHES]
+    + [(operation, True) for operation in STREAM_LAUNCHES],
+)
+def test_natural_nonzero_exit_keeps_exception_type(
+    client: DockerClient,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: LongLaunch,
+    stream: bool,
+) -> None:
+    monkeypatch.setenv("PYWHALES_TEST_FAIL_ON", " ".join(LAUNCH_PREFIX[operation]))
+
+    with pytest.raises(DockerException) as failed:
+        result = launch_long(client, operation, timeout=5, stream=stream)
+        if stream:
+            with owned_stream(result) as records:
+                list(records)
+
+    assert not isinstance(failed.value, DockerTimeout)
+    assert failed.value.stderr is not None
+    assert "induced failure" in failed.value.stderr
+
+
+@pytest.mark.parametrize("operation", STREAM_LAUNCHES)
+def test_long_launch_stream_timeout_keeps_output_and_reports_once(
+    client: DockerClient, monkeypatch: pytest.MonkeyPatch, operation: LongLaunch
+) -> None:
+    monkeypatch.setenv("PYWHALES_TEST_BLOCK", "1")
+    result = launch_long(client, operation, timeout=1.0, stream=True)
+    raw = owned_process(result)
+    try:
+        assert raw._released.wait(timeout=3)
+
+        with pytest.raises(DockerTimeout) as expired:
+            next(owned_stream(result))
+
+        assert expired.value.stdout is not None
+        assert "container-id" in expired.value.stdout
+        assert expired.value.stderr == "diagnostic\ufffd"
+        assert_released(raw)
+        with owned_stream(result) as closed:
+            assert list(closed) == []
+    finally:
+        owned_stream(result).close()
+
+
+@pytest.mark.parametrize("operation", STREAM_LAUNCHES)
+def test_long_launch_stream_deadline_does_not_interrupt_post_exit_drain(
+    client: DockerClient, monkeypatch: pytest.MonkeyPatch, operation: LongLaunch
+) -> None:
+    result = launch_long(client, operation, timeout=5.0, stream=True)
+    raw = owned_process(result)
+    with owned_stream(result) as stream:
+        assert raw._process.wait(timeout=3) == 0
+        assert raw._deadline is not None
+        expired_at = raw._deadline + 1
+        monkeypatch.setattr("pywhales._process_stream.monotonic", lambda: expired_at)
+
+        assert list(stream) == [first_record(operation)]
+
+    assert_released(raw)
+
+
+@pytest.mark.parametrize("consume", [False, True])
+@pytest.mark.parametrize("operation", STREAM_LAUNCHES)
+def test_long_launch_stream_early_close_reaps_child(
+    client: DockerClient,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: LongLaunch,
+    consume: bool,
+) -> None:
+    monkeypatch.setenv("PYWHALES_TEST_BLOCK", "1")
+    result = launch_long(client, operation, timeout=5, stream=True)
+    raw = owned_process(result)
+    with owned_stream(result) as stream:
+        if consume:
+            assert next(stream) == first_record(operation)
+        stream.close()
+        stream.close()
+
+    assert list(owned_stream(result)) == []
+    assert_released(raw)
+
+
+def push_names(count: int) -> list[str]:
+    """Return distinct image names that the driver's image inspect accepts."""
+    return [f"img{index}" for index in range(count)]
+
+
+def set_delays(monkeypatch: pytest.MonkeyPatch, delays: dict[str, float]) -> None:
+    """Make driver launches whose argv contains a key's words sleep that long."""
+    monkeypatch.setenv("PYWHALES_TEST_DELAYS", json.dumps(delays))
+
+
+@pytest.mark.parametrize("names", [push_names(1), push_names(2)])
+@pytest.mark.parametrize("stream", [False, True])
+def test_push_inspect_preflight_is_outside_the_explicit_budget(
+    client: DockerClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    names: list[str],
+    stream: bool,
+) -> None:
+    set_delays(monkeypatch, {"image inspect": 1.2})
+
+    started = perf_counter()
+    result = client.image.push(names, quiet=not stream, stream_logs=stream, timeout=0.6)
+    if stream:
+        assert result is not None
+        with result:
+            assert sorted(name for name, _ in result) == sorted(names)
+    else:
+        assert result is None
+
+    assert perf_counter() - started > 1.2
+    commands = [args[:2] for args in launches_of(tmp_path)]
+    assert commands[0] == ["image", "inspect"]
+    assert commands.count(["image", "push"]) == len(names)
+
+
+def test_blocking_pool_tasks_are_timed_from_their_own_launch(
+    client: DockerClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    set_delays(monkeypatch, {"image push": 0.5})
+    names = push_names(12)
+
+    started = perf_counter()
+    client.image.push(names, quiet=True, timeout=1.0)
+
+    assert perf_counter() - started > 1.0
+    assert [args[:2] for args in launches_of(tmp_path)].count(["image", "push"]) == 12
+
+
+def test_lazy_stream_children_are_timed_from_their_own_launch(
+    client: DockerClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    set_delays(monkeypatch, {"image push": 0.5})
+    names = push_names(12)
+
+    stream = client.image.push(names, stream_logs=True, timeout=1.0)
+    assert stream is not None
+    sleep(1.2)
+    assert [args[:2] for args in launches_of(tmp_path)] == [["image", "inspect"]]
+
+    started = perf_counter()
+    with stream:
+        records = list(stream)
+
+    assert perf_counter() - started > 1.0
+    assert sorted(name for name, _ in records) == sorted(names)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_every_pool_and_queued_child_expires_and_is_reaped(
+    client: DockerClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    monkeypatch.setenv("PYWHALES_TEST_BLOCK", "1")
+    names = push_names(6)
+
+    with pytest.raises(DockerTimeout) as expired:
+        result = client.image.push(
+            names, quiet=not stream, stream_logs=stream, timeout=1.0
+        )
+        if stream:
+            assert result is not None
+            with result:
+                list(result)
+
+    assert "push" in expired.value.docker_command
+    assert_reaped(tmp_path, ["image", "push"])
+
+
+def test_first_multi_image_failure_cancels_siblings_without_a_timeout(
+    client: DockerClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PYWHALES_TEST_BLOCK", "1")
+    monkeypatch.setenv("PYWHALES_TEST_FAIL_ON", "image push img0")
+
+    stream = client.image.push(push_names(6), stream_logs=True, timeout=30)
+    assert stream is not None
+    with pytest.raises(DockerException) as failed, stream:
+        list(stream)
+
+    assert not isinstance(failed.value, DockerTimeout)
+    assert failed.value.stderr is not None
+    assert "induced failure" in failed.value.stderr
+    assert_reaped(tmp_path, ["image", "push"])
+
+
+type DaemonWait = Literal[
+    "service_create",
+    "service_update",
+    "service_rollback",
+    "service_scale",
+    "handle_update",
+    "handle_scale",
+    "swarm_ca",
+    "swarm_join",
+    "stack_deploy",
+    "plugin_install",
+    "plugin_upgrade",
+    "handle_upgrade",
+]
+DAEMON_WAITS: tuple[DaemonWait, ...] = (
+    "service_create",
+    "service_update",
+    "service_rollback",
+    "service_scale",
+    "handle_update",
+    "handle_scale",
+    "swarm_ca",
+    "swarm_join",
+    "stack_deploy",
+    "plugin_install",
+    "plugin_upgrade",
+    "handle_upgrade",
+)
+DAEMON_PREFIX: dict[DaemonWait, list[str]] = {
+    "service_create": ["service", "create"],
+    "service_update": ["service", "update"],
+    "service_rollback": ["service", "rollback"],
+    "service_scale": ["service", "scale"],
+    "handle_update": ["service", "update"],
+    "handle_scale": ["service", "scale"],
+    "swarm_ca": ["swarm", "ca", "--rotate"],
+    "swarm_join": ["swarm", "join"],
+    "stack_deploy": ["stack", "deploy"],
+    "plugin_install": ["plugin", "install"],
+    "plugin_upgrade": ["plugin", "upgrade"],
+    "handle_upgrade": ["plugin", "upgrade"],
+}
+
+
+def wait_on_daemon(
+    client: DockerClient, operation: DaemonWait, *, timeout: float | None
+) -> object:
+    """Dispatch a Swarm or plugin call that can wait on the daemon.
+
+    Args:
+        client: Client configured to run the local Python driver.
+        operation: Entry point, CLI method or resource handle, to exercise.
+        timeout: Local deadline in seconds, or None to inherit the client default.
+
+    Returns:
+        The call's result: a service or plugin handle, a stack, certificate
+        text for a nondetached CA call, or None.
+
+    Raises:
+        ValueError: If timeout is not a finite positive duration or None.
+        DockerTimeout: If the selected CLI launch exceeds its deadline.
+    """
+    service = Service(client.client_config, "workload", is_immutable_id=True)
+    plugin = Plugin(client.client_config, "plug", is_immutable_id=True)
+    match operation:
+        case "service_create":
+            return client.service.create("app", None, timeout=timeout)
+        case "service_update":
+            return client.service.update("workload", timeout=timeout)
+        case "service_rollback":
+            return client.service.rollback("workload", timeout=timeout)
+        case "service_scale":
+            return client.service.scale({"workload": 2}, timeout=timeout)
+        case "handle_update":
+            return service.update(timeout=timeout)
+        case "handle_scale":
+            return service.scale(2, timeout=timeout)
+        case "swarm_ca":
+            return client.swarm.ca(rotate=True, timeout=timeout)
+        case "swarm_join":
+            return client.swarm.join("10.0.0.1:2377", timeout=timeout)
+        case "stack_deploy":
+            return client.stack.deploy("stack", timeout=timeout)
+        case "plugin_install":
+            return client.plugin.install("plug", timeout=timeout)
+        case "plugin_upgrade":
+            return client.plugin.upgrade("plug", timeout=timeout)
+        case "handle_upgrade":
+            return plugin.upgrade(timeout=timeout)
+        case unreachable:
+            assert_never(unreachable)
+
+
+@pytest.mark.parametrize("timeout", BAD_TIMEOUTS)
+@pytest.mark.parametrize("operation", DAEMON_WAITS)
+def test_invalid_daemon_wait_timeout_precedes_every_launch(
+    client: DockerClient, tmp_path: Path, operation: DaemonWait, timeout: float
+) -> None:
+    with pytest.raises(ValueError):
+        wait_on_daemon(client, operation, timeout=timeout)
+
+    assert launches_of(tmp_path) == []
+
+
+@pytest.mark.parametrize("timeout", [None, 5.0])
+@pytest.mark.parametrize("operation", DAEMON_WAITS)
+def test_daemon_wait_deadlines_preserve_results(
+    client: DockerClient, tmp_path: Path, operation: DaemonWait, timeout: float | None
+) -> None:
+    result = wait_on_daemon(client, operation, timeout=timeout)
+
+    match operation:
+        case "service_create":
+            assert isinstance(result, Service)
+            assert result.id == "container-id"
+        case "stack_deploy":
+            assert str(result) == "stack"
+        case "plugin_install":
+            assert isinstance(result, Plugin)
+            assert result.id == "plugin-id"
+        case "swarm_ca":
+            assert result == "container-id"
+        case (
+            "service_update"
+            | "service_rollback"
+            | "service_scale"
+            | "handle_update"
+            | "handle_scale"
+            | "swarm_join"
+            | "plugin_upgrade"
+            | "handle_upgrade"
+        ):
+            assert result is None
+        case unreachable:
+            assert_never(unreachable)
+    assert DAEMON_PREFIX[operation][:2] in [args[:2] for args in launches_of(tmp_path)]
+    assert not any("timeout" in arg for args in launches_of(tmp_path) for arg in args)
+
+
+@pytest.mark.parametrize(("timeout", "default"), COPY_BUDGETS)
+@pytest.mark.parametrize("operation", DAEMON_WAITS)
+def test_daemon_wait_timeout_reaps_local_child(
+    client: DockerClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: DaemonWait,
+    timeout: float | None,
+    default: float,
+) -> None:
+    prefix = DAEMON_PREFIX[operation]
+    copy_timeouts(client, monkeypatch, default, " ".join(prefix))
+
+    with pytest.raises(DockerTimeout) as expired:
+        wait_on_daemon(client, operation, timeout=timeout)
+
+    assert all(word in expired.value.docker_command for word in prefix)
+    assert launches_of(tmp_path)[-1][: len(prefix)] == prefix
+    assert_reaped(tmp_path, prefix)
+    assert client.client_config.default_timeout == default
+
+
+def test_service_scale_inspect_preflight_is_outside_the_explicit_budget(
+    client: DockerClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    set_delays(monkeypatch, {"service inspect": 1.2})
+    service = Service(client.client_config, "workload", is_immutable_id=True)
+
+    started = perf_counter()
+    service.scale(2, timeout=0.8)
+
+    assert perf_counter() - started > 1.2
+    assert [args[:2] for args in launches_of(tmp_path)] == [
+        ["service", "inspect"],
+        ["service", "scale"],
+    ]
+
+
+def test_swarm_ca_gives_each_launch_a_fresh_budget(
+    client: DockerClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    set_delays(monkeypatch, {"swarm ca": 0.7})
+
+    started = perf_counter()
+    result = client.swarm.ca(rotate=True, timeout=1.3)
+
+    assert perf_counter() - started > 1.4
+    assert result == "container-id"
+    assert launches_of(tmp_path) == [["swarm", "ca", "--rotate"], ["swarm", "ca"]]
+
+
+def test_swarm_ca_first_expiry_prevents_the_certificate_read(
+    client: DockerClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PYWHALES_TEST_BLOCK", "1")
+
+    with pytest.raises(DockerTimeout):
+        client.swarm.ca(rotate=True, timeout=0.6)
+
+    assert launches_of(tmp_path) == [["swarm", "ca", "--rotate"]]
+    assert_reaped(tmp_path, ["swarm", "ca"])
+
+
+def test_swarm_ca_detached_runs_one_bounded_launch(
+    client: DockerClient, tmp_path: Path
+) -> None:
+    assert client.swarm.ca(rotate=True, detach=True, timeout=5) is None
+
+    assert launches_of(tmp_path) == [["swarm", "ca", "--detach", "--rotate"]]
+
+
+def test_stack_deploy_invalid_timeout_precedes_env_file_reads(
+    client: DockerClient, tmp_path: Path
+) -> None:
+    missing = tmp_path / "missing.env"
+
+    with pytest.raises(ValueError):
+        client.stack.deploy("stack", env_files=[missing], timeout=0)
+    with pytest.raises(FileNotFoundError):
+        client.stack.deploy("stack", env_files=[missing], timeout=5)
+
+    assert launches_of(tmp_path) == []
+
+
+def test_plugin_install_inspect_is_outside_the_explicit_budget(
+    client: DockerClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    set_delays(monkeypatch, {"plugin inspect": 1.2})
+
+    started = perf_counter()
+    plugin = client.plugin.install("plug", alias="local", timeout=0.6)
+
+    assert perf_counter() - started > 1.2
+    assert plugin.id == "plugin-id"
+    assert [args[:2] for args in launches_of(tmp_path)] == [
+        ["plugin", "install"],
+        ["plugin", "inspect"],
+    ]

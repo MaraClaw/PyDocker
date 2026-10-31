@@ -36,14 +36,14 @@ task authorizes, with existing registry authentication. Multi-platform builds
 need a capable builder/exporter; don't assume the local image store can load
 every multi-platform result.
 
-Both `build` and `bake` accept a keyword-only `timeout` in positive finite
+`build`, `bake`, and `prune` accept a keyword-only `timeout` in positive finite
 seconds, replacing the client's `default_timeout` for that one local CLI
 launch; `None` inherits it. Builder inspection before launch and image
 inspection after completion fall outside this budget, and each of `bake`'s
 build/follow-up-config calls gets its own fresh budget rather than one shared
 deadline. A streaming deadline keeps advancing before and between iterations.
 Expiry raises `DockerTimeout` without guaranteeing that the daemon-side build
-stops.
+stops. See [Prune Build Cache](#prune-build-cache) for `prune`.
 
 ## Return Contracts
 
@@ -77,15 +77,18 @@ with docker.buildx.build(
     load=True,
     progress="plain",
     stream_logs=True,
+    timeout=1800,
 ) as lines:
     for line in lines:
         print(line, end="")
 ```
 
 These items are already `str`, unlike container and Compose `(source, bytes)`
-streams. Drain the stream to detect CLI failure and use its context manager for
-early-exit cleanup. `stream_logs=True` rejects `progress=False`, `"tty"`,
-`"none"`, and `"quiet"`; use `"plain"` for readable automation logs.
+streams. The `timeout` bounds only the local build CLI, and its clock keeps
+running while you aren't iterating. Drain the stream to detect CLI failure and
+use its context manager for early-exit cleanup. `stream_logs=True` rejects
+`progress=False`, `"tty"`, `"none"`, and `"quiet"`; use `"plain"` for readable
+automation logs.
 
 ## Check Without Building an Image
 
@@ -101,3 +104,47 @@ These frontend methods require Buildx support for `--call`; they aren't a
 generic offline or side-effect-free sandbox. Check installed signatures and
 plugin support before using newer options such as `no_cache_filter` and
 `annotations`.
+
+## Prune Build Cache
+
+`docker.buildx.prune(all=False, filters=..., stream_logs=False, *, timeout=None)`
+removes build cache on the current builder. It always passes `--force`, which
+suppresses Docker's confirmation prompt, so require explicit deletion
+authorization; request `all=True` or broad filters only when the task asks for
+them. `filters` is a mapping such as
+`{"until": "24h"}` or an iterable of `(key, value)` string pairs. A string,
+bytes, or an iterable holding anything but string pairs raises `TypeError`
+before the executable is looked up.
+
+A blocking call returns `None` after the CLI completes. `stream_logs=True`
+returns an owned `MappedProcessStream[str]` of decoded text, with the CLI
+started during the call: drain it or use its context manager on early exit.
+Closing it reaps the local CLI and doesn't undo cache removal.
+
+`timeout` is a local deadline only: positive finite seconds from the CLI's
+launch, replacing the client default, with `None` inheriting it; it is checked
+before `filters` is read. It is never forwarded as Buildx's own
+`prune --timeout` flag, so it doesn't change what Buildx removes. A streamed
+deadline keeps advancing while consumption pauses. Expiry kills and reaps the
+local CLI and raises `DockerTimeout` without undoing cache removal.
+
+## Builders In Inventory Captures
+
+Builders are a supported kind for `capture_inventory()` and `bulk_reload()`.
+Pass `InventoryRequest(kind="builder", references=(name,), client_config=...)`
+or an existing `Builder` handle. Limits, deadlines, and cancellation come from
+`observation()`; see
+[Observation budgets and convergence](observation-and-convergence.md).
+
+- References are exact builder names, not IDs, and no name reaches the command
+  line. Buildx has no batch inspect, so each client configuration group runs
+  one `buildx ls --format "{{json . }}"` listing and returns one detached
+  snapshot per requested name, in request order, duplicates included.
+- That listing is parsed strictly. Lines identical byte for byte collapse,
+  because node rows repeat them. A non-builder line, a null or empty name, or
+  two different lines under one name raises `ParsingError` before any snapshot
+  returns, as does a requested name missing from the listing. Names appear in
+  that error only with `raw_diagnostics=True`.
+- Public `docker.buildx.list()` is unchanged and separate: it keeps its lenient
+  parsing, existing dedupe, and unspecified order. Don't expect the strict
+  contract from it, and don't rely on its ordering.

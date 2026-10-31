@@ -4,10 +4,17 @@
 
 PyWhales is a typed Python wrapper around the external Docker CLI, not a Docker HTTP SDK.
 Python >=3.14.10 and Pydantic 2 are required; `.python-version` pins 3.14.10.
-The public API exports `DockerClient`, resource classes, and a shared `docker` client from `pywhales/__init__.py`.
+The public API exports `DockerClient`, resource classes, a shared `docker` client, and the inventory and observation entry points from `pywhales/__init__.py`.
 `DockerClient` wires 18 command groups to one `ClientConfig` and exposes convenience aliases such as `run`, `ps`, and `build`.
 Importing the package or constructing a client doesn't check CLI, daemon, or plugin availability.
 The installed `pywhales` console entry point only prints a notice; it isn't a Docker command runner.
+
+Bounded observation sits on top of the command groups:
+
+- `observation()` nests explicit limits, deadlines, and cancellation over launches. `capture_inventory()` returns a typed `InventorySnapshot` of detached inspect records for 12 kinds: container, image, network, volume, node, service, config, secret, task, plugin, context, and builder.
+- `pywhales.convergence.wait()` watches a captured Swarm service generation, a fixed stack membership, or a Compose project's selected services. It ends in success, failure, deadline, or cancellation and never mutates anything.
+- `admission`, `convergence`, `profiles`, `reconciliation`, and `storage` are opt-in application packages. Import them explicitly: `pywhales/__init__.py` doesn't re-export them, and direct `DockerClient` calls stay permissive without them.
+- `telemetry` is optional payload-free launch records with no monitoring dependency or worker.
 
 ## Structure And Navigation
 
@@ -18,15 +25,27 @@ The installed `pywhales` console entry point only prints a notice; it isn't a Do
 | `pywhales/_execution_policy.py` | Originating-config carrier and per-launch execution policy |
 | `pywhales/_inspect_validation.py` | Context, plugin, and task batch-response validation |
 | `pywhales/_bulk_reload.py` | Grouped inspection and staged resource-cache publication |
+| `pywhales/inventory.py`, `pywhales/_inventory_*.py` | Inventory kinds and value types, lazy capture engine, kind dispatch, ordered staged inspection |
+| `pywhales/_observation.py` | Context-local limits, deadlines, and cancellation checkpoints |
+| `pywhales/_bounded_capture.py`, `pywhales/_scoped_launch.py`, `pywhales/_launch_limits.py` | Bounded interruptible capture and launch preflight; related helpers are `_capture_pipes.py`, `_readiness.py`, `_archive_deadline.py`, `_stdin_pump.py`, `_environment.py` |
 | `pywhales/utils.py` | Subprocess execution, common conversions, Pydantic model base |
 | `pywhales/_process_stream.py` | Process-backed streaming and lifecycle ownership |
 | `pywhales/_stream_buffer.py` | Thread-safe output buffering and byte accounting |
+| `pywhales/telemetry/` | Launch and completion records plus the bounded exporter; no child guide, covered by `pywhales/AGENTS.md` |
+| `pywhales/convergence/` | Service and Compose convergence: `_wait.py` entry points, `_service.py`, `_compose.py`, `_wire.py`, `_types.py` |
+| `pywhales/admission/` | Application-owned synchronous admission: class limits, saturation policy, queueing, admitted streams |
+| `pywhales/profiles/` | Application create policy: `plan_create` builds a plan, `create_from_plan` applies it |
+| `pywhales/reconciliation/` | Desired-state controller, operation journal, adapters; only an in-memory store ships |
+| `pywhales/storage/` | Non-destructive retention planning, immutable approvals, pressure assessment and gate |
 | `pywhales/components/` | Docker command groups; start with each group's `cli_wrapper.py` and `models.py` where present |
 | `tests/` | Pytest suite, shared runtime fixtures, static type contracts |
 | `docs/` | Editable templates, API-doc generation, MkDocs configuration |
-| `scripts/` | CI daemon setup, plugin installation, overhead benchmark |
+| `scripts/` | Contributor tooling, not installed APIs: CI provisioning, plugin installation, overhead benchmark |
+| `scripts/fleet_contract/` | Offline fleet contract: strict manifest, support, and result schemas, validators, non-qualifying reports (see its `README.md`) |
+| `scripts/fleet_harness/` | Fake-only offline capacity simulation and non-authorizing transport decisions built on the contract |
+| `scripts/delivery/` | Tested delivery chain run by CI: smoke, seal, publish, release, and Pages helpers |
 | `skills/pywhales/` | Consumer skill for using the installed library, not a contributor workflow |
-| `.github/workflows/` | Authoritative CI checks, docs build, package release jobs |
+| `.github/workflows/` | Authoritative CI checks, docs build, and the delivery chain from package build to release and Pages |
 | `pyproject.toml`, `uv.lock`, `.python-version` | Project/tool configuration, locked dependencies, interpreter pin |
 
 ## Code Map
@@ -39,14 +58,20 @@ The installed `pywhales` console entry point only prints a notice; it isn't a Do
 | `ReloadableObject` | `pywhales/client_config.py` | Resource identity and refreshed inspection data |
 | `DockerCamelModel` | `pywhales/utils.py` | Pydantic base mapping Python names to Docker JSON aliases |
 | `ProcessStream` | `pywhales/_process_stream.py` | Iterator owning a CLI process and streamed output |
+| `observation` | `pywhales/_observation.py` | Context manager nesting limits, deadline, and cancel tokens |
+| `capture_inventory` | `pywhales/inventory.py` | Public entry that delegates to `_inventory_capture.py` |
+| `wait` | `pywhales/convergence/_wait.py` | Convergence wait; `capture_service` and `capture_compose` build its targets |
+
+Editor reference searches also match ignored `build/lib/pywhales` copies and are capped. Prefer graph tracing, or exclude `build/`, `dist/`, and `.venv/`.
 
 ## Guide Scope
 
 - Read this root guide first, then the nearest child `AGENTS.md` for files you're changing.
-- Shared runtime internals belong in `pywhales/AGENTS.md`; command-group patterns belong in `pywhales/components/AGENTS.md`.
-- Buildx, Compose, container, and image work should also follow the guide in that component's directory.
-- Test selection and fixture details belong in `tests/AGENTS.md`.
-- Generation mechanics and documentation pipeline details belong in `docs/AGENTS.md`.
+- `pywhales/AGENTS.md`: shared runtime internals, observation and inventory capture, and telemetry.
+- `pywhales/components/AGENTS.md`: command-group patterns. Buildx, Compose, container, and image directories have their own guides.
+- Opt-in packages: `pywhales/admission/AGENTS.md`, `pywhales/convergence/AGENTS.md`, `pywhales/profiles/AGENTS.md`, `pywhales/reconciliation/AGENTS.md`, and `pywhales/storage/AGENTS.md`.
+- `scripts/AGENTS.md`: tooling and provisioning hazards. `scripts/delivery/AGENTS.md`: delivery chain and its scoped checks. Fleet contract commands are in `scripts/fleet_contract/README.md`.
+- `tests/AGENTS.md`: test selection and fixture details. `docs/AGENTS.md`: generation mechanics and the documentation pipeline.
 
 ## Commands From CI
 
@@ -65,24 +90,32 @@ The strict coverage command is an integration run, not a safe default for a work
 | Build documentation site | `uv run --locked mkdocs build --config-file docs/mkdocs.yml` |
 | Build source and wheel distributions | `uv build --no-sources --sdist --wheel` |
 
+After the build, CI runs `python -m scripts.delivery smoke`. The seal, prepare, confirm, release, and pages subcommands are privileged GitHub and PyPI steps; don't run them locally.
+
 ## Conventions And Checks
 
 - Follow [the Python docstring standard](docs/python-docstrings.md) for new or changed Python module, class, function, and method docstrings; do not rewrite unrelated docstrings.
 - Treat Ruff and ty settings in `pyproject.toml` as authoritative, not legacy `.flake8` or `.isort.cfg` files.
-- Ruff targets Python 3.14 and handles import sorting as well as linting and formatting.
+- Ruff targets Python 3.14 and handles import sorting as well as linting and formatting. Its checks cover `scripts/` too.
 - ty checks `pywhales`, `tests`, and `docs`; all rules are errors and warnings fail the check.
+- Root ty excludes `scripts/`, including `scripts/delivery`. Use the scoped ty commands in `scripts/delivery/AGENTS.md` and `scripts/fleet_contract/README.md`.
 - ty doesn't respect type-ignore suppression comments; fix types rather than adding those comments.
 - Static `assert_type` contracts in `tests/pywhales/test_type_contracts.py` and related files are checked by ty, not exercised by pytest.
 - Coverage is measured for `pywhales` with a 90% minimum; `coverage report` enforces it.
 - Keep dependency changes consistent with `uv.lock` and the interpreter pin; normal checks use `--locked`.
+- A version bump needs a matching `## <version>` section in `CHANGELOG.md`: the delivery seal reads it as the release notes and rejects a missing, empty, or duplicate section.
+- Public names of the opt-in packages come from each package's `__init__.py`; underscore modules are internal.
 - Follow existing CLI argument and return-type contracts; check convenience aliases when changing component APIs.
 
 ## Safety And Generated Files
 
 - The integration suite is destructive: use a disposable Docker daemon, not one holding valuable containers, images, volumes, or Swarm state.
-- Missing runtime support can skip tests locally; CI uses `--no-runtime-skip` to turn unavailable runtime checks into failures.
+- `--no-runtime-skip` only affects the session `docker_client` fixture in `tests/conftest.py`: a missing executable, failed version probe, or timeout fails instead of skipping. CI passes it, but it doesn't gate separately built or global clients, plugins, or the collection-time `compose.is_installed()` skip in `tests/pywhales/components/test_compose.py`, which skips independently. See `tests/AGENTS.md`.
 - `scripts/ci-setup.sh` calls `scripts/add-local-docker-registry.sh`, which overwrites `/etc/docker/daemon.json` and restarts Docker with sudo.
 - That setup also installs plugins; it's CI provisioning, not safe workstation setup. Don't run it casually.
+- `scripts/download-docker-plugins.sh` downloads checksum-pinned Linux amd64 plugins into `$DOCKER_CONFIG/cli-plugins` (default `~/.docker/cli-plugins`). Treat it as CI provisioning too.
+- Don't run publication, release, or deployment operations of `scripts.delivery` against the production repository. Local delivery tests use inert stubs.
+- `scripts/fleet_contract` and `scripts/fleet_harness` are offline: no Docker, daemon, or network. Their output never qualifies or authorizes a live run, so keep credentials and private endpoints out of their input files.
 - `PYWHALES_DEBUG=1` enables execution diagnostics that withhold command, environment, and captured-output values by default.
   `DockerClient(raw_diagnostics=True)` opts that client into raw diagnostics; see `pywhales/AGENTS.md` for the confidentiality boundary.
 - Documentation generation is Docker-free by default. `--live-examples` explicitly opts into real Docker operations.

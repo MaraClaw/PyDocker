@@ -5,6 +5,7 @@ from typing import assert_never
 
 from pywhales._bulk_reload import _inspect_group
 from pywhales.client_config import ClientConfig
+from pywhales.components.buildx.cli_wrapper import Builder
 from pywhales.components.config.cli_wrapper import Config
 from pywhales.components.container.cli_wrapper import Container
 from pywhales.components.context.cli_wrapper import Context
@@ -43,6 +44,8 @@ def resource_kind(resource: InventoryResource) -> InventoryKind:
             return "plugin"
         case Context():
             return "context"
+        case Builder():
+            return "builder"
         case unreachable:
             assert_never(unreachable)
 
@@ -73,6 +76,8 @@ def make_resource(
             return Plugin(config, reference, is_immutable_id=True)
         case "context":
             return Context(config, reference, is_immutable_id=True)
+        case "builder":
+            return Builder(config, reference, is_immutable_id=True)
         case unreachable:
             assert_never(unreachable)
 

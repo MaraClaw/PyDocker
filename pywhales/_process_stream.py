@@ -30,11 +30,12 @@ from pywhales.exceptions import (
     DockerException,
     DockerTimeout,
     ObservationCancelled,
+    ObservationLimitError,
     ObservationTimeout,
     get_docker_exception_type,
 )
 from pywhales.telemetry import Outcome
-from pywhales.telemetry._lifecycle import ExecutionTelemetry
+from pywhales.telemetry._lifecycle import ExecutionTelemetry, outcome_of
 
 if TYPE_CHECKING:
     from pywhales._observation import ObservationState
@@ -56,6 +57,12 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
     killed and reaped and iteration raises ``ObservationTimeout`` or
     ``ObservationCancelled``. A command deadline wins only when it is strictly
     earlier than the scope's, and a cancel token wins over both.
+
+    The snapshot also carries the scope's stream accounts, whether or not it has
+    a deadline or token. Each pipe read charges its stdout or stderr bytes to
+    every enclosing account; the first read past a limit stops the stream like a
+    scope stop, killing and reaping the local CLI, and iteration raises
+    ``ObservationLimitError`` (reason ``total_stream``) once.
 
     Attributes:
         stdin: Writable child input pipe when launch requested one; otherwise
@@ -88,8 +95,8 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
                 regardless and must be treated as confidential.
             telemetry: Optional launch state completed by consumption or closure.
             observation: Scope snapshotted at launch, or ``None`` outside one. Its
-                deadline and cancel tokens are enforced for the stream's whole
-                life, whether or not the scope is still active.
+                deadline, cancel tokens, and stream accounts are enforced for the
+                stream's whole life, whether or not the scope is still active.
         """
         self._process = process
         self._full_cmd = full_cmd
@@ -101,11 +108,12 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         self._telemetry_outcome: Outcome | None = None
         self._observation = (
             observation
-            if observation is not None
-            and (observation.deadline is not None or observation.cancel_tokens)
+            if observation is not None and observation.binds_launches
             else None
         )
-        self._scope_error: ObservationCancelled | ObservationTimeout | None = None
+        self._scope_error: (
+            ObservationCancelled | ObservationTimeout | ObservationLimitError | None
+        ) = None
         self._read_bytes = {"stdout": 0, "stderr": 0}
         self._queue = StreamBuffer(buffer_bytes)
         self._released = Event()
@@ -228,10 +236,12 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
                         with self._queue.condition:
                             if self._stop.is_set():
                                 return
-                            chunk = os.read(pipe.fileno(), 65536)
+                            chunk = os.read(pipe.fileno(), self._read_size())
                             if self._telemetry is not None:
                                 self._read_bytes[name] += len(chunk)
                             offset = 0
+                            if self._charge_stream(len(chunk)):
+                                return
                     except BlockingIOError:
                         wait_ready(pipe.fileno(), latch=self._stop)
                         continue
@@ -277,6 +287,36 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
                 self._pending_bytes[name] = 0
                 self._live_readers -= 1
             self._queue.finish()
+
+    def _read_size(self) -> int:
+        """Return the next pipe read size, cut so a stream budget flags its overflow."""
+        scope = self._observation
+        return 65536 if scope is None else scope.stream_allowance(65536)
+
+    def _charge_stream(self, size: int) -> bool:
+        """Charge bytes just read from a pipe; the queue lock must be held.
+
+        An overflow is recorded as the scope error and stops the stream like any
+        scope stop, so the watchdog kills and reaps the child and delivery raises
+        it once. Nothing is raised on the reader thread.
+
+        Args:
+            size: Raw bytes the pipe read returned; zero at end of file.
+
+        Returns:
+            Whether the charge overflowed and stopped the stream.
+        """
+        scope = self._observation
+        if scope is None or not size:
+            return False
+        try:
+            scope.charge_stream(size)
+        except ObservationLimitError as error:
+            self._scope_error = error.with_traceback(None)
+            self._stop.set()
+            self._queue.close()
+            return True
+        return False
 
     def _publish(self, name: str, record: bytes) -> bool:
         """Publish a record while tracking bytes waiting for queue capacity.
@@ -408,6 +448,21 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         finally:
             self._released.set()
 
+    def _stop_outcome(self) -> Outcome | None:
+        """Return the outcome of the error delivery would raise next, if any.
+
+        The one rule behind terminal delivery and ``close()``. It follows the
+        order ``_raise_error`` delivers in: a launch deadline, then a scope stop,
+        then a reader or budget error. The queue lock must be held.
+        """
+        if self._expired:
+            return "timeout"
+        if self._scope_error is not None:
+            return outcome_of(type(self._scope_error))
+        if self._error is not None:
+            return outcome_of(type(self._error))
+        return None
+
     def _raise_error(self) -> None:
         """Wait for cleanup and deliver a recorded terminal error at most once.
 
@@ -415,23 +470,21 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
             DockerTimeout: If the launch deadline expired while the child ran.
             ObservationCancelled: If an observation token was set.
             ObservationTimeout: If the observation deadline expired.
+            ObservationLimitError: If a scope stream budget was exceeded.
             DockerException: If a subprocess failure was recorded.
             BufferError: If retained output exceeded an individual byte limit.
             OSError: If a pipe reader recorded an operating-system failure.
         """
         self._watchdog.join()
         with self._queue.condition:
+            if self._telemetry_outcome is None:
+                self._telemetry_outcome = self._stop_outcome()
             error = self._error
             self._error = None
             expired = self._expired
             self._expired = False
             scope_error = self._scope_error
             self._scope_error = None
-            if self._telemetry_outcome is None:
-                if expired or isinstance(scope_error, ObservationTimeout):
-                    self._telemetry_outcome = "timeout"
-                elif error is not None or scope_error is not None:
-                    self._telemetry_outcome = "failure"
         self._complete_telemetry()
         if expired:
             raise DockerTimeout(
@@ -474,6 +527,8 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
             DockerTimeout: If the running child exceeded its launch deadline.
             ObservationCancelled: If the launch-time observation was cancelled.
             ObservationTimeout: If the launch-time observation deadline expired.
+            ObservationLimitError: If the launch-time observation's stream budget
+                was exceeded, with reason ``total_stream``.
             BufferError: If a record or retained stderr exceeded its byte limit.
             OSError: If a pipe read failed.
         """
@@ -522,14 +577,7 @@ class ProcessStream(Iterator[tuple[str, bytes]]):
         with self._queue.condition:
             self._expire()
             if self._telemetry_outcome is None:
-                self._telemetry_outcome = (
-                    "timeout"
-                    if self._expired
-                    or isinstance(self._scope_error, ObservationTimeout)
-                    else "failure"
-                    if self._error is not None or self._scope_error is not None
-                    else "closed"
-                )
+                self._telemetry_outcome = self._stop_outcome() or "closed"
             self._closed = True
             self._stop.set()
             self._queue.close()

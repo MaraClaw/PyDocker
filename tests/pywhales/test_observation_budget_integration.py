@@ -1,8 +1,10 @@
 import json
 import subprocess
 import sys
+import threading
 import traceback
 from collections.abc import Mapping, Sequence
+from contextvars import copy_context
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -11,13 +13,14 @@ import pytest
 
 from pywhales import DockerClient
 from pywhales._observation import observation
+from pywhales._process_stream import ProcessStream
 from pywhales.client_config import ClientConfig, ParsingError, bulk_reload
 from pywhales.components.context.cli_wrapper import Context
 from pywhales.convergence import Failure, ServiceTarget, capture_service, wait
 from pywhales.exceptions import DockerException, ObservationLimitError
 from pywhales.inventory import InspectionPolicy, InventoryRequest, capture_inventory
 from pywhales.telemetry import CompletionRecord, TelemetryRecord
-from pywhales.utils import run
+from pywhales.utils import run, stream_stdout_and_stderr
 
 BASE = InspectionPolicy(max_references=1, max_argv_bytes=65536, max_response_bytes=1024)
 
@@ -40,7 +43,10 @@ def test_policy_reuse_has_fresh_root_budget() -> None:
             assert run([sys.executable, "-c", "print('x', end='')"]) == "x"
 
 
-@pytest.mark.parametrize("field", ["max_total_references", "max_total_response_bytes"])
+@pytest.mark.parametrize(
+    "field",
+    ["max_total_references", "max_total_response_bytes", "max_total_stream_bytes"],
+)
 @pytest.mark.parametrize("value", [True, False, 0, -1, 1.5, "1"])
 def test_optional_limits_reject_nonpositive_or_noninteger_values(
     field: str, value: object
@@ -245,3 +251,228 @@ def test_wait_cycles_share_budget(tmp_path: Path) -> None:
     assert isinstance(result.cause, ObservationLimitError)
     assert result.cause.reason == "total_response"
     assert (tmp_path / "calls").read_text().splitlines().count("service inspect s") == 3
+
+
+def budget(limit: int | None) -> InspectionPolicy:
+    return replace(BASE, max_total_stream_bytes=limit)
+
+
+def stream_of(code: str, *, pipe_stdin: bool = False) -> ProcessStream:
+    return stream_stdout_and_stderr([sys.executable, "-c", code], pipe_stdin=pipe_stdin)
+
+
+def assert_reaped(stream: ProcessStream) -> None:
+    """Check the local child was killed and reaped and every owned thread joined."""
+    assert stream._released.wait(3)
+    assert stream._process.returncode is not None
+    assert not stream._watchdog.is_alive()
+    assert all(not thread.is_alive() for thread in stream._threads)
+    assert all(
+        pipe is None or pipe.closed
+        for pipe in (stream._process.stdout, stream._process.stderr)
+    )
+
+
+STALLED_FLOOD = "import os,threading; os.write(1,b'x'*100); threading.Event().wait()"
+
+
+def test_stream_budget_allows_an_exact_total_across_stdout_and_stderr() -> None:
+    with observation(budget(8)) as state:
+        stream = stream_of("import os; os.write(1,b'abc\\n'); os.write(2,b'def\\n')")
+        with stream:
+            records = sorted(stream)
+
+    assert records == [("stderr", b"def\n"), ("stdout", b"abc\n")]
+    assert state.stream_accounts[0].consumed == 8
+
+
+def test_stream_budget_rejects_the_first_byte_past_it_and_reaps_the_child() -> None:
+    raised: list[threading.ExceptHookArgs] = []
+    with (
+        patch.object(threading, "excepthook", raised.append),
+        observation(budget(10)),
+    ):
+        stream = stream_of(STALLED_FLOOD)
+    try:
+        with pytest.raises(ObservationLimitError) as failure:
+            list(stream)
+        assert (failure.value.reason, failure.value.limit, failure.value.measured) == (
+            "total_stream",
+            10,
+            11,
+        )
+        assert_reaped(stream)
+        assert list(stream) == []
+        stream.close()
+    finally:
+        stream.close()
+    assert raised == []
+
+
+def test_stream_budget_counts_stderr_alone() -> None:
+    with observation(budget(5)):
+        stream = stream_of(
+            "import os,threading; os.write(2,b'errors'); threading.Event().wait()"
+        )
+    with stream, pytest.raises(ObservationLimitError):
+        list(stream)
+    assert_reaped(stream)
+
+
+def test_paused_stream_overflow_reaps_the_child_without_a_consumer() -> None:
+    with observation(budget(10)):
+        stream = stream_of(STALLED_FLOOD)
+    try:
+        assert_reaped(stream)
+
+        with pytest.raises(ObservationLimitError):
+            next(stream)
+        assert list(stream) == []
+    finally:
+        stream.close()
+
+
+def test_close_after_stream_overflow_leaves_the_error_for_one_delivery() -> None:
+    with observation(budget(10)):
+        stream = stream_of(STALLED_FLOOD)
+    assert stream._released.wait(3)
+
+    stream.close()
+    with pytest.raises(ObservationLimitError):
+        next(stream)
+
+    assert list(stream) == []
+    assert_reaped(stream)
+
+
+def test_context_exit_delivers_a_stream_overflow_once() -> None:
+    with observation(budget(10)):
+        stream = stream_of(STALLED_FLOOD)
+
+    with pytest.raises(ObservationLimitError), stream:
+        assert stream._released.wait(3)
+
+    assert list(stream) == []
+    assert_reaped(stream)
+
+
+def test_budget_only_scope_outlives_its_block_without_a_timer() -> None:
+    code = "import os; os.write(1,b'ab\\n'); input(); os.write(1,b'cdefgh\\n')"
+    with observation(budget(4)) as state:
+        stream = stream_of(code, pipe_stdin=True)
+    try:
+        assert next(stream) == ("stdout", b"ab\n")
+        assert stream._observation is state
+        assert stream._wake_in() is None
+
+        assert stream.stdin is not None
+        stream.stdin.write(b"\n")
+        stream.stdin.flush()
+        with pytest.raises(ObservationLimitError) as failure:
+            list(stream)
+
+        assert (failure.value.limit, failure.value.measured) == (4, 5)
+        assert_reaped(stream)
+    finally:
+        stream.close()
+
+
+def test_stream_without_a_total_keeps_no_scope_and_is_not_limited() -> None:
+    with observation(budget(None)):
+        stream = stream_of("import os; os.write(1,b'x'*200000)")
+    with stream:
+        assert sum(len(payload) for _, payload in stream) == 200000
+    assert stream._observation is None
+
+
+def test_nested_scope_cannot_widen_an_outer_stream_budget() -> None:
+    with observation(budget(10)), observation(budget(100)) as inner:
+        stream = stream_of(STALLED_FLOOD)
+        with stream, pytest.raises(ObservationLimitError) as failure:
+            list(stream)
+
+    assert (failure.value.limit, failure.value.measured) == (10, 11)
+    assert [account.consumed for account in inner.stream_accounts] == [11, 11]
+
+
+def test_tighter_inner_overflow_still_charges_the_outer_budget() -> None:
+    with observation(budget(100)), observation(budget(5)) as inner:
+        stream = stream_of(STALLED_FLOOD)
+        with stream, pytest.raises(ObservationLimitError) as failure:
+            list(stream)
+
+    assert (failure.value.limit, failure.value.measured) == (5, 6)
+    assert [account.consumed for account in inner.stream_accounts] == [6, 6]
+
+
+def test_sibling_streams_share_the_enclosing_account() -> None:
+    code = "import os; os.write(1,b'abcde\\n')"
+    with observation(budget(10)):
+        with observation(BASE), stream_of(code) as first:
+            assert list(first) == [("stdout", b"abcde\n")]
+        with (
+            observation(BASE),
+            stream_of(code) as second,
+            pytest.raises(ObservationLimitError) as failure,
+        ):
+            list(second)
+
+    assert (failure.value.limit, failure.value.measured) == (10, 11)
+
+
+def test_concurrent_streams_charge_one_shared_account() -> None:
+    workers, size = 4, 4
+    results: list[int | ObservationLimitError] = []
+
+    def follow() -> None:
+        stream = stream_of("import os; os.write(1,b'abc\\n')")
+        try:
+            with stream:
+                results.append(sum(len(payload) for _, payload in stream))
+        except ObservationLimitError as error:
+            results.append(error)
+
+    with observation(budget(workers * size - 1)) as state:
+        threads = [
+            threading.Thread(target=copy_context().run, args=(follow,))
+            for _ in range(workers)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+            assert not thread.is_alive()
+
+    errors = [item for item in results if isinstance(item, ObservationLimitError)]
+    delivered = [item for item in results if isinstance(item, int)]
+    assert len(errors) == 1
+    assert sum(delivered) == (workers - 1) * size
+    assert state.stream_accounts[0].consumed == workers * size
+
+
+def test_captured_output_is_never_charged_to_the_stream_budget() -> None:
+    with observation(replace(budget(1), max_response_bytes=64)) as state:
+        assert run([sys.executable, "-c", "print('x'*20, end='')"]) == "x" * 20
+
+    assert state.stream_accounts[0].consumed == 0
+
+
+def test_stream_output_is_never_charged_to_the_response_budget() -> None:
+    with observation(replace(BASE, max_total_response_bytes=1)) as state:
+        stream = stream_of("print('x'*20)")
+        with stream:
+            assert list(stream) == [("stdout", b"x" * 20 + b"\n")]
+
+    assert state.response_accounts[0].consumed == 0
+
+
+def test_inventory_capture_is_never_charged_to_the_stream_budget() -> None:
+    config = ClientConfig(
+        _client_call_with_path=[sys.executable, "-c", 'print(\'[ {"Name":"x"} ]\')']
+    )
+    request = InventoryRequest(kind="context", references=("x",), client_config=config)
+    with observation(budget(1)) as state:
+        snapshot = capture_inventory([request], policy=BASE)
+
+    assert [item.id for item in snapshot.records] == ["x"]
+    assert state.stream_accounts[0].consumed == 0

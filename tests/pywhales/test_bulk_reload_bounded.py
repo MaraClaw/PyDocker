@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from pywhales import (
+    Builder,
     Context,
     InspectionPolicy,
     ObservationCancelled,
@@ -200,3 +201,74 @@ def test_response_limit_preserves_caches_after_earlier_chunk_succeeds() -> None:
         (resource._inspect_result, resource._last_refreshed_time)
         for resource in resources
     ] == before
+
+
+def _listing_config(padding: int) -> ClientConfig:
+    code = f'import json; print(json.dumps({{"Name": "b", "Driver": "x" * {padding}}}))'
+    return ClientConfig(_client_call_with_path=[sys.executable, "-c", code])
+
+
+def test_builder_bounded_reload_runs_one_listing_without_names_in_argv() -> None:
+    code = "import json,sys; print(json.dumps({'Name': 'b', 'Driver': ' '.join(sys.argv[1:])}))"
+    config = ClientConfig(_client_call_with_path=[sys.executable, "-c", code])
+    builders = [Builder(config, "b", is_immutable_id=True) for _ in range(3)]
+    policy = InspectionPolicy(
+        max_references=1, max_argv_bytes=10000, max_response_bytes=10000
+    )
+
+    bulk_reload([*builders, builders[0]], policy=policy)
+
+    drivers = [
+        builder._inspect_result.driver
+        for builder in builders
+        if builder._inspect_result
+    ]
+    assert len(drivers) == 3 and len(set(drivers)) == 1
+    assert drivers[0] == "buildx ls --format {{json . }}"
+
+
+def test_builder_listing_over_response_limit_preserves_caches() -> None:
+    config = _listing_config(5000)
+    builder = Builder(config, "b", is_immutable_id=True)
+    context = Context(
+        ClientConfig(_client_call_with_path=["docker-test"]), "c", is_immutable_id=True
+    )
+    policy = InspectionPolicy(
+        max_references=5, max_argv_bytes=10000, max_response_bytes=200
+    )
+    before = [(r._inspect_result, r._last_refreshed_time) for r in (builder, context)]
+
+    with pytest.raises(ObservationLimitError):
+        bulk_reload([builder, context], policy=policy)
+
+    assert [
+        (r._inspect_result, r._last_refreshed_time) for r in (builder, context)
+    ] == before
+
+
+def test_builder_listings_count_against_total_response_budget() -> None:
+    first_config = _listing_config(150)
+    second_config = _listing_config(150)
+    builders = [
+        Builder(first_config, "b", is_immutable_id=True),
+        Builder(second_config, "b", is_immutable_id=True),
+    ]
+    each = InspectionPolicy(
+        max_references=5, max_argv_bytes=10000, max_response_bytes=400
+    )
+    total = InspectionPolicy(
+        max_references=5,
+        max_argv_bytes=10000,
+        max_response_bytes=400,
+        max_total_response_bytes=300,
+    )
+
+    bulk_reload(builders, policy=each)
+    assert all(builder._inspect_result is not None for builder in builders)
+    fresh = [
+        Builder(first_config, "b", is_immutable_id=True),
+        Builder(second_config, "b", is_immutable_id=True),
+    ]
+    with pytest.raises(ObservationLimitError):
+        bulk_reload(fresh, policy=total)
+    assert all(builder._inspect_result is None for builder in fresh)

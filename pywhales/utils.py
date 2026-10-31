@@ -41,7 +41,7 @@ from pywhales._process_stream import ProcessStream as ProcessStream
 from pywhales._stdin_pump import StdinPump
 from pywhales.exceptions import DockerException, DockerTimeout, ObservationLimitError
 from pywhales.exceptions import get_docker_exception_type as get_docker_exception_type
-from pywhales.telemetry._lifecycle import ExecutionTelemetry
+from pywhales.telemetry._lifecycle import ExecutionTelemetry, outcome_of
 
 PROJECT_ROOT = Path(__file__).parents[1]
 
@@ -652,8 +652,8 @@ def _start_process(
             telemetry=telemetry if policy.telemetry_observer is not None else None,
             observation=observation,
         )
-    except BaseException:
-        telemetry.finish("failure")
+    except BaseException as error:
+        telemetry.finish(outcome_of(type(error)))
         raise
 
 
@@ -680,7 +680,11 @@ def stream_stdout_and_stderr(
     scope ends first, the local CLI is killed and reaped and iteration raises
     ``ObservationTimeout`` or ``ObservationCancelled``; a per-call ``timeout``
     that is strictly earlier than the scope deadline still raises
-    ``DockerTimeout``. Response-byte accounting does not cover stream payloads.
+    ``DockerTimeout``. Response-byte accounting does not cover stream payloads,
+    but the scope's ``max_total_stream_bytes`` does: stdout and stderr bytes are
+    charged as the pipe readers pull them, and the first read that overflows any
+    enclosing account kills and reaps the local CLI, then raises
+    ``ObservationLimitError`` with reason ``total_stream`` once.
 
     Args:
         full_cmd: Executable and arguments; an originating policy carrier is
@@ -708,8 +712,9 @@ def stream_stdout_and_stderr(
         ValueError: Before launch if timeout or the selected budget is invalid;
             booleans are rejected.
         OSError: If process launch fails. Later read errors, BufferError,
-            DockerException, DockerTimeout, ObservationTimeout, and
-            ObservationCancelled are delivered by the stream.
+            DockerException, DockerTimeout, ObservationTimeout,
+            ObservationCancelled, and a ``total_stream`` ObservationLimitError
+            are delivered by the stream.
         ObservationCancelled: Before launch if an active observation was cancelled.
         ObservationTimeout: Before launch if an active observation has expired.
         ObservationLimitError: Before launch if an active observation rejects the

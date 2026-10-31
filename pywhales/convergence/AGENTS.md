@@ -31,7 +31,12 @@ Read-only observation of a captured Swarm service generation, a fixed stack, or 
 ## Compose Evaluation
 
 - Capture lists with `compose ps --all --quiet`, so stopped containers count, and skips containers labelled `com.docker.compose.oneoff=True`, in capture and every cycle. A service with no containers or mixed hashes is `unsupported`; a missing hash or a container outside the selection is `malformed`. A dry-run client raises `ValueError` at capture and is `unsupported` in `check_compose`.
-- `check_compose` re-lists each cycle. A changed ID set, service label, or config hash, or a vanished container, is `superseded`. Ready means `running`, not restarting, not paused, and `healthy` whenever a healthcheck is configured; a missing Health block blocks. An exited-0 one-shot also blocks, so it must stay out of the selection.
+- `completion_services=()` is a tuple of distinct names, a subset of the nonempty distinct selected `services` tuple. Validate before launch; capture fixes the designation with the container membership and hashes.
+- `check_compose` re-lists each cycle. A changed ID set, service label, or config hash, or a vanished container, is `superseded`, including for completion services.
+- Long-running services need `running`, not restarting or paused, and `healthy` when a healthcheck is configured; missing Health blocks. Unmarked exited-0 one-shots still block.
+- Every captured completion container must be `exited`, exit code 0, and not restarting; health is not its readiness condition. A non-restarting nonzero exit returns cause-free `Failure("completion_failed")`; created, running or restarting containers remain pending.
+- Required `State.ExitCode` is a strict integer: missing or malformed values yield cause-free `malformed`. Do not default a missing code to success.
+- `unfinished_completion_containers` counts affected **services**, once per service with any unfinished completion container. Include it in `DeadlineDetail.__post_init__`'s bounds tuple; it cannot exceed `captured_services`.
 - `wait_compose` re-runs the check after the first all-clear and succeeds only if that final pass is clear too. `_pause` sleeps in `SLEEP_SLICE` (0.05 s) steps and checks the observation each time.
 - Compose turns `ValidationError` and `ParsingError` into `malformed` with no cause. The Swarm path keeps `observation` with its cause. Keep that split.
 
@@ -41,6 +46,8 @@ Read-only observation of a captured Swarm service generation, a fixed stack, or 
 
 - Tests swap `time` in `_wait`, `_compose`, and `pywhales._observation`, patch `_wait.check_service`, and spy on `_wire.run`. Keep those module-level call sites or update the tests.
 - Hung-child tests assert reaping, so cancellation and deadline paths must still kill the local CLI.
+- Completion tests include `test_compose_mixed_selection_succeeds_when_completion_container_exited_zero`, `test_compose_completion_nonzero_exit_fails_immediately_without_payload`, and `test_compose_unfinished_counter_is_per_service_and_joins_other_blockers`.
+- `test_compose_completion_without_a_usable_exit_code_is_malformed` and `test_compose_completion_success_needs_the_final_pass_to_finish_too` guard strict wire validation and the second recheck.
 
 ```bash
 uv run --locked pytest tests/pywhales/test_convergence.py -q -k compose

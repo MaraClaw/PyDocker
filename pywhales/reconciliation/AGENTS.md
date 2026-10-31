@@ -43,6 +43,7 @@
   operation match the spec. `OBSERVING` commits before `observe`. `Success` and `Failure` finish the attempt.
   `Deadline` and `Cancelled` stay `OBSERVING`; `deadline_detail` is the exact integer-only `DeadlineDetail`, valid
   only for convergence `"deadline"`, and a later outcome clears it.
+- `ConvergenceSummary` includes `completion_failed`: project it to `FAILED` with the closed reason and no deadline detail. Never journal completion-container state, exit output or a failure cause; [convergence semantics](../convergence/AGENTS.md) stay there.
 - `_context` verifies the lease before each adapter call, and adapters call `check_current` before every launch.
   Docker can't enforce this, so a pause after a check still races a lease transfer.
 - Observation errors become `AdapterUnavailable` `from None`. Store conflicts and outages halt the pass with no
@@ -63,3 +64,4 @@
 - `tests/pywhales/test_reconciliation.py` and `test_reconciliation_store.py`: controller flows, ownership, CAS, leases.
 - `tests/pywhales/test_reconciliation_recovery.py`: store faults, lease expiry, admission, no-replay recovery.
 - `tests/pywhales/test_reconciliation_ownership.py`: 64-character bounds round-trip through storage labels.
+- `test_reconciliation.py::test_real_cli_completion_failure_is_journaled_as_a_closed_reason` guards completion failure projection without raw payloads.

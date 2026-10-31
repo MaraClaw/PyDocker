@@ -1,3 +1,4 @@
+import errno
 import os
 import subprocess
 import sys
@@ -181,6 +182,40 @@ def test_bounded_failure_reports_reaped_native_status(mode: str) -> None:
     assert isinstance(records[1], CompletionRecord)
     assert records[1].attempt_id == records[0].attempt_id
     assert records[1].return_code == children[0].returncode
+    assert (
+        records[1].outcome
+        == {
+            "deadline": "timeout",
+            "cancel": "cancelled",
+            "limit": "limit",
+        }[mode]
+    )
+
+
+def test_bounded_native_argv_rejection_after_start_reports_limit() -> None:
+    records: list[TelemetryRecord] = []
+    config = ClientConfig(
+        client_call=[sys.executable], telemetry_observer=records.append
+    )
+    policy = InspectionPolicy(
+        max_references=1, max_argv_bytes=65536, max_response_bytes=1024
+    )
+
+    with (
+        patch(
+            "pywhales._bounded_capture.subprocess.Popen",
+            side_effect=OSError(errno.E2BIG, "too big"),
+        ),
+        pytest.raises(ObservationLimitError) as raised,
+        observation(policy),
+    ):
+        run([*config.docker_cmd, "-c", "pass"])
+
+    assert raised.value.reason == "native_argv"
+    assert len(records) == 2 and isinstance(records[0], LaunchRecord)
+    assert isinstance(records[1], CompletionRecord)
+    assert records[1].attempt_id == records[0].attempt_id
+    assert (records[1].outcome, records[1].return_code) == ("limit", None)
 
 
 def test_bounded_spawn_failure_pairs_records_without_status() -> None:

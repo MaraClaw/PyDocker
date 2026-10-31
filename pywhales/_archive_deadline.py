@@ -10,12 +10,17 @@ from time import monotonic
 from typing import IO, TYPE_CHECKING, Literal, override
 
 from pywhales._readiness import CANCEL_CHECK, bounded_wait, reap, wait_ready
-from pywhales.exceptions import DockerTimeout, ObservationCancelled, ObservationTimeout
+from pywhales.exceptions import (
+    DockerTimeout,
+    ObservationCancelled,
+    ObservationLimitError,
+    ObservationTimeout,
+)
 
 if TYPE_CHECKING:
     from pywhales._observation import ObservationState
 
-type _Stop = Literal["command", "timeout", "cancelled"]
+type _Stop = Literal["command", "timeout", "cancelled", "limit"]
 
 
 class ArchiveDeadline:
@@ -39,6 +44,14 @@ class ArchiveDeadline:
     earlier than the scope's, and a set token wins over both, as in a captured
     run. After a natural exit nothing is left to stop, but ``check()`` still
     reports a scope that ended before the transfer was delivered.
+
+    The snapshot's stream accounts are charged by ``read()`` only, which runs on
+    the caller's thread. The first read past a limit kills the child and stops
+    the transfer through the same path a cancellation takes, so ``check()``
+    raises ``ObservationLimitError`` once the child is reaped. The watchdog's
+    drain after a kill and ``record_read()`` only count bytes for telemetry:
+    neither charges, so a stderr-selected ``DockerException`` still wins. A
+    budget alone adds no timer to a wait.
     """
 
     def __init__(
@@ -56,12 +69,13 @@ class ArchiveDeadline:
         self.raw = raw
         self._scope = (
             observation
-            if observation is not None
-            and (observation.deadline is not None or observation.cancel_tokens)
+            if observation is not None and observation.binds_launches
             else None
         )
         self.bounded = deadline is not None or self._scope is not None
         self._stop: _Stop | None = None
+        self._stop_lock = Lock()
+        self._limit: ObservationLimitError | None = None
         self.expired = False
         self.stdout: bytes | None = None
         self.stderr: bytes | None = None
@@ -139,16 +153,23 @@ class ArchiveDeadline:
             )
         return remaining
 
+    def _claim(self, reason: _Stop) -> None:
+        """Record why the transfer stopped; the first reason is never replaced."""
+        with self._stop_lock:
+            if self._stop is None:
+                self._stop = reason
+
     def _watch(self) -> None:
         try:
             if not self.bounded:
                 self.process.wait()
                 return
             while not self._exited.wait(self._remaining()):
-                self._stop = self._stop_reason(running=True)
-                if self._stop is not None:
+                reason = self._stop_reason(running=True)
+                if reason is not None:
+                    self._claim(reason)
                     break
-            if self._exited.is_set():
+            if self._exited.is_set() and self._stop != "limit":
                 return
             self.expired = True
             with suppress(ProcessLookupError):
@@ -220,6 +241,8 @@ class ArchiveDeadline:
             DockerTimeout: The command deadline expired and the child was reaped.
             ObservationTimeout: The observation deadline passed first.
             ObservationCancelled: An observation token was set.
+            ObservationLimitError: A caller-thread read overflowed a stream
+                account (reason ``total_stream``) and the child was reaped.
         """
         released = self.released.is_set()
         if self.expired:
@@ -228,6 +251,9 @@ class ArchiveDeadline:
                 raise ObservationCancelled()
             if self._stop == "timeout":
                 raise ObservationTimeout()
+            if self._stop == "limit":
+                assert self._limit is not None
+                raise self._limit
             raise DockerTimeout(
                 self.command,
                 self.process.returncode,
@@ -242,6 +268,31 @@ class ArchiveDeadline:
             if stop == "timeout":
                 raise ObservationTimeout()
 
+    def _charge(self, chunk: bytes) -> bool:
+        """Charge a caller-thread read to the stream accounts; the lock is held.
+
+        An overflow kills the child and marks the transfer expired, so the next
+        ``check()`` raises it after the watchdog reaps and drains, exactly as a
+        scope cancellation does. The watchdog is woken by the child's exit, so a
+        budget needs no timer.
+
+        Returns:
+            Whether the read overflowed and the chunk must be discarded.
+        """
+        scope = self._scope
+        if scope is None or not chunk:
+            return False
+        try:
+            scope.charge_stream(len(chunk))
+        except ObservationLimitError as error:
+            self._limit = error.with_traceback(None)
+            self._claim("limit")
+            self.expired = True
+            with suppress(ProcessLookupError):
+                self.process.kill()
+            return True
+        return False
+
     def read(self, pipe: IO[bytes], size: int = 65536) -> bytes:
         while True:
             self.check()
@@ -249,10 +300,16 @@ class ArchiveDeadline:
             with self.lock:
                 if self.expired:
                     continue
+                scope = self._scope
                 try:
-                    return self._read(pipe, size)
+                    chunk = self._read(
+                        pipe, size if scope is None else scope.stream_allowance(size)
+                    )
                 except BlockingIOError:
                     settle = not self._wait(pipe, writable=False)
+                else:
+                    if not self._charge(chunk):
+                        return chunk
             if settle:
                 self.released.wait()
 

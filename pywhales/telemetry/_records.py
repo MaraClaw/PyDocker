@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 type OperationFamily = Literal["captured", "stream", "archive_load", "archive_save"]
-type Outcome = Literal["success", "failure", "timeout", "closed"]
+type Outcome = Literal["success", "failure", "timeout", "closed", "cancelled", "limit"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,13 +19,13 @@ class LaunchRecord:
     Attributes:
         family: Fixed execution family, never inferred from command arguments.
         attempt_id: Opaque identifier shared with the completion record.
-        schema_version: Record schema version, currently 3.
+        schema_version: Record schema version, currently 4.
         phase: Fixed launch discriminator. Measurements are not yet available.
     """
 
     family: OperationFamily
     attempt_id: str = field(kw_only=True)
-    schema_version: Literal[3] = field(default=3, init=False)
+    schema_version: Literal[4] = field(default=4, init=False)
     phase: Literal["launch"] = field(default="launch", init=False)
 
 
@@ -35,7 +35,8 @@ class CompletionRecord:
 
     Attributes:
         family: Fixed execution family matching the launch record.
-        outcome: Success, failure, timeout, or explicit consumer closure.
+        outcome: Success, failure, timeout, explicit consumer closure, an
+            observation cancellation, or an observation limit rejection.
         duration_seconds: Monotonic seconds from launch attempt to termination
             or stream closure/exhaustion, including paused stream consumption.
         stdout_bytes: Bytes actually captured/read, or None when unavailable.
@@ -45,7 +46,7 @@ class CompletionRecord:
             not measure bytes processed by the child or selected Docker daemon.
         attempt_id: Opaque identifier shared with the launch record.
         return_code: Reaped local process status, or None if unavailable.
-        schema_version: Record schema version, currently 3.
+        schema_version: Record schema version, currently 4.
         phase: Fixed completion discriminator.
     """
 
@@ -57,7 +58,7 @@ class CompletionRecord:
     attempt_id: str = field(kw_only=True)
     return_code: int | None = field(default=None, kw_only=True)
     stdin_bytes: int | None = field(default=None, kw_only=True)
-    schema_version: Literal[3] = field(default=3, init=False)
+    schema_version: Literal[4] = field(default=4, init=False)
     phase: Literal["completion"] = field(default="completion", init=False)
 
 

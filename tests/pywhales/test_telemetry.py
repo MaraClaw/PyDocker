@@ -9,9 +9,16 @@ import pytest
 from pywhales import DockerClient
 from pywhales._observation import observation
 from pywhales.client_config import ClientConfig
-from pywhales.exceptions import DockerTimeout, NoSuchContainer, ObservationLimitError
+from pywhales.exceptions import (
+    DockerTimeout,
+    NoSuchContainer,
+    ObservationCancelled,
+    ObservationLimitError,
+    ObservationTimeout,
+)
 from pywhales.inventory import InspectionPolicy
 from pywhales.telemetry import CompletionRecord, LaunchRecord, TelemetryRecord
+from pywhales.telemetry._lifecycle import ExecutionTelemetry
 from pywhales.utils import run
 
 
@@ -42,11 +49,11 @@ def test_metadata_is_sanitized_when_captured_results_contain_secrets(
     assert result == (secret + "\ufffd", secret)
     launch = records[0]
     assert isinstance(launch, LaunchRecord)
-    assert launch.family == "captured" and launch.schema_version == 3
+    assert launch.family == "captured" and launch.schema_version == 4
     completed = records[1]
     assert isinstance(completed, CompletionRecord)
     assert completed.attempt_id == launch.attempt_id
-    assert completed.schema_version == 3 and completed.return_code == 0
+    assert completed.schema_version == 4 and completed.return_code == 0
     assert completed.stdin_bytes is None
     assert completed.outcome == "success"
     assert (completed.stdout_bytes, completed.stderr_bytes) == (
@@ -214,7 +221,7 @@ def test_bounded_capture_counts_bytes_when_response_limit_fails() -> None:
 
     completed = records[1]
     assert isinstance(completed, CompletionRecord)
-    assert (completed.outcome, completed.stdout_bytes) == ("failure", 9)
+    assert (completed.outcome, completed.stdout_bytes) == ("limit", 9)
 
 
 def test_duration_excludes_admission_and_readiness_clocks(
@@ -248,3 +255,38 @@ def test_disabled_observer_uses_neither_identifier_nor_telemetry_clock(
     monkeypatch.setattr(_lifecycle, "monotonic", forbidden)
     config = ClientConfig(client_call=[sys.executable, "-c", "pass"])
     assert run(config.docker_cmd) == ""
+
+
+@pytest.mark.parametrize(
+    ("error", "outcome"),
+    [
+        (None, "success"),
+        (ObservationCancelled(), "cancelled"),
+        (ObservationLimitError("total_stream", 1, 2), "limit"),
+        (ObservationLimitError("native_argv", None, None), "limit"),
+        (ObservationTimeout(), "timeout"),
+        (DockerTimeout(["docker"], 1, None, None), "timeout"),
+        (KeyboardInterrupt(), "failure"),
+        (BufferError(), "failure"),
+        (OSError(), "failure"),
+        (GeneratorExit(), "closed"),
+    ],
+)
+def test_completion_outcome_follows_the_exception_that_ended_the_launch(
+    error: BaseException | None, outcome: str
+) -> None:
+    records: list[TelemetryRecord] = []
+
+    try:
+        with ExecutionTelemetry(records.append, "captured") as telemetry:
+            telemetry.start()
+            if error is not None:
+                raise error
+    except BaseException as raised:
+        assert raised is error
+
+    launch, completed = records
+    assert isinstance(launch, LaunchRecord)
+    assert isinstance(completed, CompletionRecord)
+    assert launch.schema_version == completed.schema_version == 4
+    assert completed.outcome == outcome

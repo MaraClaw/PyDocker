@@ -28,6 +28,7 @@ def _check_inventory_types(
 ) -> None:
     assert_type(request.kind, InventoryKind)
     assert_type(request.references, tuple[str, ...])
+    assert_type(policy.max_total_stream_bytes, int | None)
     assert_type(
         capture_inventory([request, resource], policy=policy), InventorySnapshot
     )
@@ -37,6 +38,20 @@ def _check_inventory_types(
 def test_policy_rejects_invalid_limits(value: int) -> None:
     with pytest.raises(ValueError):
         InspectionPolicy(max_references=value, max_argv_bytes=1, max_response_bytes=1)
+
+
+def test_policy_leaves_the_stream_total_unset_unless_given() -> None:
+    bounds = InspectionPolicy(max_references=1, max_argv_bytes=1, max_response_bytes=1)
+    assert bounds.max_total_stream_bytes is None
+    assert (
+        InspectionPolicy(
+            max_references=1,
+            max_argv_bytes=1,
+            max_response_bytes=1,
+            max_total_stream_bytes=7,
+        ).max_total_stream_bytes
+        == 7
+    )
 
 
 def test_request_does_not_resolve_executable_and_is_frozen() -> None:

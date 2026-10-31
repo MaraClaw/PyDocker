@@ -1,6 +1,8 @@
+import errno
 import sys
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from queue import Queue
 from subprocess import Popen
 from threading import Event
@@ -15,6 +17,7 @@ from pywhales._archive_deadline import ArchiveDeadline
 from pywhales._observation import ObservationState, observation
 from pywhales.exceptions import (
     DockerTimeout,
+    NoSuchImage,
     ObservationCancelled,
     ObservationLimitError,
     ObservationTimeout,
@@ -217,9 +220,12 @@ _FIRST_THEN_BLOCK = (
 )
 
 
-def scope_policy(argv: int = 65536) -> InspectionPolicy:
+def scope_policy(argv: int = 65536, stream: int | None = None) -> InspectionPolicy:
     return InspectionPolicy(
-        max_references=1, max_argv_bytes=argv, max_response_bytes=1024
+        max_references=1,
+        max_argv_bytes=argv,
+        max_response_bytes=1024,
+        max_total_stream_bytes=stream,
     )
 
 
@@ -294,7 +300,7 @@ def test_lazy_save_applies_the_scope_active_at_first_iteration_and_keeps_it() ->
     assert len(records) == 2
     completed = records[-1]
     assert isinstance(completed, CompletionRecord)
-    assert (completed.outcome, completed.stdout_bytes) == ("failure", 6)
+    assert (completed.outcome, completed.stdout_bytes) == ("cancelled", 6)
 
 
 def test_lazy_save_ignores_a_scope_that_only_surrounded_its_creation() -> None:
@@ -397,14 +403,14 @@ def test_scope_stop_reaps_a_paused_save_and_finishes_telemetry_once(
     assert len(records) == 2
     completed = records[-1]
     assert isinstance(completed, CompletionRecord)
-    assert completed.outcome == ("timeout" if stop == "deadline" else "failure")
+    assert completed.outcome == ("timeout" if stop == "deadline" else "cancelled")
     assert (completed.stdout_bytes, completed.return_code) == (
         6,
         owner.process.returncode,
     )
 
 
-@pytest.mark.parametrize("stop", ["deadline", "cancel"])
+@pytest.mark.parametrize("stop", ["deadline", "cancel", "budget"])
 def test_early_save_close_inside_a_live_scope_cleans_up_and_closes(stop: str) -> None:
     records: list[TelemetryRecord] = []
     owners: list[ArchiveDeadline] = []
@@ -419,9 +425,9 @@ def test_early_save_close_inside_a_live_scope_cleans_up_and_closes(stop: str) ->
         archive = client.image.save("sample")
         assert isinstance(archive, GeneratorType)
         with observation(
-            scope_policy(),
+            scope_policy(stream=1024 if stop == "budget" else None),
             deadline=monotonic() + 30 if stop == "deadline" else None,
-            cancel=Event(),
+            cancel=None if stop == "budget" else Event(),
         ):
             assert next(archive) == b"first\n"
             archive.close()
@@ -491,7 +497,7 @@ def test_scope_cancel_reaps_a_load_while_its_producer_is_stalled() -> None:
     assert len(records) == 2
     completed = records[-1]
     assert isinstance(completed, CompletionRecord)
-    assert (completed.outcome, completed.stdin_bytes) == ("failure", 8)
+    assert (completed.outcome, completed.stdin_bytes) == ("cancelled", 8)
 
 
 def test_scope_deadline_interrupts_a_load_with_a_saturated_stdin_pipe() -> None:
@@ -531,3 +537,171 @@ def test_path_load_inside_a_scope_stops_when_the_scope_is_cancelled() -> None:
         observation(scope_policy(), cancel=cancel),
     ):
         client.image.load("archive.tar", quiet=True)
+
+
+@pytest.mark.parametrize(("limit", "fits"), [(6, True), (5, False)])
+def test_save_stream_budget_boundary_is_the_exact_archive_size(
+    limit: int, fits: bool
+) -> None:
+    records: list[TelemetryRecord] = []
+    client = archive_client(records, "import os; os.write(1,b'first\\n')")
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        observation(scope_policy(stream=limit)) as state,
+    ):
+        archive = client.image.save("sample")
+        if fits:
+            assert b"".join(archive) == b"first\n"
+        else:
+            with pytest.raises(ObservationLimitError) as failure:
+                next(archive)
+            assert (failure.value.reason, failure.value.limit) == ("total_stream", 5)
+            assert failure.value.measured == 6
+
+    completed = records[-1]
+    assert isinstance(completed, CompletionRecord)
+    assert len(records) == 2
+    assert completed.outcome == ("success" if fits else "limit")
+    assert state.stream_accounts[0].consumed == 6
+
+
+def test_save_overflow_reaps_the_child_and_never_charges_the_watchdog_drain() -> None:
+    records: list[TelemetryRecord] = []
+    owners: list[ArchiveDeadline] = []
+    client = archive_client(records)
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        patch(
+            "pywhales.components.image.cli_wrapper.ArchiveDeadline",
+            capture_owners(owners),
+        ),
+        observation(scope_policy(stream=4)) as state,
+        pytest.raises(ObservationLimitError),
+    ):
+        archive = client.image.save("sample")
+        try:
+            next(archive)
+        finally:
+            assert list(archive) == []
+
+    (owner,) = owners
+    assert_owner_released(owner)
+    assert len(records) == 2
+    completed = records[-1]
+    assert isinstance(completed, CompletionRecord)
+    assert (completed.outcome, completed.return_code) == (
+        "limit",
+        owner.process.returncode,
+    )
+    # The caller read five bytes (the limit plus one); the drain after the kill took the
+    # sixth for telemetry only.
+    assert completed.stdout_bytes == 6
+    assert state.stream_accounts[0].consumed == 5
+
+
+def test_budget_only_save_outlives_its_scope_and_charges_later_reads(
+    tmp_path: Path,
+) -> None:
+    go = tmp_path / "go"
+    code = (
+        "import os,time; os.write(1,b'first\\n')\n"
+        f"while not os.path.exists({str(go)!r}): time.sleep(0.01)\n"
+        "os.write(1,b'second\\n'); time.sleep(60)"
+    )
+    records: list[TelemetryRecord] = []
+    owners: list[ArchiveDeadline] = []
+    client = archive_client(records, code)
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        patch(
+            "pywhales.components.image.cli_wrapper.ArchiveDeadline",
+            capture_owners(owners),
+        ),
+    ):
+        archive = client.image.save("sample")
+        with observation(scope_policy(stream=8)) as state:
+            assert next(archive) == b"first\n"
+        (owner,) = owners
+
+        assert owner.bounded and owner._remaining() is None
+        assert state.stream_accounts[0].consumed == 6
+        go.touch()
+        with pytest.raises(ObservationLimitError) as failure:
+            next(archive)
+
+    assert (failure.value.limit, failure.value.measured) == (8, 9)
+    assert_owner_released(owner)
+    completed = records[-1]
+    assert isinstance(completed, CompletionRecord)
+    assert completed.outcome == "limit"
+
+
+def test_stderr_selected_save_failure_wins_over_the_stream_budget() -> None:
+    records: list[TelemetryRecord] = []
+    code = (
+        "import os; os.write(1,b'first\\n'); "
+        "os.write(2,b'No such image: sample and a long explanation'); os._exit(1)"
+    )
+    client = archive_client(records, code)
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        observation(scope_policy(stream=6)) as state,
+        pytest.raises(NoSuchImage),
+    ):
+        list(client.image.save("sample"))
+
+    completed = records[-1]
+    assert isinstance(completed, CompletionRecord)
+    assert (completed.outcome, completed.return_code) == ("failure", 1)
+    assert completed.stderr_bytes == 44
+    assert state.stream_accounts[0].consumed == 6
+
+
+@pytest.mark.parametrize(("limit", "fits"), [(21, True), (20, False)])
+def test_load_stream_budget_charges_only_the_output_read(
+    limit: int, fits: bool
+) -> None:
+    records: list[TelemetryRecord] = []
+    code = "import sys; sys.stdin.buffer.read(); sys.stdout.write('Loaded image: sample\\n')"
+    client = archive_client(records, code)
+    with observation(scope_policy(stream=limit)) as state:
+        if fits:
+            assert client.image.load(b"x" * 4096) == ["sample"]
+        else:
+            with pytest.raises(ObservationLimitError) as failure:
+                client.image.load(b"x" * 4096)
+            assert (failure.value.limit, failure.value.measured) == (20, 21)
+
+    completed = records[-1]
+    assert isinstance(completed, CompletionRecord)
+    assert len(records) == 2
+    assert completed.outcome == ("success" if fits else "limit")
+    assert completed.stdin_bytes == 4096
+    assert state.stream_accounts[0].consumed == 21
+
+
+@pytest.mark.parametrize("operation", ["save", "load"])
+def test_archive_native_argv_rejection_after_start_reports_limit(
+    operation: str,
+) -> None:
+    records: list[TelemetryRecord] = []
+    client = archive_client(records)
+    with (
+        patch.object(client.image, "inspect", return_value=[]),
+        patch(
+            "pywhales.components.image.cli_wrapper.Popen",
+            side_effect=OSError(errno.E2BIG, "too big"),
+        ),
+        pytest.raises(ObservationLimitError) as failure,
+        observation(scope_policy()),
+    ):
+        if operation == "load":
+            client.image.load(b"input")
+        else:
+            next(client.image.save("sample"))
+
+    assert failure.value.reason == "native_argv"
+    assert len(records) == 2
+    completed = records[-1]
+    assert isinstance(completed, CompletionRecord)
+    assert (completed.outcome, completed.return_code) == ("limit", None)

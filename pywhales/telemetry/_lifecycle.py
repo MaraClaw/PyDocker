@@ -10,7 +10,12 @@ from types import TracebackType
 from typing import Self
 from uuid import uuid4
 
-from pywhales.exceptions import DockerTimeout, ObservationTimeout
+from pywhales.exceptions import (
+    DockerTimeout,
+    ObservationCancelled,
+    ObservationLimitError,
+    ObservationTimeout,
+)
 from pywhales.telemetry import (
     CompletionRecord,
     LaunchRecord,
@@ -27,6 +32,25 @@ def deliver(observer: TelemetryObserver, record: TelemetryRecord) -> None:
         observer(record)
     except Exception:
         return
+
+
+def outcome_of(error: type[BaseException]) -> Outcome:
+    """Map an exception class to the one completion outcome that reports it.
+
+    The same rule serves captured runs, archives, stream launches, and the error
+    a stream delivers. ``ObservationCancelled`` is ``cancelled`` and
+    ``ObservationLimitError`` is ``limit``; deadlines stay ``timeout`` and every
+    other exception, ``KeyboardInterrupt`` included, is ``failure``.
+    """
+    if issubclass(error, (DockerTimeout, ObservationTimeout)):
+        return "timeout"
+    if issubclass(error, ObservationCancelled):
+        return "cancelled"
+    if issubclass(error, ObservationLimitError):
+        return "limit"
+    if issubclass(error, GeneratorExit):
+        return "closed"
+    return "failure"
 
 
 class ExecutionTelemetry:
@@ -98,11 +122,4 @@ class ExecutionTelemetry:
         traceback: TracebackType | None,
     ) -> None:
         """Report captured completion without changing an active exception."""
-        if exc_type is None:
-            self.finish("success")
-        elif issubclass(exc_type, (DockerTimeout, ObservationTimeout)):
-            self.finish("timeout")
-        elif issubclass(exc_type, GeneratorExit):
-            self.finish("closed")
-        else:
-            self.finish("failure")
+        self.finish("success" if exc_type is None else outcome_of(exc_type))

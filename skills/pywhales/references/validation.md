@@ -23,6 +23,52 @@ lifecycle guidance in the relevant reference rather than copying an example
 from another Docker library. Client construction and introspection don't
 establish daemon or plugin availability.
 
+The guidance describes current source APIs with project version 1.0.6.
+An installed version string alone isn't proof of support. Check the actual completion keyword, inventory
+kind, and typed stream returns before copying their examples:
+
+```python
+from annotationlib import Format
+from inspect import signature
+from typing import get_args, get_overloads
+
+from pywhales import docker
+from pywhales.convergence import capture_compose
+from pywhales.inventory import InventoryKind
+
+print(signature(capture_compose, annotation_format=Format.STRING))
+print(get_args(InventoryKind.__value__))  # must include "manifest_list"
+
+methods = [
+    getattr(docker.compose, name)
+    for name in (
+        "build",
+        "create",
+        "down",
+        "logs",
+        "pull",
+        "run",
+        "start",
+        "stop",
+        "up",
+    )
+]
+methods += [docker.container.run, docker.container.prune, docker.service.logs]
+for method in methods:
+    print(method.__qualname__, signature(method, annotation_format=Format.STRING))
+    for overload in get_overloads(method):
+        print(signature(overload, annotation_format=Format.STRING))
+```
+
+Look for `completion_services: tuple[str, ...] = ()` and `ProcessStream` in the
+matching streaming overloads. Optional `None` results still need a guard before
+context entry. A missing import, keyword, kind, or annotation means this installed
+capability isn't established. Introspection doesn't prove environment-forwarding
+behavior merely because `envs` exists: check its installed help and matching
+package documentation too. The empty-pull example in
+[Registry transfers and archives](registry-and-archives.md#pull-and-push) checks
+context management without locating or launching Docker.
+
 ## Check the Matching Surface
 
 1. Verify imports and the installed version without Docker. Parse or compile
@@ -45,9 +91,9 @@ For Compose, use a dedicated project and preserve persistent volumes unless
 their deletion is requested. Bound log collection and release local streams
 even when a reader stops early.
 
-These examples target PyWhales 1.0.5. Recheck the installed version and supported
-arguments when versions differ. Verify the user's application or script, not
-the PyWhales repository's contributor tests.
+Verify the user's application or script, not the PyWhales repository's
+contributor tests. A version string alone doesn't establish supported arguments
+or return contracts.
 
 Checking a `default_timeout`, `telemetry_observer`, or `environment` argument
 follows the same signature-first rule: confirm it in

@@ -44,7 +44,11 @@ def test_deploy_defaults_when_orchestrator_is_omitted(
         "always",
         "example",
     ]
-    assert command.call_args.kwargs == {"capture_stdout": False, "env": {}}
+    assert command.call_args.kwargs == {
+        "capture_stdout": False,
+        "env": {},
+        "timeout": None,
+    }
     assert stack.name == "example"
     assert stack.client_config is client.client_config
 
@@ -87,6 +91,7 @@ def test_deploy_positional_arguments_and_environment(
     assert command.call_args.kwargs == {
         "capture_stdout": False,
         "env": {"OVERRIDE": "variable-secret", "FILE_ONLY": "file-only-secret"},
+        "timeout": None,
     }
     assert stack.name == "secret-stack"
     assert stack.client_config is client.client_config

@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.0.8
+
+### New Features
+
+- `capture_compose()` accepts `completion_services` for selected one-shot
+  services, which must exit successfully. A nonzero exit returns payload-free
+  `Failure(reason="completion_failed")`; the `unfinished_completion_containers`
+  counter counts affected services, not individual containers.
+- Inventory capture and `bulk_reload()` support `manifest_list` resources.
+  Each reference uses a singleton inspect; existing handles retain their
+  `insecure` setting, and bulk reload stages cache updates until all inspections
+  succeed.
+
+### Behavior Changes
+
+- Owned record stream return types expose `close()` and context management.
+  An empty streaming image pull returns an empty context-managed stream whose
+  close is idempotent, without looking up or launching the CLI.
+- Eligible container, service, and Compose `envs` values move from CLI arguments
+  to the child environment while preserving their values. Reserved or colliding
+  names fall back to literal arguments. This is not universal secrecy: values
+  may still appear in arguments or be exposed through the child environment.
+  For Compose, forwarded values may also affect configuration interpolation.
+
+### Documentation
+
+- Updated the consumer skill guidance for the new APIs and their boundaries.
+
 ## 1.0.6
 
 ### New Features

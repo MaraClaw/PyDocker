@@ -23,7 +23,7 @@ lifecycle guidance in the relevant reference rather than copying an example
 from another Docker library. Client construction and introspection don't
 establish daemon or plugin availability.
 
-The guidance describes current source APIs with project version 1.0.6.
+The guidance describes current source APIs with project version 1.0.8.
 An installed version string alone isn't proof of support. Check the actual completion keyword, inventory
 kind, and typed stream returns before copying their examples:
 

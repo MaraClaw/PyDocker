@@ -5,7 +5,6 @@ Pytest does not collect these functions; runtime model behavior is covered in
 the neighboring enum and JSON regression modules.
 """
 
-from collections.abc import Iterable
 from typing import assert_type
 
 from pydantic import JsonValue
@@ -22,7 +21,7 @@ from pywhales.components.context.models import ContextInspectResult
 from pywhales.components.network.models import NetworkInspectResult, NetworkIPAM
 from pywhales.components.secret.models import SecretInspectResult, SecretSpec
 from pywhales.components.volume.models import VolumeInspectResult
-from pywhales.utils import MappedProcessStream
+from pywhales.utils import MappedProcessStream, ProcessStream
 
 
 def _check_client_enum_inputs() -> None:
@@ -99,11 +98,11 @@ def _check_compose_enum_overloads(client: DockerClient) -> None:
     assert_type(client.compose.up(pull="never"), None)
     assert_type(
         client.compose.create(pull=enums.ComposePullPolicy.BUILD, stream_logs=True),
-        Iterable[tuple[str, bytes]] | None,
+        ProcessStream | None,
     )
     assert_type(
         client.compose.up(pull=enums.ComposePullPolicy.ALWAYS, stream_logs=True),
-        Iterable[tuple[str, bytes]] | None,
+        ProcessStream | None,
     )
 
 

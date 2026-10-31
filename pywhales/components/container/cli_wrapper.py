@@ -1663,7 +1663,7 @@ class ContainerCLI(DockerCLICaller):
         filters: Iterable[ContainerListFilter] = (),
         *,
         stream_logs: Literal[True],
-    ) -> Iterable[tuple[str, bytes]]: ...
+    ) -> ProcessStream: ...
 
     @overload
     def prune(
@@ -1677,13 +1677,13 @@ class ContainerCLI(DockerCLICaller):
         self,
         filters: Iterable[ContainerListFilter] = (),
         stream_logs: bool = False,
-    ) -> Iterable[tuple[str, bytes]] | None: ...
+    ) -> ProcessStream | None: ...
 
     def prune(
         self,
         filters: Iterable[ContainerListFilter] = (),
         stream_logs: bool = False,
-    ) -> Iterable[tuple[str, bytes]] | None:
+    ) -> ProcessStream | None:
         """Remove containers that are not running.
 
         Streaming starts the local CLI before returning. Exhaust the owned stream
@@ -1815,7 +1815,7 @@ class ContainerCLI(DockerCLICaller):
         detach: Literal[False] = ...,
         stream: Literal[True],
         **kwargs: Unpack[RunArgs],
-    ) -> Iterable[tuple[str, bytes]]: ...
+    ) -> ProcessStream: ...
 
     @overload
     def run(
@@ -1837,7 +1837,7 @@ class ContainerCLI(DockerCLICaller):
         detach: bool = False,
         stream: bool = False,
         **kwargs: Unpack[RunArgs],
-    ) -> Container | str | Iterable[tuple[str, bytes]]: ...
+    ) -> Container | str | ProcessStream: ...
 
     def run(
         self,
@@ -1940,7 +1940,7 @@ class ContainerCLI(DockerCLICaller):
         volumes_from: Iterable[ValidContainer] = (),
         workdir: ValidPath | None = None,
         timeout: float | None = None,
-    ) -> Container | str | Iterable[tuple[str, bytes]]:
+    ) -> Container | str | ProcessStream:
         """Run a container on the selected Docker daemon.
 
         Require the Docker CLI and a reachable daemon. Image lookup or pulling

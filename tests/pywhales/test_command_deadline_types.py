@@ -4,7 +4,7 @@ The ty check validates inferred shapes for clients, aliases, and container handl
 Pytest does not collect or execute the _check_* functions or their Docker calls.
 """
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
 from typing import assert_type
 
@@ -32,12 +32,10 @@ def _check_container_deadlines(
     execute_args: ExecuteArgs = {"timeout": timeout}
     assert_type(client.run("app", **run_args), str)
     assert_type(client.container.run("app", detach=True, timeout=timeout), Container)
-    assert_type(
-        docker.run("app", stream=True, timeout=timeout), Iterable[tuple[str, bytes]]
-    )
+    assert_type(docker.run("app", stream=True, timeout=timeout), ProcessStream)
     assert_type(
         client.run("app", detach=flag, stream=flag, timeout=timeout),
-        Container | str | Iterable[tuple[str, bytes]],
+        Container | str | ProcessStream,
     )
     assert_type(client.execute("app", ["cmd"], **execute_args), str)
     assert_type(
@@ -102,11 +100,11 @@ def _check_compose_deadlines(
     assert_type(client.compose.run("app", detach=True, timeout=timeout), Container)
     assert_type(
         client.compose.run("app", stream=True, timeout=timeout),
-        Iterable[tuple[str, bytes]],
+        ProcessStream,
     )
     assert_type(
         client.compose.run("app", detach=flag, stream=flag, timeout=timeout),
-        Container | str | Iterable[tuple[str, bytes]],
+        Container | str | ProcessStream,
     )
     assert_type(
         client.compose.run(
@@ -130,7 +128,7 @@ def _check_compose_deadlines(
             None,
             timeout=timeout,
         ),
-        Container | str | Iterable[tuple[str, bytes]],
+        Container | str | ProcessStream,
     )
 
 
@@ -225,26 +223,26 @@ def _check_log_deadlines(
     assert_type(client.compose.logs("web", timeout=timeout), str)
     assert_type(
         client.compose.logs("web", stream=True, timeout=timeout),
-        Iterable[tuple[str, bytes]],
+        ProcessStream,
     )
     assert_type(
         client.compose.logs("web", stream=flag, timeout=timeout),
-        str | Iterable[tuple[str, bytes]],
+        str | ProcessStream,
     )
     assert_type(
         client.compose.logs(
             "web", None, False, False, False, None, None, flag, timeout=timeout
         ),
-        str | Iterable[tuple[str, bytes]],
+        str | ProcessStream,
     )
     assert_type(client.service.logs("workload", timeout=timeout), str)
     assert_type(
         client.service.logs("workload", stream=True, timeout=timeout),
-        Iterable[tuple[str, bytes]],
+        ProcessStream,
     )
     assert_type(
         client.service.logs("workload", stream=flag, timeout=timeout),
-        str | Iterable[tuple[str, bytes]],
+        str | ProcessStream,
     )
     assert_type(
         client.service.logs(
@@ -261,7 +259,7 @@ def _check_log_deadlines(
             flag,
             timeout=timeout,
         ),
-        str | Iterable[tuple[str, bytes]],
+        str | ProcessStream,
     )
 
 

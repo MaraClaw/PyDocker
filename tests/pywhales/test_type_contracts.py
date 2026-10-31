@@ -77,6 +77,49 @@ def _check_process_contracts(client: DockerClient, raw: bool) -> None:
         assert_type(logs.close(), None)
 
 
+def _check_owned_stream_contracts(client: DockerClient, flag: bool) -> None:
+    assert_type(client.container.prune(stream_logs=flag), ProcessStream | None)
+    assert_type(client.run("image", stream=flag), Container | str | ProcessStream)
+    with client.run("image", stream=True) as stream:
+        assert_type(stream, ProcessStream)
+        assert_type(next(stream), tuple[str, bytes])
+        assert_type(stream.close(), None)
+    with client.service.logs("service", stream=True) as stream:
+        assert_type(stream, ProcessStream)
+        assert_type(next(stream), tuple[str, bytes])
+        assert_type(stream.close(), None)
+    assert_type(client.compose.build(stream_logs=flag), ProcessStream | None)
+    assert_type(client.compose.create(stream_logs=flag), ProcessStream | None)
+    assert_type(client.compose.down(stream_logs=flag), ProcessStream | None)
+    assert_type(client.compose.pull(stream_logs=flag), ProcessStream | None)
+    assert_type(client.compose.start(stream_logs=flag), ProcessStream | None)
+    assert_type(client.compose.stop(stream_logs=flag), ProcessStream | None)
+    assert_type(client.compose.up(stream_logs=flag), ProcessStream | None)
+    with client.compose.logs(stream=True) as stream:
+        assert_type(stream, ProcessStream)
+        assert_type(next(stream), tuple[str, bytes])
+        assert_type(stream.close(), None)
+    with client.compose.run("app", tty=False, stream=True) as stream:
+        assert_type(stream, ProcessStream)
+        assert_type(next(stream), tuple[str, bytes])
+        assert_type(stream.close(), None)
+    for optional in (
+        client.container.prune(stream_logs=True),
+        client.compose.build(stream_logs=True),
+        client.compose.create(stream_logs=True),
+        client.compose.down(stream_logs=True),
+        client.compose.pull(stream_logs=True),
+        client.compose.start(stream_logs=True),
+        client.compose.stop(stream_logs=True),
+        client.compose.up(stream_logs=True),
+    ):
+        if optional is not None:
+            with optional as stream:
+                assert_type(stream, ProcessStream)
+                assert_type(next(stream), tuple[str, bytes])
+                assert_type(stream.close(), None)
+
+
 def _check_image_return_contracts(
     client: DockerClient, stream: bool, output: Path | None
 ) -> None:

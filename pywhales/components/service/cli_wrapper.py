@@ -43,6 +43,7 @@ from pywhales.enums import (
 )
 from pywhales.exceptions import NoSuchService
 from pywhales.utils import (
+    ProcessStream,
     ValidPath,
     custom_parse_object_as,
     format_mapping_for_cli,
@@ -468,7 +469,7 @@ class ServiceCLI(DockerCLICaller):
         *,
         stream: Literal[True],
         timeout: float | None = None,
-    ) -> Iterable[tuple[str, bytes]]: ...
+    ) -> ProcessStream: ...
 
     @overload
     def logs(
@@ -486,7 +487,7 @@ class ServiceCLI(DockerCLICaller):
         stream: bool = False,
         *,
         timeout: float | None = None,
-    ) -> str | Iterable[tuple[str, bytes]]: ...
+    ) -> str | ProcessStream: ...
 
     def logs(
         self,
@@ -503,7 +504,7 @@ class ServiceCLI(DockerCLICaller):
         stream: bool = False,
         *,
         timeout: float | None = None,
-    ) -> str | Iterable[tuple[str, bytes]]:
+    ) -> str | ProcessStream:
         """Return collected service logs or an owned byte stream.
 
         Service inspection runs first, outside the logs deadline. The logs CLI

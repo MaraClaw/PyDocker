@@ -22,8 +22,16 @@ returns `[]` without starting a CLI. `push([])` returns `None`, even with
 streaming; this is a deliberate asymmetry between the two methods, not a bug
 to normalize away.
 
-`pull([], stream_logs=True)` instead returns an empty plain generator, with no
-CLI launch; use `contextlib.closing` rather than assuming a stream context manager.
+`pull([], stream_logs=True)` instead returns an empty context-managed, closeable
+stream without executable lookup or a CLI launch. Its `close()` is idempotent;
+it no longer needs a `contextlib.closing` wrapper. This doesn't change blocking
+`pull([]) == []` or `push([]) is None`, even with push streaming enabled.
+
+```python
+with docker.pull([], stream_logs=True) as progress:
+    assert list(progress) == []
+progress.close()  # safe after context exit too
+```
 
 `push` batch-inspects every deduplicated reference before starting any
 transfer, including streamed ones, so a missing local image raises

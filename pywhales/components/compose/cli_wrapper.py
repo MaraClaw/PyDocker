@@ -17,6 +17,7 @@ from typing_extensions import TypedDict
 
 import pywhales.components.container.cli_wrapper
 import pywhales.components.volume.cli_wrapper
+from pywhales._environment import container_environment
 from pywhales._json import loads_compat
 from pywhales.client_config import Command, DockerCLICaller
 from pywhales.components._json_output import JsonOutputParser
@@ -530,8 +531,8 @@ class ComposeCLI(DockerCLICaller):
         """
         full_cmd = Command([*self.docker_compose_cmd, "exec"])
         full_cmd.add_flag("--detach", detach)
-        for key, value in envs.items():
-            full_cmd.add_simple_arg("--env", f"{key}={value}")
+        env_arguments, child_env = container_environment(envs, self.client_config)
+        full_cmd.add_args_iterable("--env", env_arguments)
         full_cmd.add_simple_arg("--index", index)
         full_cmd.add_flag("--no-TTY", not tty)
         full_cmd.add_flag("--privileged", privileged)
@@ -539,11 +540,11 @@ class ComposeCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--workdir", workdir)
         full_cmd += [service, *command]
         if detach:
-            run(full_cmd)
+            run(full_cmd, env=child_env)
         elif tty:
-            run(full_cmd, capture_stdout=False, capture_stderr=False)
+            run(full_cmd, env=child_env, capture_stdout=False, capture_stderr=False)
         else:
-            return run(full_cmd)
+            return run(full_cmd, env=child_env)
 
     def kill(
         self,
@@ -1175,8 +1176,8 @@ class ComposeCLI(DockerCLICaller):
         full_cmd.add_flag("--build", build)
         full_cmd.add_flag("--detach", detach)
         full_cmd.add_simple_arg("--entrypoint", entrypoint)
-        for key, value in envs.items():
-            full_cmd.add_simple_arg("--env", f"{key}={value}")
+        env_arguments, child_env = container_environment(envs, self.client_config)
+        full_cmd.add_args_iterable("--env", env_arguments)
         full_cmd.add_simple_arg("--name", name)
         full_cmd.add_flag("--no-TTY", not tty)
         full_cmd.add_flag("--no-deps", not dependencies)
@@ -1196,9 +1197,9 @@ class ComposeCLI(DockerCLICaller):
         full_cmd += command
 
         if stream:
-            return stream_stdout_and_stderr(full_cmd, timeout=timeout)
+            return stream_stdout_and_stderr(full_cmd, env=child_env, timeout=timeout)
         else:
-            result = run(full_cmd, tty=tty, timeout=timeout)
+            result = run(full_cmd, env=child_env, tty=tty, timeout=timeout)
             if detach:
                 Container = pywhales.components.container.cli_wrapper.Container
                 return Container(self.client_config, result, is_immutable_id=True)

@@ -27,6 +27,7 @@ from typing_extensions import TypedDict
 import pywhales.components.image.cli_wrapper
 import pywhales.components.network.cli_wrapper
 import pywhales.components.volume.cli_wrapper
+from pywhales._environment import container_environment
 from pywhales._json import loads_compat
 from pywhales.client_config import (
     ClientConfig,
@@ -1045,7 +1046,8 @@ class ContainerCLI(DockerCLICaller):
 
         full_cmd.add_simple_arg("--entrypoint", entrypoint)
 
-        full_cmd.add_args_mapping("--env", envs)
+        env_arguments, child_env = container_environment(envs, self.client_config)
+        full_cmd.add_args_iterable("--env", env_arguments)
         full_cmd.add_args_iterable_or_single("--env-file", env_files)
 
         full_cmd.add_args_iterable_or_single("--expose", expose)
@@ -1146,7 +1148,9 @@ class ContainerCLI(DockerCLICaller):
 
         full_cmd.append(str(image))
         full_cmd.extend(command)
-        return Container(self.client_config, run(full_cmd), is_immutable_id=True)
+        return Container(
+            self.client_config, run(full_cmd, env=child_env), is_immutable_id=True
+        )
 
     def diff(self, container: ValidContainer) -> dict[str, str]:
         """List all the files modified, added or deleted since the container started.
@@ -1302,7 +1306,8 @@ class ContainerCLI(DockerCLICaller):
         full_cmd.add_flag("--detach", detach)
         full_cmd.add_simple_arg("--detach-keys", detach_keys)
 
-        full_cmd.add_args_mapping("--env", envs)
+        env_arguments, child_env = container_environment(envs, self.client_config)
+        full_cmd.add_args_iterable("--env", env_arguments)
         full_cmd.add_args_iterable_or_single("--env-file", env_files)
 
         if tty and stream:
@@ -1328,10 +1333,14 @@ class ContainerCLI(DockerCLICaller):
 
         if stream:
             return stream_stdout_and_stderr(
-                full_cmd, pipe_stdin=interactive, pass_fds=(), timeout=timeout
+                full_cmd,
+                env=child_env,
+                pipe_stdin=interactive,
+                pass_fds=(),
+                timeout=timeout,
             )
         else:
-            result = run(full_cmd, tty=tty, pass_fds=(), timeout=timeout)
+            result = run(full_cmd, env=child_env, tty=tty, pass_fds=(), timeout=timeout)
             if detach:
                 return None
             else:
@@ -2142,7 +2151,8 @@ class ContainerCLI(DockerCLICaller):
 
         full_cmd.add_simple_arg("--entrypoint", entrypoint)
 
-        full_cmd.add_args_mapping("--env", envs)
+        env_arguments, child_env = container_environment(envs, self.client_config)
+        full_cmd.add_args_iterable("--env", env_arguments)
         full_cmd.add_args_iterable_or_single("--env-file", env_files)
 
         full_cmd.add_args_iterable_or_single("--expose", expose)
@@ -2254,13 +2264,21 @@ class ContainerCLI(DockerCLICaller):
 
         if detach:
             return Container(
-                self.client_config, run(full_cmd, pass_fds=(), timeout=timeout)
+                self.client_config,
+                run(full_cmd, env=child_env, pass_fds=(), timeout=timeout),
             )
         elif stream:
-            return stream_stdout_and_stderr(full_cmd, pass_fds=(), timeout=timeout)
+            return stream_stdout_and_stderr(
+                full_cmd, env=child_env, pass_fds=(), timeout=timeout
+            )
         else:
             return run(
-                full_cmd, tty=tty, capture_stderr=False, pass_fds=(), timeout=timeout
+                full_cmd,
+                env=child_env,
+                tty=tty,
+                capture_stderr=False,
+                pass_fds=(),
+                timeout=timeout,
             )
 
     @overload

@@ -148,13 +148,16 @@ class Plugin(ReloadableObjectFromJson[PluginInspectResult]):
         remote: str | None = None,
         disable_content_trust: bool = True,
         skip_remote_check: bool = False,
+        *,
+        timeout: float | None = None,
     ) -> None:
         """Upgrade this plugin while automatically granting all permissions.
 
-        See PluginCLI.upgrade for remote-selection and content-trust options.
+        See PluginCLI.upgrade for remote-selection, content-trust, and local
+        `timeout` deadline options.
         """
         self._docker_plugin.upgrade(
-            self, remote, disable_content_trust, skip_remote_check
+            self, remote, disable_content_trust, skip_remote_check, timeout=timeout
         )
 
 
@@ -271,6 +274,8 @@ class PluginCLI(DockerCLICaller):
         alias: str | None = None,
         disable: bool = False,
         disable_content_trust: bool = True,
+        *,
+        timeout: float | None = None,
     ) -> Plugin:
         """Install a Docker plugin and automatically grant all permissions.
 
@@ -283,11 +288,22 @@ class PluginCLI(DockerCLICaller):
             alias: Local plugin name, or None to keep the requested name.
             disable: Do not enable the plugin on install
             disable_content_trust: Skip image verification (default `True`)
+            timeout: Positive finite seconds from the install CLI's own launch,
+                replacing the client default; None inherits it. This is a local
+                subprocess deadline, not Docker's own option.
 
         Returns:
             An inspected handle using the alias when supplied, otherwise the
             requested plugin name.
+
+        Raises:
+            ValueError: If timeout is a Boolean or is neither None nor a positive
+                finite number of seconds.
+            DockerTimeout: If the install CLI exceeds its deadline. It is killed and
+                reaped, without undoing the install or guaranteeing daemon-side
+                work stops.
         """
+        validate_timeout(timeout)
         full_cmd = Command(
             [*self.docker_cmd, "plugin", "install", "--grant-all-permissions"]
         )
@@ -298,7 +314,7 @@ class PluginCLI(DockerCLICaller):
         full_cmd.append(plugin_name)
         for key, value in configuration.items():
             full_cmd.append(f"{key}={value}")
-        run(full_cmd)
+        run(full_cmd, timeout=timeout)
         if alias is not None:
             return Plugin(self.client_config, alias)
         return Plugin(self.client_config, plugin_name)
@@ -383,6 +399,8 @@ class PluginCLI(DockerCLICaller):
         remote: str | None = None,
         disable_content_trust: bool = True,
         skip_remote_check: bool = False,
+        *,
+        timeout: float | None = None,
     ) -> None:
         """Upgrade a plugin while automatically granting all permissions.
 
@@ -395,7 +413,17 @@ class PluginCLI(DockerCLICaller):
             disable_content_trust: Skip image verification (default `True`)
             skip_remote_check: Do not check if specified remote plugin matches
                 existing plugin image
+            timeout: Positive finite seconds from the upgrade CLI's own launch,
+                replacing the client default; None inherits it. This is a local
+                subprocess deadline, not Docker's own option.
+
+        Raises:
+            ValueError: If timeout is a Boolean or is neither None nor a positive
+                finite number of seconds.
+            DockerTimeout: If the CLI exceeds its deadline. It is killed and reaped,
+                without undoing the upgrade or guaranteeing daemon-side work stops.
         """
+        validate_timeout(timeout)
         full_cmd = Command(
             [*self.docker_cmd, "plugin", "upgrade", "--grant-all-permissions"]
         )
@@ -405,4 +433,4 @@ class PluginCLI(DockerCLICaller):
         full_cmd.append(plugin)
         if remote is not None:
             full_cmd.append(remote)
-        run(full_cmd)
+        run(full_cmd, timeout=timeout)

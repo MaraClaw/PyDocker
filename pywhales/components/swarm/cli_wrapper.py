@@ -3,7 +3,7 @@
 from datetime import timedelta
 
 from pywhales.client_config import Command, DockerCLICaller
-from pywhales.utils import ValidPath, run
+from pywhales.utils import ValidPath, run, validate_timeout
 
 
 class SwarmCLI(DockerCLICaller):
@@ -17,6 +17,8 @@ class SwarmCLI(DockerCLICaller):
         detach: bool = False,
         external_ca: str | None = None,
         rotate: bool = False,
+        *,
+        timeout: float | None = None,
     ) -> str | None:
         """Read or rotate the Swarm root certificate authority.
 
@@ -32,11 +34,22 @@ class SwarmCLI(DockerCLICaller):
             external_ca: Specifications of one or more certificate signing endpoints
             rotate: Rotate the swarm CA - if no certificate or key are provided,
                 new ones will be generated.
+            timeout: Positive finite seconds for each swarm ca launch, replacing the
+                client default; None inherits it. The certificate read gets its
+                own fresh budget rather than sharing the first launch's.
 
         Returns:
             None when detach=True. Otherwise, certificate text from a second
             swarm ca invocation after the requested operation completes.
+
+        Raises:
+            ValueError: If timeout is a Boolean or is neither None nor a positive
+                finite number of seconds.
+            DockerTimeout: If a launch exceeds its deadline. It is killed and
+                reaped without undoing the rotation, and an expired first launch
+                prevents the certificate read.
         """
+        validate_timeout(timeout)
         full_cmd = Command([*self.docker_cmd, "swarm", "ca"])
 
         full_cmd.add_simple_arg("--ca-cert", ca_certificate)
@@ -48,11 +61,11 @@ class SwarmCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--external-ca", external_ca)
         full_cmd.add_flag("--rotate", rotate)
 
-        run(full_cmd)
+        run(full_cmd, timeout=timeout)
         if not detach:
             # in "docker swarm ca --rotate", the progress is in stdout, not stderr
             # so we need to run the command a second time to be clean.
-            return run([*self.docker_cmd, "swarm", "ca"])
+            return run([*self.docker_cmd, "swarm", "ca"], timeout=timeout)
 
     def init(
         self,
@@ -99,6 +112,8 @@ class SwarmCLI(DockerCLICaller):
         data_path_address: str | None = None,
         listen_address: str | None = None,
         token: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> None:
         """Join the selected Docker daemon to a Swarm.
 
@@ -113,7 +128,16 @@ class SwarmCLI(DockerCLICaller):
                 (default 0.0.0.0:2377)
             token: Token for entry into the swarm, will determine if
                 the node enters the swarm as a manager or a worker.
+            timeout: Positive finite seconds from the join CLI's own launch,
+                replacing the client default; None inherits it.
+
+        Raises:
+            ValueError: If timeout is a Boolean or is neither None nor a positive
+                finite number of seconds.
+            DockerTimeout: If the CLI exceeds its deadline. It is killed and reaped,
+                without undoing the join or guaranteeing daemon-side work stops.
         """
+        validate_timeout(timeout)
         full_cmd = Command([*self.docker_cmd, "swarm", "join"])
         full_cmd.add_simple_arg("--advertise-addr", advertise_address)
         full_cmd.add_simple_arg("--availability", availability)
@@ -121,7 +145,7 @@ class SwarmCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--listen-addr", listen_address)
         full_cmd.add_simple_arg("--token", token)
         full_cmd.append(manager_address)
-        run(full_cmd)
+        run(full_cmd, timeout=timeout)
 
     def join_token(self, node_type: str, rotate: bool = False) -> str:
         """Return a token for joining the Swarm.

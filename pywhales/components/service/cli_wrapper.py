@@ -50,6 +50,7 @@ from pywhales.utils import (
     run,
     stream_stdout_and_stderr,
     to_list,
+    validate_timeout,
 )
 
 type ServiceListFilter = (
@@ -144,13 +145,17 @@ class Service(ReloadableObjectFromJson[ServiceInspectResult]):
         """
         ServiceCLI(self.client_config).remove(self)
 
-    def scale(self, new_scale: int, detach: bool = False) -> None:
+    def scale(
+        self, new_scale: int, detach: bool = False, *, timeout: float | None = None
+    ) -> None:
         """Change the scale of a service.
 
         See the [`docker.service.scale`](../sub-commands/service.md#scale) command for
-        information about the arguments.
+        information about the arguments, including the local `timeout` deadline.
         """
-        ServiceCLI(self.client_config).scale({self: new_scale}, detach=detach)
+        ServiceCLI(self.client_config).scale(
+            {self: new_scale}, detach=detach, timeout=timeout
+        )
 
     def update(
         self,
@@ -173,11 +178,12 @@ class Service(ReloadableObjectFromJson[ServiceInspectResult]):
         rollback_monitor: int | timedelta | None = None,
         rollback_max_failure_ratio: float | None = None,
         rollback_order: UpdateOrderInput | None = None,
+        timeout: float | None = None,
     ) -> None:
         """Update this service.
 
         See the [`docker.service.update`](../sub-commands/service.md#update) command for
-        information about the arguments.
+        information about the arguments, including the local `timeout` deadline.
         """
         ServiceCLI(self.client_config).update(
             self,
@@ -199,6 +205,7 @@ class Service(ReloadableObjectFromJson[ServiceInspectResult]):
             rollback_monitor=rollback_monitor,
             rollback_max_failure_ratio=rollback_max_failure_ratio,
             rollback_order=rollback_order,
+            timeout=timeout,
         )
 
     def exists(self) -> bool:
@@ -249,6 +256,8 @@ class ServiceCLI(DockerCLICaller):
         restart_max_attempts: int | None = None,
         secrets: builtins.list[dict[str, str]] | None = None,
         mounts: builtins.list[dict[str, str]] | None = None,
+        *,
+        timeout: float | None = None,
     ) -> Service:
         """Create a Docker Swarm service.
 
@@ -294,10 +303,20 @@ class ServiceCLI(DockerCLICaller):
             restart_max_attempts: Maximum restart attempts, or None to omit the option.
             secrets: Secret option mappings, or None to add no secrets.
             mounts: Mount option mappings, or None to add no mounts.
+            timeout: Positive finite seconds from the create CLI's own launch,
+                replacing the client default; None inherits it. This is a local
+                subprocess deadline, not a Docker option.
 
         Returns:
             A handle to the created service without an initial inspect call.
+
+        Raises:
+            ValueError: If timeout is a Boolean or is neither None nor a positive
+                finite number of seconds.
+            DockerTimeout: If the create CLI exceeds its deadline. It is killed and
+                reaped, without undoing daemon-side service creation.
         """
+        validate_timeout(timeout)
         full_cmd = Command([*self.docker_cmd, "service", "create", "--quiet"])
 
         full_cmd.add_args_iterable_or_single("--cap-add", cap_add)
@@ -352,7 +371,7 @@ class ServiceCLI(DockerCLICaller):
             for string in to_list(command):
                 full_cmd.append(string)
 
-        service_id = run(full_cmd)
+        service_id = run(full_cmd, timeout=timeout)
         return Service(self.client_config, service_id, is_immutable_id=True)
 
     @overload
@@ -642,7 +661,12 @@ class ServiceCLI(DockerCLICaller):
         run(full_cmd)
 
     def rollback(
-        self, service: ValidService, *, detach: bool = False, quiet: bool = False
+        self,
+        service: ValidService,
+        *,
+        detach: bool = False,
+        quiet: bool = False,
+        timeout: float | None = None,
     ) -> None:
         """Roll back one service without inspecting or retrying the mutation.
 
@@ -653,17 +677,30 @@ class ServiceCLI(DockerCLICaller):
             service: Service name, ID, or immutable handle.
             detach: Return after submission rather than waiting for convergence.
             quiet: Request only the service ID from Docker.
+            timeout: Positive finite seconds from the rollback CLI's own launch,
+                replacing the client default; None inherits it.
 
         Raises:
             NoSuchService: If Docker reports that the service is absent.
+            ValueError: If timeout is a Boolean or is neither None nor a positive
+                finite number of seconds.
+            DockerTimeout: If the CLI exceeds its deadline. It is killed and reaped,
+                without undoing the rollback or guaranteeing daemon-side work stops.
         """
+        validate_timeout(timeout)
         full_cmd = Command([*self.docker_cmd, "service", "rollback"])
         full_cmd.add_flag("--detach", detach)
         full_cmd.add_flag("--quiet", quiet)
         full_cmd.append(service)
-        run(full_cmd, capture_stdout=False)
+        run(full_cmd, capture_stdout=False, timeout=timeout)
 
-    def scale(self, new_scales: dict[ValidService, int], detach: bool = False) -> None:
+    def scale(
+        self,
+        new_scales: dict[ValidService, int],
+        detach: bool = False,
+        *,
+        timeout: float | None = None,
+    ) -> None:
         """Scale one or more services.
 
         Args:
@@ -671,10 +708,18 @@ class ServiceCLI(DockerCLICaller):
                 use new_scales={"service1": 4, "service2": 8}. An empty mapping
                 is a no-op.
             detach: Return after submission instead of waiting for convergence.
+            timeout: Positive finite seconds from the scale CLI's own launch,
+                replacing the client default; None inherits it. The service
+                inspection preflight is outside this budget.
 
         Raises:
             NoSuchService: If inspection reports that a requested service is absent.
+            ValueError: If timeout is a Boolean or is neither None nor a positive
+                finite number of seconds.
+            DockerTimeout: If the scale CLI exceeds its deadline. It is killed and
+                reaped, without undoing the scale or guaranteeing daemon-side work stops.
         """
+        validate_timeout(timeout)
         if not new_scales:
             return
         # verify that the services exists
@@ -684,7 +729,7 @@ class ServiceCLI(DockerCLICaller):
         full_cmd.add_flag("--detach", detach)
         for service, new_scale in new_scales.items():
             full_cmd.append(f"{service!s}={new_scale}")
-        run(full_cmd, capture_stderr=False, capture_stdout=False)
+        run(full_cmd, capture_stderr=False, capture_stdout=False, timeout=timeout)
 
     def update(
         self,
@@ -708,6 +753,7 @@ class ServiceCLI(DockerCLICaller):
         rollback_monitor: int | timedelta | None = None,
         rollback_max_failure_ratio: float | None = None,
         rollback_order: UpdateOrderInput | None = None,
+        timeout: float | None = None,
     ) -> None:
         """Update a Swarm service.
 
@@ -736,12 +782,20 @@ class ServiceCLI(DockerCLICaller):
             rollback_monitor: Rollback monitoring duration in seconds or timedelta, or None.
             rollback_max_failure_ratio: Rollback failure ratio in [0, 1], or None.
             rollback_order: stop-first or start-first, or None.
+            timeout: Positive finite seconds from the update CLI's own launch,
+                replacing the client default; None inherits it. This is a local
+                subprocess deadline, not a Docker option.
 
         Raises:
             NoSuchService: If Docker reports that the service is absent.
             TypeError: If a policy value has an invalid type.
-            ValueError: If a policy value is out of range or unsupported.
+            ValueError: If a policy value is out of range or unsupported, or if
+                timeout is a Boolean or is neither None nor a positive finite
+                number of seconds.
+            DockerTimeout: If the CLI exceeds its deadline. It is killed and reaped,
+                without undoing the update or guaranteeing daemon-side work stops.
         """
+        validate_timeout(timeout)
         policy_args = update_options(
             "update",
             update_parallelism,
@@ -768,4 +822,4 @@ class ServiceCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--replicas", replicas)
         full_cmd.extend(policy_args)
         full_cmd.append(service)
-        run(full_cmd, capture_stdout=False)
+        run(full_cmd, capture_stdout=False, timeout=timeout)

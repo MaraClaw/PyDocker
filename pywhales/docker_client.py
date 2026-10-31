@@ -6,12 +6,12 @@ operations require their corresponding external CLI support when invoked.
 """
 
 import base64
-import json
 from collections.abc import Mapping, Sequence
 from typing import Annotated
 
 import pydantic
 
+from pywhales._json import loads_compat
 from pywhales.client_config import ClientConfig, Command, DockerCLICaller
 from pywhales.components.buildx.cli_wrapper import BuildxCLI
 from pywhales.components.compose.cli_wrapper import ComposeCLI
@@ -326,7 +326,7 @@ class DockerClient(DockerCLICaller):
             pydantic.ValidationError: If the JSON fails version-model validation.
         """
         full_cmd = Command([*self.docker_cmd, "version", "-f", "{{json .}}"])
-        return Version(**json.loads(run(full_cmd)))
+        return Version(**loads_compat(run(full_cmd)))
 
     def login(
         self,

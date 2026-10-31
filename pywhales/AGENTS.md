@@ -38,7 +38,10 @@
 - `observation(policy, deadline=, cancel=)` nests by minimum: per-command limits take the smaller value, optional totals the
   smaller non-`None`, the earliest finite monotonic deadline wins, and every enclosing token stays effective. Entry and exit
   check cancellation, then the deadline. A scope with `max_total_response_bytes` adds a shared `_ResponseAccount`; captured
-  bytes charge every enclosing account under its lock before the first overflow is reported. Streams and archives aren't charged.
+  bytes charge every enclosing account under its lock before the first overflow is reported. `max_total_stream_bytes` adds a
+  separate `_StreamAccount` the same way (`ObservationState.stream_accounts`, default `()`): captured output never charges it
+  and streams never charge a response account. `binds_launches` (deadline, token, or stream account) decides whether a stream or
+  archive keeps the snapshot; a budget alone adds no timer to a wait.
 - `run()` consults `get_observation()` before its timeout/input branches: an observed call always takes `bounded_capture`, even
   with no timeout or input, and rejects `tty`, uncaptured output, or `input` with `ValueError`. Only unobserved calls use
   `subprocess.run()` (no timeout, no input) or `Popen.communicate()` (timeout or input, owned stdin-writer cleanup).
@@ -46,6 +49,11 @@
   precedence: cancel token, then a command deadline strictly earlier than the scope's (only while the child runs), then the
   scope; tokens add only the bounded `CANCEL_CHECK` (50 ms) wait. Streams and archives snapshot the scope once at launch (lazy
   `save` at first iteration), and the watchdog or `ArchiveDeadline` keeps applying it after the `with` exits.
+- Stream budget: a `ProcessStream` reader charges stdout and stderr at the raw pipe read under the queue lock, cutting each read
+  to the smallest remaining allowance plus one byte (`stream_allowance`) so overflow measures limit + 1. An overflow records
+  `ObservationLimitError("total_stream")` as the scope error, stops, kills and reaps the child, and is delivered once; no reader
+  thread raises. `ArchiveDeadline` charges only `read()` on the caller's thread and takes the same expiry path (`_Stop`
+  `"limit"`); its watchdog drain and the post-exit stderr `record_read` never charge, so `NoSuchImage` still wins.
 - A timeout is `None` or positive finite seconds, never `bool`, validated before launch. Deadlines are monotonic from launch and
   advance while consumption is paused; natural exit leaves post-exit draining unchanged. Expiry kills and reaps the local CLI
   before `DockerTimeout` keeps captured output; natural nonzero exits keep stderr-selected `DockerException` types.
@@ -68,13 +76,35 @@
   opt-in. Raw `docker_command`/`stdout`/`stderr` attributes stay intact and confidential; explicit output, uncaptured terminal
   output, and caller logging are outside the policy. Safe inspect failures dump no response and chain no input-bearing errors.
 
+## JSON Utility
+
+- `_json.py` offers explicit native `dumps`/`loads` using orjson and compatible
+  `dumps_compat`/`loads_compat` using the standard library; neither falls back.
+  Native dumps returns compact bytes, writes non-finite floats as null, and rejects
+  oversized integers and lone surrogates; native loads rejects non-finite tokens
+  and can decode oversized integers as floats. Compat dumps returns ASCII-escaped
+  text and supports `sort_keys`, `indent`, `separators`, and `allow_nan`, preserving
+  standard-library number handling and errors.
+- Existing CLI decoders, canonical hashes, raw diagnostic files, delivery REST
+  serialization, and the benchmark use compat to preserve accepted inputs,
+  exact JSON bytes, error types, and JSON-mode Pydantic validation. Fleet contract and harness stay on the
+  standard library to avoid SDK imports; the isolated distribution smoke child
+  stays independent of the checkout. Test fixture oracles and Pydantic JSON
+  methods also remain unchanged.
+
 ## Telemetry
 
-- `telemetry/_records.py`: schema-3 `LaunchRecord`/`CompletionRecord` and `TelemetryObserver`; `_lifecycle.py`:
+- `telemetry/_records.py`: schema-4 `LaunchRecord`/`CompletionRecord` and `TelemetryObserver`; `_lifecycle.py`:
   `ExecutionTelemetry` and `deliver()`; `_exporter.py`: `BoundedExporter`. This section is the package's only guide.
 - Records hold only a fixed family (`captured`, `stream`, `archive_load`, `archive_save`), opaque attempt ID, closed outcome,
   duration, byte counts, and return code. Never add argv, endpoints, environment, output, or exception text, even with raw diagnostics.
 - The observer is snapshotted at launch; none means no clock, ID, or callback. `start()` runs at the launch seam after preflight
   (observation rejections emit nothing); `finish()` publishes the first completion once, and observer exceptions are swallowed.
+- Outcomes are `success`, `failure`, `timeout`, `closed`, `cancelled`, `limit`. `outcome_of()` in `_lifecycle.py` is the one
+  exception-to-outcome map for captured runs, archives, the stream launcher (so a `native_argv` refusal after `start()` is
+  `limit`), and the error a stream delivers: `DockerTimeout`/`ObservationTimeout` timeout, `ObservationCancelled` cancelled,
+  `ObservationLimitError` limit, `GeneratorExit` closed, anything else (`KeyboardInterrupt`, `BufferError`) failure.
+  `ProcessStream._stop_outcome()` picks the stream's by delivery order (expired, scope error, reader error) at terminal delivery
+  and in `close()`; with no recorded stop `close()` is `closed`, and one it finds itself (a set token) keeps its outcome.
 - `BoundedExporter` is application-owned and creates no worker, timer, or network: calls enqueue or drop newest, and
   `flush()`/`shutdown()` run the sink on the caller's thread over a finite snapshot, counting failures without retry.

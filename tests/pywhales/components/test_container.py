@@ -1559,6 +1559,7 @@ def test_exec_detach_keys(run_mock: Mock) -> None:
         tty=False,
         pass_fds=(),
         timeout=None,
+        env={},
     )
 
 
@@ -1842,7 +1843,7 @@ def test_create_default_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
     image_cli_mock._pull_if_necessary.assert_called_once_with(test_image_name)
     image_cli_mock.pull.assert_not_called()
     run_mock.assert_called_once_with(
-        [*docker.client_config.docker_cmd, "create", test_image_name]
+        [*docker.client_config.docker_cmd, "create", test_image_name], env={}
     )
 
 
@@ -1860,7 +1861,7 @@ def test_create_missing_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
     image_cli_mock._pull_if_necessary.assert_called_once_with(test_image_name)
     image_cli_mock.pull.assert_not_called()
     run_mock.assert_called_once_with(
-        [*docker.client_config.docker_cmd, "create", test_image_name]
+        [*docker.client_config.docker_cmd, "create", test_image_name], env={}
     )
 
 
@@ -1878,7 +1879,7 @@ def test_create_always_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
     image_cli_mock._pull_if_necessary.assert_not_called()
     image_cli_mock.pull.assert_called_once_with(test_image_name)
     run_mock.assert_called_once_with(
-        [*docker.client_config.docker_cmd, "create", test_image_name]
+        [*docker.client_config.docker_cmd, "create", test_image_name], env={}
     )
 
 
@@ -1896,7 +1897,14 @@ def test_create_never_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
     image_cli_mock._pull_if_necessary.assert_not_called()
     image_cli_mock.pull.assert_not_called()
     run_mock.assert_called_once_with(
-        [*docker.client_config.docker_cmd, "create", "--pull", "never", test_image_name]
+        [
+            *docker.client_config.docker_cmd,
+            "create",
+            "--pull",
+            "never",
+            test_image_name,
+        ],
+        env={},
     )
 
 
@@ -1919,6 +1927,7 @@ def test_run_default_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
         capture_stderr=False,
         pass_fds=(),
         timeout=None,
+        env={},
     )
 
 
@@ -1941,6 +1950,7 @@ def test_run_missing_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
         capture_stderr=False,
         pass_fds=(),
         timeout=None,
+        env={},
     )
 
 
@@ -1963,6 +1973,7 @@ def test_run_always_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
         capture_stderr=False,
         pass_fds=(),
         timeout=None,
+        env={},
     )
 
 
@@ -1992,6 +2003,7 @@ def test_run_never_pull(image_mock: Mock, _: Mock, run_mock: Mock) -> None:
         capture_stderr=False,
         pass_fds=(),
         timeout=None,
+        env={},
     )
 
 

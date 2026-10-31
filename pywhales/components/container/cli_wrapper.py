@@ -7,7 +7,6 @@ distinct execution modes. Local CLI cleanup does not remove daemon resources.
 from __future__ import annotations
 
 import builtins
-import json
 import shlex
 import textwrap
 from collections.abc import Iterable, Mapping, Sequence
@@ -28,6 +27,7 @@ from typing_extensions import TypedDict
 import pywhales.components.image.cli_wrapper
 import pywhales.components.network.cli_wrapper
 import pywhales.components.volume.cli_wrapper
+from pywhales._json import loads_compat
 from pywhales.client_config import (
     ClientConfig,
     Command,
@@ -141,7 +141,7 @@ class Container(ReloadableObjectFromJson[ContainerInspectResult]):
     ) -> dict[str, pydantic.JsonValue]:
         json_str = run([*self.docker_cmd, "container", "inspect", reference])
         return custom_parse_object_as(
-            dict[str, pydantic.JsonValue], {**json.loads(json_str)[0]}
+            dict[str, pydantic.JsonValue], {**loads_compat(json_str)[0]}
         )
 
     @override
@@ -2421,7 +2421,7 @@ class ContainerCLI(DockerCLICaller):
             full_cmd.extend(containers_list)
 
         stats_output = run(full_cmd)
-        return [ContainerStats(json.loads(x)) for x in stats_output.splitlines()]
+        return [ContainerStats(loads_compat(x)) for x in stats_output.splitlines()]
 
     def stop(
         self,

@@ -12,7 +12,6 @@ from unittest.mock import patch
 from uuid import UUID
 
 import pytest
-from pydantic import ValidationError
 
 from docs import docs_utils
 from pywhales import DockerClient
@@ -179,7 +178,7 @@ def test_live_demo_removes_owned_resource_when_metadata_stays_malformed(
         patch.object(docs_utils, "docker", client),
         patch.object(docs_utils, "uuid4", return_value=IDENTIFIER),
         patch("subprocess.run", side_effect=cli.execute),
-        pytest.raises(ValidationError if demo == "builders" else ParsingError),
+        pytest.raises(ParsingError),
     ):
         DEMOS[demo]()
 
@@ -203,7 +202,7 @@ def test_live_demo_preserves_borrowed_resource_when_metadata_is_malformed(
         patch.object(docs_utils, "docker", client),
         patch.object(docs_utils, "uuid4", return_value=IDENTIFIER),
         patch("subprocess.run", side_effect=cli.execute),
-        pytest.raises(ValidationError if demo == "builders" else ParsingError),
+        pytest.raises(ParsingError),
     ):
         DEMOS[demo]()
 

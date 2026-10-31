@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import builtins
 import datetime as dt
-import json
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -25,6 +24,7 @@ from typing import (
 from pydantic import JsonValue, TypeAdapter
 
 import pywhales.components.image.cli_wrapper
+from pywhales._json import loads_compat
 from pywhales.client_config import (
     ClientConfig,
     Command,
@@ -33,6 +33,7 @@ from pywhales.client_config import (
     ReloadableObject,
 )
 from pywhales.components._cleanup import resource_cleanup
+from pywhales.components._json_output import JsonOutputParser
 from pywhales.components.buildx.imagetools.cli_wrapper import ImagetoolsCLI
 from pywhales.components.buildx.models import BuilderInspectResult, BuilderNode
 from pywhales.enums import BuildxBuildCall
@@ -54,6 +55,17 @@ type BakeResult = dict[str, dict[str, dict[str, JsonValue]]]
 type BuildxOptions = Mapping[str, str | Path]
 type BuildxPruneFilter = tuple[str, str]
 _BAKE_RESULT_ADAPTER: Final = TypeAdapter(BakeResult)
+
+
+def _parse_builder_line(line: str) -> BuilderInspectResult:
+    return BuilderInspectResult(**loads_compat(line))
+
+
+def _parse_builder_entry(line: str) -> tuple[str, BuilderInspectResult]:
+    result = _parse_builder_line(line)
+    if result.name is None:
+        raise ValueError("Builder listing entry has no name")
+    return result.name, result
 
 
 class Builder(ReloadableObject[BuilderInspectResult]):
@@ -89,13 +101,15 @@ class Builder(ReloadableObject[BuilderInspectResult]):
             [*self.docker_cmd, "buildx", "ls", "--format", "{{json . }}"]
         )
         inspect_str = run(full_cmd)
-        lines = inspect_str.splitlines()
-        for line in lines:
-            builder_inspect_result = BuilderInspectResult(**json.loads(line))
+        raw = self.client_config.raw_diagnostics
+        parser = JsonOutputParser("builder listing", raw)
+        for line in inspect_str.splitlines():
+            builder_inspect_result = parser.parse(_parse_builder_line, line)
             if builder_inspect_result.name == reference:
                 return builder_inspect_result
+        label = f"the name {reference}" if raw else "that name"
         raise ValueError(
-            f"Could not find a builder with the name {reference}, this should "
+            f"Could not find a builder with {label}, this should "
             f"never happen unless you are quickly creating and deleting builders. "
             f"Please open an issue at https://github.com/MaraClaw/PyWhales/issues"
         )
@@ -1050,7 +1064,14 @@ class BuildxCLI(DockerCLICaller):
         )
 
     def list(self) -> builtins.list[Builder]:
-        """Return available builders with seeded snapshots and unspecified order."""
+        """Return available builders with seeded snapshots and unspecified order.
+
+        Raises:
+            ParsingError: If a listing line is malformed, has an unexpected
+                shape, or names no builder. Safe mode withholds the payload and
+                chains no cause; a client with `raw_diagnostics=True` chains the
+                original error.
+        """
         full_cmd = Command(
             [*self.docker_cmd, "buildx", "ls", "--format", "{{json . }}"]
         )
@@ -1058,13 +1079,11 @@ class BuildxCLI(DockerCLICaller):
         lines = output.splitlines()
         lines = set(lines)
 
-        inpect_results = [BuilderInspectResult(**json.loads(line)) for line in lines]
+        parser = JsonOutputParser("builder listing", self.client_config.raw_diagnostics)
+        inspect_results = [parser.parse(_parse_builder_entry, line) for line in lines]
         result = []
-        for inspect_result in inpect_results:
-            assert inspect_result.name is not None
-            builder = Builder(
-                self.client_config, inspect_result.name, is_immutable_id=True
-            )
+        for name, inspect_result in inspect_results:
+            builder = Builder(self.client_config, name, is_immutable_id=True)
             builder._set_inspect_result(inspect_result)
             result.append(builder)
         return result

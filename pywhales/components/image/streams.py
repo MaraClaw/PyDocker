@@ -1,6 +1,6 @@
 """Lazy, owned coordination of concurrent image transfer output."""
 
-from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextvars import Context, copy_context
 from multiprocessing.pool import ThreadPool
@@ -245,5 +245,31 @@ class MultiImageStream(Iterator[tuple[str, bytes]]):
         self.close()
 
 
+class _EmptyImageStream(Iterator[tuple[str, bytes]]):
+    """Launch-free empty progress stream with the owned-stream interface."""
+
+    @override
+    def __iter__(self) -> Self:
+        return self
+
+    @override
+    def __next__(self) -> tuple[str, bytes]:
+        raise StopIteration
+
+    def close(self) -> None:
+        pass
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+
 type ImageStream = MappedProcessStream[tuple[str, bytes]] | MultiImageStream
-type EmptyImageStream = Generator[tuple[str, bytes]]
+type EmptyImageStream = _EmptyImageStream

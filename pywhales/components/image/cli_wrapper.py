@@ -57,6 +57,7 @@ from pywhales.components.image.streams import (
     EmptyImageStream,
     ImageStream,
     MultiImageStream,
+    _EmptyImageStream,
     map_in_contexts,
 )
 from pywhales.exceptions import DockerException, NoSuchImage
@@ -926,7 +927,7 @@ class ImageCLI(DockerCLICaller):
             `stream_logs=False`, even for one unique reference. With streaming,
             return an owned stream of `(image_reference, bytes)` progress records,
             without global ordering across images or stdout/stderr. Empty
-            iterable input returns `[]`, or an empty generator when streaming.
+            iterable input returns `[]`, or a closeable empty stream when streaming.
 
         Raises:
             ValueError: `quiet=True` is combined with `stream_logs=True`, or
@@ -967,7 +968,7 @@ class ImageCLI(DockerCLICaller):
 
         images = list(OrderedDict.fromkeys(x))
         if len(images) == 0:
-            return (item for item in ()) if stream_logs else []
+            return _EmptyImageStream() if stream_logs else []
         if len(images) == 1:
             image, *_ = images
             result = self._pull_single_tag(

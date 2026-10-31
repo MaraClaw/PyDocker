@@ -1826,10 +1826,26 @@ def test_empty_image_operations_keep_existing_result_shapes(
 ) -> None:
     result = image_commands.client.image.pull([], stream_logs=stream_logs)
 
-    assert isinstance(result, Generator) if stream_logs else isinstance(result, list)
+    assert not isinstance(result, list) if stream_logs else isinstance(result, list)
     assert list(result) == []
     assert image_commands.client.image.push([], stream_logs=stream_logs) is None
     assert image_commands.children == {}
+
+
+def test_empty_pull_stream_is_owned_without_executable_resolution() -> None:
+    client = DockerClient()
+    with patch(
+        "pywhales.client_config.shutil.which", side_effect=AssertionError("lookup")
+    ):
+        stream = client.image.pull([], stream_logs=True)
+        with stream as entered:
+            assert entered is stream
+            assert list(entered) == []
+            entered.close()
+            entered.close()
+        assert list(stream) == []
+        assert client.image.pull([]) == []
+        assert client.image.push([], stream_logs=True) is None
 
 
 @pytest.mark.parametrize("operation", ["pull", "push"])

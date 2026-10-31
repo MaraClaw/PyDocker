@@ -141,6 +141,9 @@ def _check_image_return_contracts(
     with client.pull("busybox", stream_logs=True) as logs:
         assert_type(next(logs), tuple[str, bytes])
         assert_type(logs.close(), None)
+    with client.pull([], stream_logs=True) as empty:
+        assert_type(next(empty), tuple[str, bytes])
+        assert_type(empty.close(), None)
     with client.push("busybox", stream_logs=True) as logs:
         assert_type(next(logs), tuple[str, bytes])
         assert_type(logs.close(), None)

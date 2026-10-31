@@ -118,6 +118,13 @@ printing. Raw exception attributes, returned
 payloads, uncaptured terminal output, and caller logging remain outside this
 policy.
 
+Malformed responses from Buildx builder reload/list, Compose config/ls/events,
+system disk-free/events/info, and imagetools manifest parsing raise
+`ParsingError` from `pywhales.client_config`, not a `ValueError` subclass.
+Safe mode suppresses the payload-bearing parsing chain; raw diagnostics chains
+the original error. Event parsing keeps the launch-time diagnostics setting.
+`version()` and container stats keep their existing exception behavior.
+
 If an argument is rejected, inspect that method in the installed package before
 changing versions or guessing SDK-style names. New Compose flags are forwarded
 to the plugin without a compatibility probe or automatic fallback.

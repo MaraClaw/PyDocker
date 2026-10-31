@@ -2,8 +2,7 @@
 
 ## Exception classes
 
-Exceptions raised will be an instance of `DockerException`, or a child class for
-more specific errors.
+CLI failures raise `DockerException`, or a child class for more specific errors.
 
 Those are the child classes:
 
@@ -30,7 +29,7 @@ returns `False` only for their own `NoSuch...` class. Other failures, including
 `NotASwarmManager`, propagate. A config, secret, plugin, or service that was removed
 inside its `with` block is not an error when the block exits.
 
-All exceptions will have these 4 attributes:
+Docker exceptions have these 4 attributes:
 
 * docker_command: the docker command used internally, as a list of strings.
 * return_code: the exit code docker client exited with, as an int
@@ -46,6 +45,17 @@ Use `DockerClient(raw_diagnostics=True)` on a separate troubleshooting client to
 enable detailed diagnostics. This also permits raw inspect-response dumps when
 model parsing fails. Returned payloads, uncaptured terminal output, and values
 you log yourself are not protected by this policy.
+
+## Parsing errors
+
+Import `ParsingError` from `pywhales.client_config`. Inspect parsing and the
+Buildx builder reload/list, Compose config/ls/events, system disk-free/events/info,
+and imagetools manifest parsers use it for malformed CLI responses. It is separate
+from `DockerException` and is not a `ValueError` subclass. Safe mode suppresses
+payload-bearing parsing chains; `raw_diagnostics=True` chains the original error
+for these command parsers. Event streams retain the launch-time diagnostics
+setting and close the local CLI before delivering a malformed-record error.
+`DockerClient.version()` and container stats retain their existing parsing errors.
 
 ## Example
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import builtins
-import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +12,7 @@ from typing import Any, Self, overload, override
 from pydantic import JsonValue
 
 from pywhales._inspect_validation import parse_namespace_inspect_results
+from pywhales._json import loads_compat
 from pywhales.client_config import (
     ClientConfig,
     Command,
@@ -62,7 +62,9 @@ class Context(ReloadableObjectFromJson[ContextInspectResult, str | None]):
         if reference is not None:
             full_cmd.append(reference)
         json_str = run(full_cmd)
-        return custom_parse_object_as(dict[str, JsonValue], {**json.loads(json_str)[0]})
+        return custom_parse_object_as(
+            dict[str, JsonValue], {**loads_compat(json_str)[0]}
+        )
 
     @override
     def _parse_json_object(

@@ -1,8 +1,8 @@
 """Capture and evaluate a Compose project's selected services each cycle.
 
 A cycle re-lists the project's containers, inspects each one, and keeps only
-counts, never container payloads. A one-shot service that exited 0 stays a
-blocker, since readiness requires ``running``: select only long-running services.
+counts, never container payloads. A long-running service is ready when it is
+``running``; a completion service, marked at capture, when it has exited 0.
 """
 
 import time
@@ -66,7 +66,9 @@ def _outcome(
             return Failure(reason="observation", cause=error)
 
 
-def validate_selection(config: ClientConfig, services: tuple[str, ...]) -> None:
+def validate_selection(
+    config: ClientConfig, services: tuple[str, ...], completion: tuple[str, ...]
+) -> None:
     """Reject an invalid selection or a dry-run client before any launch."""
     if (
         type(services) is not tuple
@@ -75,6 +77,12 @@ def validate_selection(config: ClientConfig, services: tuple[str, ...]) -> None:
         or len(set(services)) != len(services)
     ):
         raise ValueError("Services must be a nonempty tuple of distinct names")
+    if (
+        type(completion) is not tuple
+        or len(set(completion)) != len(completion)
+        or not set(completion) <= set(services)
+    ):
+        raise ValueError("Completion services must be distinct selected services")
     if config.compose_dry_run:
         raise ValueError("A dry-run client cannot be captured")
 
@@ -93,7 +101,7 @@ def list_members(
 
 
 def snapshot_target(
-    config: ClientConfig, services: tuple[str, ...]
+    config: ClientConfig, services: tuple[str, ...], completion: tuple[str, ...]
 ) -> ComposeTarget | Failure:
     """Capture each selected service's current containers and single config hash."""
     members = list_members(config, services)
@@ -113,6 +121,7 @@ def snapshot_target(
                 name=name,
                 config_hash=config_hash,
                 container_ids=tuple(member.id for member in group),
+                completion=name in completion,
             )
         )
     return ComposeTarget(client_config=config, services=tuple(captured))
@@ -121,12 +130,13 @@ def snapshot_target(
 def capture_project(
     config: ClientConfig,
     services: tuple[str, ...],
+    completion: tuple[str, ...],
     scope: AbstractContextManager[ObservationState],
 ) -> ComposeTarget | Failure | Deadline | Cancelled:
     """Capture the selected services inside an already bounded observation scope."""
     try:
         with scope:
-            return snapshot_target(config, services)
+            return snapshot_target(config, services, completion)
     except _INTERRUPTIONS as error:
         return _outcome(error, None)
 
@@ -137,11 +147,22 @@ def _affected(
     return sum(any(map(blocked, group)) for group in groups)
 
 
+def _finished(container: ContainerWire) -> bool:
+    state = container.state
+    return state.status == "exited" and state.exit_code == 0 and not state.restarting
+
+
+def _failed(container: ContainerWire) -> bool:
+    state = container.state
+    return state.status == "exited" and state.exit_code != 0 and not state.restarting
+
+
 def check_compose(target: ComposeTarget) -> DeadlineDetail | Failure:
     """Re-list the project, then count each blocker once per affected service.
 
     Membership is the non-one-off containers of the selected services. Any added or
     vanished container, or a changed service label or config hash, is superseded.
+    A completion container that exited nonzero and isn't restarting is a failure.
     """
     config = target.client_config
     if config.compose_dry_run:
@@ -163,20 +184,24 @@ def check_compose(target: ComposeTarget) -> DeadlineDetail | Failure:
     }:
         return Failure(reason="superseded")
     groups = [
-        [current[identity] for identity in service.container_ids]
+        (service.completion, [current[identity] for identity in service.container_ids])
         for service in target.services
     ]
+    completion = [group for done, group in groups if done]
+    if any(_failed(container) for group in completion for container in group):
+        return Failure(reason="completion_failed")
+    running = [group for done, group in groups if not done]
     return DeadlineDetail(
         captured_services=len(groups),
         non_running_containers=_affected(
-            groups, lambda container: container.state.status != "running"
+            running, lambda container: container.state.status != "running"
         ),
         restarting_containers=_affected(
-            groups, lambda container: container.state.restarting
+            running, lambda container: container.state.restarting
         ),
-        paused_containers=_affected(groups, lambda container: container.state.paused),
+        paused_containers=_affected(running, lambda container: container.state.paused),
         unhealthy_containers=_affected(
-            groups,
+            running,
             lambda container: (
                 (container.config.healthcheck and container.state.health is None)
                 or (
@@ -184,6 +209,9 @@ def check_compose(target: ComposeTarget) -> DeadlineDetail | Failure:
                     and container.state.health.status != "healthy"
                 )
             ),
+        ),
+        unfinished_completion_containers=_affected(
+            completion, lambda container: not _finished(container)
         ),
     )
 

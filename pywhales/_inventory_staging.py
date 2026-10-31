@@ -21,6 +21,7 @@ from pywhales.components._swarm_inspect import (
     associate_swarm_inspect_results,
 )
 from pywhales.components.config.models import ConfigInspectResult
+from pywhales.components.manifest.cli_wrapper import ManifestList
 from pywhales.components.node.models import NodeInspectResult
 from pywhales.components.secret.models import SecretInspectResult
 from pywhales.components.service.models import ServiceInspectResult
@@ -39,6 +40,7 @@ class _Occurrence:
     index: int
     reference: str
     exact: bool
+    insecure: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,27 +68,29 @@ def _normalize(items: Sequence[InventoryRequest | InventoryResource]) -> list[_G
                 )
             ):
                 raise ValueError("Inventory references must be nonempty strings")
-            kind, config, references, exact = (
+            kind, config, references, exact, insecure = (
                 item.kind,
                 item.client_config,
                 item.references,
+                False,
                 False,
             )
         elif isinstance(item, InventoryResource.__value__):
             identity = _identity(item)
             if not isinstance(identity, str) or not identity:
                 raise ParsingError("Missing immutable inspect identity")
-            kind, config, references, exact = (
+            kind, config, references, exact, insecure = (
                 resource_kind(item),
                 item.client_config,
                 (identity,),
                 True,
+                isinstance(item, ManifestList) and item.insecure,
             )
         else:
             raise TypeError("Unsupported inventory item")
         group = groups.setdefault((id(config), kind), _Group(kind, config, []))
         for reference in references:
-            group.occurrences.append(_Occurrence(index, reference, exact))
+            group.occurrences.append(_Occurrence(index, reference, exact, insecure))
             index += 1
     return list(groups.values())
 
@@ -97,6 +101,8 @@ def _prefix(group: _Group, arguments: Sequence[object]) -> list[str]:
         return [*command, "buildx", "ls", "--format", "{{json . }}"]
     if group.kind == "task":
         return [*command, "inspect", "--type", "task"]
+    if group.kind == "manifest_list":
+        return [*command, "manifest", "inspect"]
     return [*command, group.kind, "inspect"]
 
 
@@ -105,6 +111,10 @@ def _argv(
 ) -> list[str]:
     if group.kind == "builder":
         return prefix
+    if group.kind == "manifest_list":
+        # One list per launch: a second positional would name a manifest inside it.
+        (entry,) = entries
+        return [*prefix, entry.reference, *(["--insecure"] if entry.insecure else [])]
     return [*prefix, *(entry.reference for entry in entries)]
 
 
@@ -116,6 +126,8 @@ def _chunks(
 ) -> list[list[_Occurrence]]:
     if group.kind == "builder":
         return [group.occurrences]
+    if group.kind == "manifest_list":
+        return [[occurrence] for occurrence in group.occurrences]
     chunks: list[list[_Occurrence]] = []
     chunk: list[_Occurrence] = []
     for occurrence in group.occurrences:
@@ -175,7 +187,7 @@ def _stage(
             else:
                 for occurrence in group.occurrences:
                     check_launch(
-                        [*prefix, occurrence.reference], environment, state.policy
+                        _argv(group, prefix, [occurrence]), environment, state.policy
                     )
             plans.append(
                 (
@@ -196,7 +208,12 @@ def _stage(
                 check_observation(state)
                 check_launch(_argv(group, prefix, chunk), environment, state.policy)
                 request = [
-                    make_resource(group.kind, group.config, entry.reference)
+                    make_resource(
+                        group.kind,
+                        group.config,
+                        entry.reference,
+                        insecure=entry.insecure,
+                    )
                     for entry in chunk
                 ]
                 with frozen_environment_scope(group.config, environment):

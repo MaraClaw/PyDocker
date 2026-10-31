@@ -17,6 +17,7 @@ from typing_extensions import TypedDict
 
 import pywhales.components.container.cli_wrapper
 import pywhales.components.volume.cli_wrapper
+from pywhales._environment import container_environment
 from pywhales._json import loads_compat
 from pywhales.client_config import Command, DockerCLICaller
 from pywhales.components._json_output import JsonOutputParser
@@ -129,7 +130,7 @@ class ComposeCLI(DockerCLICaller):
         provenance: bool | str | None = ...,
         sbom: bool | str | None = ...,
         push: bool = ...,
-    ) -> Iterable[tuple[str, bytes]] | None: ...
+    ) -> ProcessStream | None: ...
 
     @overload
     def build(
@@ -171,7 +172,7 @@ class ComposeCLI(DockerCLICaller):
         provenance: bool | str | None = None,
         sbom: bool | str | None = None,
         push: bool = False,
-    ) -> Iterable[tuple[str, bytes]] | None: ...
+    ) -> ProcessStream | None: ...
 
     def build(
         self,
@@ -191,7 +192,7 @@ class ComposeCLI(DockerCLICaller):
         provenance: bool | str | None = None,
         sbom: bool | str | None = None,
         push: bool = False,
-    ) -> Iterable[tuple[str, bytes]] | None:
+    ) -> ProcessStream | None:
         """Build services declared in the configured Compose project.
 
         New flags require a supporting Compose plugin. No version probe or
@@ -321,7 +322,7 @@ class ComposeCLI(DockerCLICaller):
         pull: ComposeCreatePullPolicy | None = ...,
         *,
         stream_logs: Literal[True],
-    ) -> Iterable[tuple[str, bytes]] | None: ...
+    ) -> ProcessStream | None: ...
 
     @overload
     def create(
@@ -345,7 +346,7 @@ class ComposeCLI(DockerCLICaller):
         no_recreate: bool = False,
         pull: ComposeCreatePullPolicy | None = None,
         stream_logs: bool = False,
-    ) -> Iterable[tuple[str, bytes]] | None: ...
+    ) -> ProcessStream | None: ...
 
     def create(
         self,
@@ -356,7 +357,7 @@ class ComposeCLI(DockerCLICaller):
         no_recreate: bool = False,
         pull: ComposeCreatePullPolicy | None = None,
         stream_logs: bool = False,
-    ) -> Iterable[tuple[str, bytes]] | None:
+    ) -> ProcessStream | None:
         """Create service containers without starting them.
 
         Args:
@@ -408,7 +409,7 @@ class ComposeCLI(DockerCLICaller):
         quiet: bool = ...,
         *,
         stream_logs: Literal[True],
-    ) -> Iterable[tuple[str, bytes]] | None: ...
+    ) -> ProcessStream | None: ...
 
     @overload
     def down(
@@ -432,7 +433,7 @@ class ComposeCLI(DockerCLICaller):
         volumes: bool = False,
         quiet: bool = False,
         stream_logs: bool = False,
-    ) -> Iterable[tuple[str, bytes]] | None: ...
+    ) -> ProcessStream | None: ...
 
     def down(
         self,
@@ -443,7 +444,7 @@ class ComposeCLI(DockerCLICaller):
         volumes: bool = False,
         quiet: bool = False,
         stream_logs: bool = False,
-    ) -> Iterable[tuple[str, bytes]] | None:
+    ) -> ProcessStream | None:
         """Stop and remove project containers and selected related resources.
 
         Args:
@@ -530,8 +531,8 @@ class ComposeCLI(DockerCLICaller):
         """
         full_cmd = Command([*self.docker_compose_cmd, "exec"])
         full_cmd.add_flag("--detach", detach)
-        for key, value in envs.items():
-            full_cmd.add_simple_arg("--env", f"{key}={value}")
+        env_arguments, child_env = container_environment(envs, self.client_config)
+        full_cmd.add_args_iterable("--env", env_arguments)
         full_cmd.add_simple_arg("--index", index)
         full_cmd.add_flag("--no-TTY", not tty)
         full_cmd.add_flag("--privileged", privileged)
@@ -539,11 +540,11 @@ class ComposeCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--workdir", workdir)
         full_cmd += [service, *command]
         if detach:
-            run(full_cmd)
+            run(full_cmd, env=child_env)
         elif tty:
-            run(full_cmd, capture_stdout=False, capture_stderr=False)
+            run(full_cmd, env=child_env, capture_stdout=False, capture_stderr=False)
         else:
-            return run(full_cmd)
+            return run(full_cmd, env=child_env)
 
     def kill(
         self,
@@ -596,7 +597,7 @@ class ComposeCLI(DockerCLICaller):
         *,
         stream: Literal[True],
         timeout: float | None = None,
-    ) -> Iterable[tuple[str, bytes]]: ...
+    ) -> ProcessStream: ...
 
     @overload
     def logs(
@@ -611,7 +612,7 @@ class ComposeCLI(DockerCLICaller):
         stream: bool = False,
         *,
         timeout: float | None = None,
-    ) -> str | Iterable[tuple[str, bytes]]: ...
+    ) -> str | ProcessStream: ...
 
     def logs(
         self,
@@ -625,7 +626,7 @@ class ComposeCLI(DockerCLICaller):
         stream: bool = False,
         *,
         timeout: float | None = None,
-    ) -> str | Iterable[tuple[str, bytes]]:
+    ) -> str | ProcessStream:
         """Collect or stream output from service containers.
 
         The local logs CLI starts during the call. Blocking collection joins
@@ -842,7 +843,7 @@ class ComposeCLI(DockerCLICaller):
         *,
         stream_logs: Literal[True],
         timeout: float | None = ...,
-    ) -> Iterable[tuple[str, bytes]] | None: ...
+    ) -> ProcessStream | None: ...
 
     @overload
     def pull(
@@ -866,7 +867,7 @@ class ComposeCLI(DockerCLICaller):
         stream_logs: bool = False,
         *,
         timeout: float | None = None,
-    ) -> Iterable[tuple[str, bytes]] | None: ...
+    ) -> ProcessStream | None: ...
 
     def pull(
         self,
@@ -877,7 +878,7 @@ class ComposeCLI(DockerCLICaller):
         stream_logs: bool = False,
         *,
         timeout: float | None = None,
-    ) -> Iterable[tuple[str, bytes]] | None:
+    ) -> ProcessStream | None:
         """Pull images for selected Compose services.
 
         Args:
@@ -1033,7 +1034,7 @@ class ComposeCLI(DockerCLICaller):
         detach: Literal[False] = False,
         stream: Literal[True],
         **kwargs: Unpack[ComposeRunArgs],
-    ) -> Iterable[tuple[str, bytes]]: ...
+    ) -> ProcessStream: ...
 
     @overload
     def run(
@@ -1071,11 +1072,7 @@ class ComposeCLI(DockerCLICaller):
         workdir: str | Path | None = None,
         *,
         timeout: float | None = None,
-    ) -> (
-        str
-        | pywhales.components.container.cli_wrapper.Container
-        | Iterable[tuple[str, bytes]]
-    ): ...
+    ) -> str | pywhales.components.container.cli_wrapper.Container | ProcessStream: ...
 
     def run(
         self,
@@ -1101,11 +1098,7 @@ class ComposeCLI(DockerCLICaller):
         workdir: str | Path | None = None,
         *,
         timeout: float | None = None,
-    ) -> (
-        str
-        | pywhales.components.container.cli_wrapper.Container
-        | Iterable[tuple[str, bytes]]
-    ):
+    ) -> str | pywhales.components.container.cli_wrapper.Container | ProcessStream:
         """Run a one-off command on a service.
 
         The CLI starts during the call. With `stream=True`, close the owned
@@ -1183,8 +1176,8 @@ class ComposeCLI(DockerCLICaller):
         full_cmd.add_flag("--build", build)
         full_cmd.add_flag("--detach", detach)
         full_cmd.add_simple_arg("--entrypoint", entrypoint)
-        for key, value in envs.items():
-            full_cmd.add_simple_arg("--env", f"{key}={value}")
+        env_arguments, child_env = container_environment(envs, self.client_config)
+        full_cmd.add_args_iterable("--env", env_arguments)
         full_cmd.add_simple_arg("--name", name)
         full_cmd.add_flag("--no-TTY", not tty)
         full_cmd.add_flag("--no-deps", not dependencies)
@@ -1204,9 +1197,9 @@ class ComposeCLI(DockerCLICaller):
         full_cmd += command
 
         if stream:
-            return stream_stdout_and_stderr(full_cmd, timeout=timeout)
+            return stream_stdout_and_stderr(full_cmd, env=child_env, timeout=timeout)
         else:
-            result = run(full_cmd, tty=tty, timeout=timeout)
+            result = run(full_cmd, env=child_env, tty=tty, timeout=timeout)
             if detach:
                 Container = pywhales.components.container.cli_wrapper.Container
                 return Container(self.client_config, result, is_immutable_id=True)
@@ -1219,7 +1212,7 @@ class ComposeCLI(DockerCLICaller):
         services: str | list[str] | None = ...,
         *,
         stream_logs: Literal[True],
-    ) -> Iterable[tuple[str, bytes]] | None: ...
+    ) -> ProcessStream | None: ...
 
     @overload
     def start(
@@ -1231,11 +1224,11 @@ class ComposeCLI(DockerCLICaller):
     @overload
     def start(
         self, services: str | list[str] | None = None, stream_logs: bool = False
-    ) -> Iterable[tuple[str, bytes]] | None: ...
+    ) -> ProcessStream | None: ...
 
     def start(
         self, services: str | list[str] | None = None, stream_logs: bool = False
-    ) -> Iterable[tuple[str, bytes]] | None:
+    ) -> ProcessStream | None:
         """Start the specified services.
 
         Args:
@@ -1266,7 +1259,7 @@ class ComposeCLI(DockerCLICaller):
         timeout: int | timedelta | None = ...,
         *,
         stream_logs: Literal[True],
-    ) -> Iterable[tuple[str, bytes]] | None: ...
+    ) -> ProcessStream | None: ...
 
     @overload
     def stop(
@@ -1282,14 +1275,14 @@ class ComposeCLI(DockerCLICaller):
         services: str | list[str] | None = None,
         timeout: int | timedelta | None = None,
         stream_logs: bool = False,
-    ) -> Iterable[tuple[str, bytes]] | None: ...
+    ) -> ProcessStream | None: ...
 
     def stop(
         self,
         services: str | list[str] | None = None,
         timeout: int | timedelta | None = None,
         stream_logs: bool = False,
-    ) -> Iterable[tuple[str, bytes]] | None:
+    ) -> ProcessStream | None:
         """Stop services.
 
         Args:
@@ -1456,7 +1449,7 @@ class ComposeCLI(DockerCLICaller):
         watch: bool = ...,
         abort_on_container_failure: bool = ...,
         exit_code_from: str | None = ...,
-    ) -> Iterable[tuple[str, bytes]] | None: ...
+    ) -> ProcessStream | None: ...
 
     @overload
     def up(
@@ -1518,7 +1511,7 @@ class ComposeCLI(DockerCLICaller):
         watch: bool = False,
         abort_on_container_failure: bool = False,
         exit_code_from: str | None = None,
-    ) -> Iterable[tuple[str, bytes]] | None: ...
+    ) -> ProcessStream | None: ...
 
     def up(
         self,
@@ -1548,7 +1541,7 @@ class ComposeCLI(DockerCLICaller):
         watch: bool = False,
         abort_on_container_failure: bool = False,
         exit_code_from: str | None = None,
-    ) -> Iterable[tuple[str, bytes]] | None:
+    ) -> ProcessStream | None:
         """Start the containers.
 
         Streaming starts the local CLI before returning and exposes its output,

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pywhales"
-version = "1.0.6"
+version = "1.0.8"
 description = "A Docker and its composer client for Python, designed to be fun and intuitive!"
 readme = "README.md"
 license = "MIT"

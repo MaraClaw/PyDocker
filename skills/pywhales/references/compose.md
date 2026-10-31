@@ -49,15 +49,24 @@ deletion choice, not a default cleanup setting.
 | --- | --- |
 | `client.compose.build(...)` | `None`; normal output is displayed |
 | `client.compose.up(...)` | `None`; it doesn't return containers or captured logs |
-| Either with `stream_logs=True` | Owned `(source, bytes)` stream; `None` for an explicit empty service list |
+| `build/create/down/pull/start/stop/up(..., stream_logs=True)` | Typed, owned `ProcessStream` yielding `(source, bytes)`, or `None` for an explicit empty service list |
 | `client.compose.ps()` | `list[Container]` for the selected project |
-| `client.compose.logs(...)` | `str`; use `stream=True` for `(source, bytes)` |
+| `client.compose.logs(...)` | `str`; `stream=True` returns a typed `ProcessStream` yielding `(source, bytes)` |
 | `client.compose.execute(service, command, tty=False)` | `str`; detached or TTY execution returns `None` |
-| `client.compose.run(service, command, tty=False)` | `str`; `detach=True` returns `Container`, `stream=True` returns a tuple stream |
+| `client.compose.run(service, command, tty=False)` | `str`; `detach=True` returns `Container`, `stream=True` returns a typed `ProcessStream` yielding `(source, bytes)` |
 
 `source` is `"stdout"` or `"stderr"`, never `"stdin"`. These streams own local
 CLI processes and support context-manager cleanup; drain them to observe
 failures. Closing them doesn't tear down the project.
+
+```python
+with client.compose.logs(["app"], tail="20", stream=True) as logs:
+    for source, chunk in logs:
+        print(source, chunk.decode(errors="replace"), end="")
+```
+
+Guard a possible `None` before using optional streams in a `with` block. The
+typed return annotations don't change existing empty-selection behavior.
 
 For `build` and `up`, `services=None` means all services while `services=[]`
 means no work. `pull` has the same selection rule; `ps` and `logs` instead
@@ -109,6 +118,14 @@ separately started service containers. Use `execute` for a command in an
 already-running service. Collect logs separately from `up`; `follow=True` is
 potentially unbounded, so use `stream=True` with a deliberate stop boundary.
 
+Both methods accept `envs={"GREETING": "hello", "EMPTY": ""}` for container
+values. Eligible values travel through the per-launch CLI environment and
+`--env KEY`, so they can also affect `${NAME}` interpolation elsewhere in the
+Compose configuration. Reserved or colliding names stay literal `KEY=VALUE`;
+see [Container environment values](containers-and-output.md#container-environment-values).
+Client `environment=...` is separate CLI configuration, not a replacement for
+`envs`, and no temporary env files are created for this forwarding.
+
 ## Plugin Features and Previews
 
 `wait=True` waits for running/healthy services and implies detached mode in
@@ -130,8 +147,9 @@ that a chosen set of services settled, use the read-only
 `pywhales.convergence.capture_compose()` and `wait()`, documented in
 [Observation budgets and convergence](observation-and-convergence.md). Capture
 takes explicit, distinct service names for the client's configured project, and
-a one-shot container that exited 0 stays a blocker, so select long-running
-services only.
+accepts `completion_services=("migrate",)` for selected one-shot services expected
+to exit 0. Unmarked services still require running/healthy containers; an
+unmarked one-shot that exited 0 stays a blocker.
 
 Preview mode is the client global `compose_dry_run=True`, not an `up()` keyword.
 Use a separate preview client with the same files/project settings. It still

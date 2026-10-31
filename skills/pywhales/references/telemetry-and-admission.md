@@ -160,8 +160,9 @@ with owner.request(control).stream(
 iterator; the permit stays held until exhaustion, an observed failure, or an
 explicit close completes source cleanup and any in-flight read unwinds. A bare
 `break`, local child exit, or unobserved source failure doesn't release it.
-A plain generator, such as an empty `image.pull([], ...)`
-result, needs wrapping in `contextlib.closing` inside the factory.
+A plain generator needs wrapping in `contextlib.closing` inside the factory.
+`image.pull([], stream_logs=True)` is already context-managed and closeable,
+even though it launches nothing; no wrapper is needed for that result.
 
 An active reservation from `call()` or an open `stream()` can resize its
 demand in place with `try_resize(new_total)`, available on both the original

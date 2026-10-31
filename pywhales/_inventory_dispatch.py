@@ -10,6 +10,7 @@ from pywhales.components.config.cli_wrapper import Config
 from pywhales.components.container.cli_wrapper import Container
 from pywhales.components.context.cli_wrapper import Context
 from pywhales.components.image.cli_wrapper import Image
+from pywhales.components.manifest.cli_wrapper import ManifestList
 from pywhales.components.network.cli_wrapper import Network
 from pywhales.components.node.cli_wrapper import Node
 from pywhales.components.plugin.cli_wrapper import Plugin
@@ -46,12 +47,14 @@ def resource_kind(resource: InventoryResource) -> InventoryKind:
             return "context"
         case Builder():
             return "builder"
+        case ManifestList():
+            return "manifest_list"
         case unreachable:
             assert_never(unreachable)
 
 
 def make_resource(
-    kind: InventoryKind, config: ClientConfig, reference: str
+    kind: InventoryKind, config: ClientConfig, reference: str, *, insecure: bool = False
 ) -> InventoryResource:
     match kind:
         case "container":
@@ -78,6 +81,10 @@ def make_resource(
             return Context(config, reference, is_immutable_id=True)
         case "builder":
             return Builder(config, reference, is_immutable_id=True)
+        case "manifest_list":
+            return ManifestList(
+                config, reference, is_immutable_id=True, insecure=insecure
+            )
         case unreachable:
             assert_never(unreachable)
 

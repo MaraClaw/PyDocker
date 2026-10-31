@@ -1085,13 +1085,14 @@ def container(
     oneoff: bool = False,
     restarting: bool = False,
     paused: bool = False,
+    exit_code: int = 0,
 ) -> dict[str, Any]:
     state: dict[str, Any] = {
         "Status": status,
         "Running": status in {"running", "restarting", "paused"},
         "Restarting": restarting,
         "Paused": paused,
-        "ExitCode": 0,
+        "ExitCode": exit_code,
     }
     if health is not None:
         state["Health"] = {"Status": health, "Log": [{"Output": "credential-payload"}]}
@@ -1134,8 +1135,12 @@ def compose_target(
     client: DockerClient,
     policy: InspectionPolicy,
     services: tuple[str, ...] = ("web",),
+    *,
+    completion: tuple[str, ...] = (),
 ) -> ComposeTarget:
-    result = capture_compose(client, services, policy=policy, timeout=5)
+    result = capture_compose(
+        client, services, completion_services=completion, policy=policy, timeout=5
+    )
     assert isinstance(result, ComposeTarget)
     return result
 
@@ -1386,6 +1391,275 @@ def test_exited_zero_one_shot_is_a_blocker_unless_left_out_of_the_selection(
     assert wait(long_running, policy=policy, timeout=5, poll_interval=0.01) == Success()
 
 
+MIGRATE = ("web", "migrate")
+
+
+def migrating(
+    *,
+    status: str = "running",
+    health: str | None = None,
+    restarting: bool = False,
+    paused: bool = False,
+    exit_code: int = 0,
+) -> dict[str, Any]:
+    return snapshot(
+        container(A),
+        container(
+            B,
+            service="migrate",
+            status=status,
+            health=health,
+            restarting=restarting,
+            paused=paused,
+            exit_code=exit_code,
+        ),
+    )
+
+
+def test_compose_completion_service_is_marked_at_capture(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    store_compose(tmp_path, migrating(status="exited"))
+    target = compose_target(fake_cli, policy, MIGRATE, completion=("migrate",))
+    assert [service.completion for service in target.services] == [False, True]
+    plain = compose_target(fake_cli, policy, MIGRATE)
+    assert [service.completion for service in plain.services] == [False, False]
+    assert target != plain
+
+
+def test_compose_mixed_selection_succeeds_when_completion_container_exited_zero(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    store_compose(tmp_path, migrating(status="exited"))
+    target = compose_target(fake_cli, policy, MIGRATE, completion=("migrate",))
+    assert wait(target, policy=policy, timeout=5, poll_interval=0.01) == Success()
+    listing = [*PS, "migrate"]
+    assert calls_of(tmp_path) == [listing, inspection(A), inspection(B)] * 3
+
+
+def test_compose_completion_health_is_ignored_once_exited_zero(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    store_compose(tmp_path, migrating(status="exited", health="unhealthy"))
+    target = compose_target(fake_cli, policy, MIGRATE, completion=("migrate",))
+    assert wait(target, policy=policy, timeout=5, poll_interval=0.01) == Success()
+
+
+@pytest.mark.parametrize("exit_code", [1, 137])
+def test_compose_completion_nonzero_exit_fails_immediately_without_payload(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path, exit_code: int
+) -> None:
+    store_compose(tmp_path, migrating(status="exited", exit_code=exit_code))
+    target = compose_target(fake_cli, policy, MIGRATE, completion=("migrate",))
+    started = time.monotonic()
+    result = wait(target, policy=policy, timeout=30, poll_interval=5)
+    assert time.monotonic() - started < 5
+    assert result == Failure(reason="completion_failed")
+    assert isinstance(result, Failure)
+    assert (result.service_id, result.state, result.cause) == (None, None, None)
+    assert str(exit_code) not in repr(result)
+    assert not any(secret in repr(result) for secret in SECRETS)
+    assert listings(tmp_path) == 2
+
+
+def test_compose_nonzero_exit_of_a_long_running_service_is_not_a_completion_failure(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    store_compose(tmp_path, snapshot(container(A, status="exited", exit_code=1)))
+    target = compose_target(fake_cli, policy)
+    result = wait(target, policy=policy, timeout=1.5, poll_interval=0.01)
+    assert result == Deadline(DeadlineDetail(1, non_running_containers=1))
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        {"status": "created"},
+        {"status": "running"},
+        {"status": "paused", "paused": True},
+        {"status": "dead", "exit_code": 1},
+        {"status": "restarting", "restarting": True, "exit_code": 1},
+        {"status": "exited", "restarting": True, "exit_code": 1},
+        {"status": "exited", "restarting": True},
+    ],
+    ids=[
+        "created",
+        "running",
+        "paused",
+        "dead",
+        "restarting",
+        "exited-restarting-nonzero",
+        "exited-restarting-zero",
+    ],
+)
+def test_compose_unfinished_completion_container_is_counted_not_failed(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    flags: dict[str, Any],
+) -> None:
+    store_compose(tmp_path, migrating(**flags))
+    target = compose_target(fake_cli, policy, MIGRATE, completion=("migrate",))
+    result = wait(target, policy=policy, timeout=1.5, poll_interval=0.01)
+    assert result == Deadline(DeadlineDetail(2, unfinished_completion_containers=1))
+
+
+def test_compose_unfinished_counter_is_per_service_and_joins_other_blockers(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    store_compose(
+        tmp_path,
+        snapshot(
+            container(A, health="starting"),
+            container(B, service="migrate", status="created"),
+            container(C, service="migrate", status="exited"),
+            container("d" * 64, service="seed", status="exited"),
+        ),
+    )
+    names = ("web", "migrate", "seed")
+    target = compose_target(fake_cli, policy, names, completion=("migrate", "seed"))
+    result = wait(target, policy=policy, timeout=1.5, poll_interval=0.01)
+    assert result == Deadline(
+        DeadlineDetail(3, unhealthy_containers=1, unfinished_completion_containers=1)
+    )
+
+
+def test_compose_polls_until_the_completion_container_finishes(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    stages = [
+        migrating(status="created"),
+        migrating(status="running"),
+        migrating(status="restarting", restarting=True, exit_code=1),
+        migrating(status="exited"),
+    ]
+    store_compose(tmp_path, *stages)
+    target = compose_target(fake_cli, policy, MIGRATE, completion=("migrate",))
+    assert wait(target, policy=policy, timeout=10, poll_interval=0.01) == Success()
+    assert listings(tmp_path) == len(stages) + 1
+
+
+def test_compose_completion_failure_is_not_reached_while_restarting(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    store_compose(
+        tmp_path,
+        migrating(status="created"),
+        migrating(status="restarting", restarting=True, exit_code=1),
+        migrating(status="exited", exit_code=1),
+    )
+    target = compose_target(fake_cli, policy, MIGRATE, completion=("migrate",))
+    result = wait(target, policy=policy, timeout=10, poll_interval=0.01)
+    assert result == Failure(reason="completion_failed")
+    assert listings(tmp_path) == 3
+
+
+def test_compose_gone_completion_container_is_superseded_not_failed(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    store_compose(tmp_path, migrating(status="exited", exit_code=1))
+    target = compose_target(fake_cli, policy, MIGRATE, completion=("migrate",))
+    store_compose(
+        tmp_path, migrating(status="exited"), snapshot(container(A), listing=[A, B])
+    )
+    result = wait(target, policy=policy, timeout=5, poll_interval=0.01)
+    assert result == Failure(reason="superseded")
+
+
+def test_compose_completion_service_without_containers_is_unsupported(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    store_compose(tmp_path, snapshot(container(A)))
+    result = capture_compose(
+        fake_cli,
+        MIGRATE,
+        completion_services=("migrate",),
+        policy=policy,
+        timeout=5,
+    )
+    assert result == Failure(reason="unsupported")
+
+
+@pytest.mark.parametrize(
+    "final,expected",
+    [
+        (migrating(status="exited", exit_code=2), Failure(reason="completion_failed")),
+        (migrating(status="created"), Success()),
+        (
+            migrating(status="restarting", restarting=True, exit_code=1),
+            Success(),
+        ),
+    ],
+    ids=["nonzero", "created", "restarting"],
+)
+def test_compose_completion_success_needs_the_final_pass_to_finish_too(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    final: dict[str, Any],
+    expected: Failure | Success,
+) -> None:
+    done = migrating(status="exited")
+    store_compose(tmp_path, done, done, final, done, done)
+    target = compose_target(fake_cli, policy, MIGRATE, completion=("migrate",))
+    result = wait(target, policy=policy, timeout=10, poll_interval=0.01)
+    assert result == expected
+    assert listings(tmp_path) == (3 if isinstance(expected, Failure) else 5)
+
+
+def test_compose_final_pass_detects_completion_change_after_all_are_done(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    done = migrating(status="exited")
+    store_compose(tmp_path, done, done, snapshot(container(A)))
+    target = compose_target(fake_cli, policy, MIGRATE, completion=("migrate",))
+    result = wait(target, policy=policy, timeout=5, poll_interval=0.01)
+    assert result == Failure(reason="superseded")
+    assert listings(tmp_path) == 3
+
+
+@pytest.mark.parametrize("exit_code", [None, "0", False, 0.0])
+def test_compose_completion_without_a_usable_exit_code_is_malformed(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path, exit_code: object
+) -> None:
+    done = migrating(status="exited")
+    wire = container(B, service="migrate", status="exited")
+    if exit_code is None:
+        del wire["State"]["ExitCode"]
+    else:
+        wire["State"]["ExitCode"] = exit_code
+    damaged = snapshot(container(A), wire)
+    damaged["raw"] = {B: json.dumps([wire])}
+    store_compose(tmp_path, done, done, damaged)
+    target = compose_target(fake_cli, policy, MIGRATE, completion=("migrate",))
+    result = wait(target, policy=policy, timeout=5, poll_interval=0.01)
+    assert result == Failure(reason="malformed")
+    assert isinstance(result, Failure) and result.cause is None
+
+
+@pytest.mark.parametrize(
+    "completion",
+    [("db",), ("web", "web"), ["web"], "web", (1,), ("",)],
+    ids=["unselected", "duplicate", "list", "string", "not-string", "blank"],
+)
+def test_compose_capture_rejects_invalid_completion_before_launch(
+    fake_cli: DockerClient,
+    policy: InspectionPolicy,
+    tmp_path: Path,
+    completion: tuple[str, ...],
+) -> None:
+    store_compose(tmp_path, snapshot(container(A)))
+    with pytest.raises(ValueError):
+        capture_compose(
+            fake_cli,
+            ("web",),
+            completion_services=completion,
+            policy=policy,
+            timeout=5,
+        )
+    assert not (tmp_path / "calls").exists()
+
+
 @pytest.mark.parametrize(
     "changed",
     [
@@ -1470,6 +1744,12 @@ def broken(identity: str, kind: str) -> str:
         wire["Id"] = C
     elif kind == "no-state":
         del wire["State"]
+    elif kind == "no-exit-code":
+        del wire["State"]["ExitCode"]
+    elif kind == "string-exit-code":
+        wire["State"]["ExitCode"] = "0"
+    elif kind == "bool-exit-code":
+        wire["State"]["ExitCode"] = False
     elif kind == "string-flag":
         wire["State"]["Paused"] = "false"
     elif kind == "empty-status":
@@ -1501,6 +1781,9 @@ MALFORMED = [
     "short-id",
     "other-id",
     "no-state",
+    "no-exit-code",
+    "string-exit-code",
+    "bool-exit-code",
     "string-flag",
     "empty-status",
     "numeric-health",
@@ -1805,8 +2088,22 @@ WEB_SERVICE = ComposeService(name="web", config_hash="hash-1", container_ids=(A,
         {"name": "web", "config_hash": "hash-1", "container_ids": [A]},
         {"name": "", "config_hash": "hash-1", "container_ids": (A,)},
         {"name": "web", "config_hash": "", "container_ids": (A,)},
+        {
+            "name": "web",
+            "config_hash": "hash-1",
+            "container_ids": (A,),
+            "completion": 1,
+        },
     ],
-    ids=["empty", "blank-id", "duplicate-id", "list", "no-name", "no-hash"],
+    ids=[
+        "empty",
+        "blank-id",
+        "duplicate-id",
+        "list",
+        "no-name",
+        "no-hash",
+        "non-bool-completion",
+    ],
 )
 def test_compose_service_rejects_invalid_identity(fields_: dict[str, Any]) -> None:
     with pytest.raises(ValueError):

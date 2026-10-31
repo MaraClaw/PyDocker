@@ -35,8 +35,14 @@ from pywhales.reconciliation import (
     ResourceIdentity,
 )
 from tests.pywhales.test_convergence import (
+    A,
+    B,
     capture,
+    compose_target,
+    container,
     service,
+    snapshot,
+    store_compose,
     task,
 )
 from tests.pywhales.test_convergence import (
@@ -206,6 +212,13 @@ def test_missed_event_is_repaired_by_periodic_inventory() -> None:
             AttemptState.FAILED,
         ),
         (Failure(reason="observation"), "observation", AttemptState.FAILED),
+        (
+            Failure(
+                reason="completion_failed", cause=RuntimeError("credential-payload")
+            ),
+            "completion_failed",
+            AttemptState.FAILED,
+        ),
     ],
 )
 def test_public_convergence_outcomes_are_projected_without_raw_fields(
@@ -373,3 +386,41 @@ def test_real_cli_deadline_is_journaled_and_repeated_passes_only_observe(
     ]
     calls = [json.loads(line) for line in (tmp_path / "calls").read_text().splitlines()]
     assert sum(call[:2] == ["service", "ps"] for call in calls) == 3
+
+
+def test_real_cli_completion_failure_is_journaled_as_a_closed_reason(
+    fake_cli: DockerClient, policy: InspectionPolicy, tmp_path: Path
+) -> None:
+    store_compose(
+        tmp_path,
+        snapshot(
+            container(A),
+            container(B, service="migrate", status="exited", exit_code=3),
+        ),
+    )
+    target = compose_target(
+        fake_cli, policy, ("web", "migrate"), completion=("migrate",)
+    )
+
+    class CLIEndpoint(Endpoint):
+        @override
+        def observe(
+            self, context: ActionContext, resources: tuple[ResourceIdentity, ...]
+        ) -> Outcome:
+            super().observe(context, resources)
+            return wait(target, policy=policy, timeout=5, poll_interval=0.01)
+
+    store, endpoint = MemoryJournalStore(), CLIEndpoint()
+    owner = controller(store, endpoint)
+    result = owner.reconcile(
+        owner.claim(owner.submit(spec()), LeaseRequest("worker-a", 30))
+    )
+    assert result.progress.state is AttemptState.FAILED
+    assert result.progress.convergence == "completion_failed"
+    assert result.progress.deadline_detail is None
+    stored = store.read(spec().key)
+    assert stored is not None
+    assert stored.progress.convergence == "completion_failed"
+    rendered = json.dumps(asdict(result.progress))
+    assert "3" not in json.loads(rendered)["convergence"]
+    assert B not in rendered and "migrate" not in rendered

@@ -5,6 +5,13 @@ Import bounded observation/inventory APIs from the `pywhales` package root,
 `pywhales.convergence`. All are opt-in; none changes ordinary `DockerClient`
 calls automatically.
 
+## Contents
+
+- [Bounding batch inspection](#bounding-batch-inspection)
+- [Manifest lists](#manifest-lists)
+- [Waiting for convergence](#waiting-for-convergence): [Swarm](#swarm-service-or-stack), [Compose](#compose-project), [outcomes](#outcomes-and-budgets)
+- [Optional application reconciliation](#optional-application-reconciliation)
+
 ## Bounding Batch Inspection
 
 ```python
@@ -62,9 +69,9 @@ whose `records` tuple holds one `InventoryRecord` (`kind`, `id`, `payload`) per
 requested occurrence, in request order, duplicates kept. Each `payload` is a
 deep copy, independent of every other record and of the input handles, so
 mutating one changes nothing else. Capture never changes an existing handle's
-own cache. Supported kinds are twelve: `container`, `image`, `network`,
+own cache. Supported kinds are thirteen: `container`, `image`, `network`,
 `volume`, `node`, `service`, `config`, `secret`, `task`, `plugin`, `context`,
-and `builder`. `InventoryRequest.references` must be a nonempty tuple of
+`builder`, and `manifest_list`. `InventoryRequest.references` must be a nonempty tuple of
 nonempty strings, else `ValueError`. Empty input launches no CLI. Request
 shape, total reference count, and each reference's argv and environment limits
 are checked for every group before the first inspect launch.
@@ -85,7 +92,7 @@ and the listing's stdout/stderr bytes are charged to `max_response_bytes` and
 `max_total_response_bytes` like any captured call.
 
 `bulk_reload(handles, policy=policy)` from `pywhales.client_config` refreshes
-existing handles of the same twelve kinds, `Builder` included. It validates
+existing handles of the same thirteen kinds, `Builder` and `ManifestList` included. It validates
 every input kind and identity before any lookup, groups by the exact client
 configuration object plus kind, and inspects each distinct handle once; the
 same handle object passed twice is published once, while separate handle
@@ -95,6 +102,31 @@ any group leaves all caches unchanged. Publication then runs handle by handle,
 which isn't a daemon transaction and isn't atomic to concurrent readers. When
 `policy` is omitted, an active `observation()` scope applies instead, and
 outside such a scope its existing unbounded behavior is unchanged.
+
+### Manifest Lists
+
+Use registry references, not local image IDs, for `manifest_list` inventory:
+
+```python
+request = InventoryRequest(
+    kind="manifest_list",
+    references=("registry.example.com/team/app:release",),
+    client_config=client.client_config,
+)
+snapshot = capture_inventory([request], policy=policy)
+```
+
+Requests use secure inspection. Existing `ManifestList` handles are accepted
+too and retain their own `insecure` setting; there's no request-level insecure
+option. Each reference gets a singleton manifest inspect, not a batch command.
+`record.id` binds the exact requested reference, not a digest from the response.
+Records stay detached and ordered, with a separate record for each duplicate.
+
+As with other kinds, `bulk_reload` groups by the exact `ClientConfig` object,
+not equality, and stages and validates all groups before publishing any cache
+updates. A failure leaves all input caches untouched. Public
+`client.manifest.inspect()` and an individual `ManifestList.reload()` keep their
+existing lenient behavior; don't assume this bounded-capture validation there.
 
 The per-command reference limit bounds each inspect batch; aggregate reference
 accounting counts all requested occurrences, including duplicates, in one
@@ -209,10 +241,15 @@ from pywhales.convergence import (
 compose_client = DockerClient(
     compose_files=["compose.yaml"], compose_project_name="demo"
 )
-services = ("web", "worker")  # explicit, distinct, long-running services
+services = ("web", "migrate")  # web stays running; migrate must finish
 
 match capture_compose(
-    compose_client, services, policy=policy, timeout=10, cancel=cancel
+    compose_client,
+    services,
+    completion_services=("migrate",),
+    policy=policy,
+    timeout=10,
+    cancel=cancel,
 ):
     case ComposeTarget() as target:
         outcome = wait(
@@ -225,7 +262,7 @@ match capture_compose(
         print(f"Compose capture stopped: {type(stopped).__name__}")
 ```
 
-`capture_compose(client, services, *, policy, timeout, cancel=None)` returns a
+`capture_compose(client, services, *, completion_services: tuple[str, ...] = (), policy, timeout, cancel=None)` returns a
 `ComposeTarget` or a typed `Failure`/`Deadline`/`Cancelled`, so check for the
 target before waiting. Capture after `compose up` has returned, so the target
 fixes the containers you mean to wait for, and keep the client's Compose
@@ -235,6 +272,9 @@ waiting.
 - `services` is an explicit, nonempty `tuple` of distinct, nonempty names, never
   discovered. A list, an empty tuple, duplicates, or a client created with
   `compose_dry_run=True` raise `ValueError` before any launch.
+- `completion_services` is a tuple of distinct selected names, fixed at capture;
+  a list, duplicates, or a name outside `services` raises `ValueError` before
+  launch. The default `()` leaves every selected service long-running.
 - Capture lists the selected services' containers with stopped ones included,
   inspects each, and skips one-off `compose run` containers. For every selected
   service the target records the full container IDs and the single
@@ -250,14 +290,21 @@ waiting.
   vanished, or recreated container (any change to the ID set) or a changed
   service label or config hash is `superseded`, so a scale-up or recreate after
   capture ends the wait instead of moving the target.
-- A container counts as ready only when it is `running`, not restarting, not
+- An unmarked service's container counts as ready only when it is `running`, not restarting, not
   paused, and `healthy` whenever a healthcheck is configured; a configured
   healthcheck with no health status yet blocks, and a `NONE` healthcheck test
   counts as none. A container that exited 0, such as a one-shot job, isn't
-  running and stays a blocker for as long as it is selected, so select only
-  long-running services.
-- When a cycle finds every container ready, `wait()` lists and checks the
-  project again. `Success` needs that final pass to be ready and unchanged too.
+  running and stays a blocker unless its service was marked for completion.
+- A marked service completes only when every captured container is `exited`
+  with `ExitCode` 0 and not restarting. Created, running, or restarting
+  containers remain unfinished. A non-restarting container exited nonzero ends
+  the wait with payload-free `Failure(reason="completion_failed")`: no cause,
+  exit code, or container ID is included. An exited completion container with a
+  missing or malformed `ExitCode` yields `Failure(reason="malformed")` with no
+  cause. A service with no containers is still `unsupported`, not complete.
+- When a cycle finds all long-running services ready and completion services
+  finished, `wait()` lists and checks the project again. `Success` requires
+  that mandatory second pass to satisfy the same conditions and be unchanged.
   It proves the captured conditions at that moment, not application readiness
   beyond the configured healthchecks.
 
@@ -270,10 +317,13 @@ can outlast it. `poll_interval` is also positive finite seconds.
 complete polling cycle, not live state at expiry; it's absent when capture
 expired or no cycle finished. It holds `captured_services` plus counts of
 affected services per reason, each service counted at most once per reason and
-reasons allowed to overlap. For Compose the reasons are `non_running_containers`,
-`restarting_containers`, `paused_containers`, and `unhealthy_containers` (a
+reasons allowed to overlap. For Compose the long-running readiness counters are
+`non_running_containers`, `restarting_containers`, `paused_containers`, and `unhealthy_containers` (a
 configured healthcheck that isn't `healthy`, including still `starting` or not
 yet reported). A restarting or paused container also counts as non-running.
+`unfinished_completion_containers` counts affected completion services, not
+individual containers or replicas; the other readiness counters exclude
+completion services.
 
 A `Failure.cause` or a target's `template` may hold confidential wire data; they
 stay out of `repr()`, but don't log them without a confidentiality policy.
@@ -293,3 +343,4 @@ Leases don't fence Docker itself; there is no exactly-once guarantee or built-in
 reset/retry/delete workflow. Check installed signatures and the application's
 ownership/recovery design before opting in; don't replace failed mutating calls
 with blind retries.
+The journal's convergence failure vocabulary also accepts `completion_failed`.

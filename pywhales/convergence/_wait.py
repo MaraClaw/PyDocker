@@ -111,6 +111,7 @@ def capture_compose(
     client: DockerClient,
     services: tuple[str, ...],
     *,
+    completion_services: tuple[str, ...] = (),
     policy: InspectionPolicy,
     timeout: float,
     cancel: Event | None = None,
@@ -126,9 +127,13 @@ def capture_compose(
     Args:
         client: Client whose configuration selects the Compose project.
         services: Explicit, distinct service names; never inferred by discovery.
-            Select only long-running services. A one-shot service that exited 0 is a
-            blocker like any container that isn't ``running``, so ``wait`` can't
-            succeed while it is selected.
+            A service not marked as a completion service is long-running: its
+            containers must be ``running``, so an exited one-shot blocks ``wait``.
+        completion_services: Distinct names, a subset of ``services``, that are
+            expected to run once and exit. Such a service is done when every
+            captured container is ``exited`` with code 0 and not restarting, and a
+            container that exited nonzero and isn't restarting ends ``wait`` with
+            ``completion_failed``. Fixed at capture, unlike discovery.
         policy: Required observation limits.
         timeout: Positive finite total seconds for capture.
         cancel: Optional cancellation event.
@@ -140,12 +145,13 @@ def capture_compose(
 
     Raises:
         ValueError: If the timeout is invalid, services isn't a nonempty tuple of
-            distinct nonempty names, or the client is in dry-run mode.
+            distinct nonempty names, completion_services isn't a tuple of distinct
+            selected names, or the client is in dry-run mode.
     """
     _positive(timeout)
-    validate_selection(client.client_config, services)
+    validate_selection(client.client_config, services, completion_services)
     scope = observation(policy, deadline=time.monotonic() + timeout, cancel=cancel)
-    return capture_project(client.client_config, services, scope)
+    return capture_project(client.client_config, services, completion_services, scope)
 
 
 def wait(
@@ -163,6 +169,9 @@ def wait(
             Compose services. Compose re-lists the project each cycle: containers
             must be ``running``, not restarting or paused, and ``healthy`` if they
             have a healthcheck; membership or config-hash changes are ``superseded``.
+            Completion services instead need every container ``exited`` with code
+            0 and not restarting, and fail as ``completion_failed`` on a nonzero
+            exit that isn't restarting.
         policy: Required per-launch observation bounds.
         timeout: Positive finite total seconds from entry.
         poll_interval: Positive finite seconds between observations.

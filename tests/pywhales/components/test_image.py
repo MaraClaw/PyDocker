@@ -9,7 +9,7 @@ import contextlib
 import json
 import sys
 import time
-from collections.abc import Callable, Generator, Iterable
+from collections.abc import Callable, Generator, Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextvars import ContextVar
 from pathlib import Path
@@ -1826,10 +1826,26 @@ def test_empty_image_operations_keep_existing_result_shapes(
 ) -> None:
     result = image_commands.client.image.pull([], stream_logs=stream_logs)
 
-    assert isinstance(result, Generator) if stream_logs else isinstance(result, list)
+    assert not isinstance(result, list) if stream_logs else isinstance(result, list)
     assert list(result) == []
     assert image_commands.client.image.push([], stream_logs=stream_logs) is None
     assert image_commands.children == {}
+
+
+def test_empty_pull_stream_is_owned_without_executable_resolution() -> None:
+    client = DockerClient()
+    with patch(
+        "pywhales.client_config.shutil.which", side_effect=AssertionError("lookup")
+    ):
+        stream = client.image.pull([], stream_logs=True)
+        with stream as entered:
+            assert entered is stream
+            assert list(entered) == []
+            entered.close()
+            entered.close()
+        assert list(stream) == []
+        assert client.image.pull([]) == []
+        assert client.image.push([], stream_logs=True) is None
 
 
 @pytest.mark.parametrize("operation", ["pull", "push"])
@@ -2258,9 +2274,9 @@ def test_pull_nothing(ctr_client: DockerClient) -> None:
     assert len(result) == 0
 
 
-def test_pull_nothing_stream_logs(ctr_client: DockerClient) -> None:
-    result = ctr_client.image.pull([], stream_logs=True)
-    assert isinstance(result, Generator)
+def test_pull_nothing_stream_logs() -> None:
+    result = DockerClient().image.pull([], stream_logs=True)
+    assert isinstance(result, Iterator)
     assert len(list(result)) == 0
 
 

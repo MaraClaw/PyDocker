@@ -33,7 +33,7 @@ def _check_compose_build_contracts(client: DockerClient, stream: bool) -> None:
             sbom=False,
             push=True,
         ),
-        Iterable[tuple[str, bytes]] | None,
+        ProcessStream | None,
     )
     assert_type(
         client.compose.build(
@@ -45,7 +45,7 @@ def _check_compose_build_contracts(client: DockerClient, stream: bool) -> None:
             sbom=False,
             push=True,
         ),
-        Iterable[tuple[str, bytes]] | None,
+        ProcessStream | None,
     )
     assert_type(
         client.compose.build(
@@ -69,7 +69,7 @@ def _check_compose_up_contracts(client: DockerClient, stream: bool) -> None:
             abort_on_container_failure=True,
             exit_code_from="web",
         ),
-        Iterable[tuple[str, bytes]] | None,
+        ProcessStream | None,
     )
     assert_type(
         client.compose.up(
@@ -78,7 +78,7 @@ def _check_compose_up_contracts(client: DockerClient, stream: bool) -> None:
             abort_on_container_failure=True,
             exit_code_from="web",
         ),
-        Iterable[tuple[str, bytes]] | None,
+        ProcessStream | None,
     )
     assert_type(
         client.compose.up(

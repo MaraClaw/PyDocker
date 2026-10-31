@@ -45,6 +45,13 @@ environment for every launch from that client; omitting it (`None`) inherits
 the process environment unchanged. This does not affect executable lookup or
 the parent Python process's own environment.
 
+Keep this CLI configuration distinct from container `envs={...}`. Eligible
+`envs` values use a per-launch child environment with `--env KEY`; CLI-control
+names and environment collisions stay literal `KEY=VALUE` arguments. Neither
+path is a secret vault. See
+[Container environment values](containers-and-output.md#container-environment-values),
+including the Compose interpolation caveat.
+
 If passing an existing `client_config=...`, configure that object directly:
 the constructor retains it unchanged and ignores the other constructor options.
 

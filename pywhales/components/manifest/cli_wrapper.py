@@ -4,19 +4,29 @@ from collections.abc import Iterable
 from types import TracebackType
 from typing import Self, override
 
-from pydantic import JsonValue
+from pydantic import JsonValue, TypeAdapter
 
 from pywhales._json import loads_compat
 from pywhales.client_config import (
     ClientConfig,
     Command,
     DockerCLICaller,
+    ParsingError,
     ReloadableObjectFromJson,
 )
 from pywhales.components._cleanup import resource_cleanup
 from pywhales.components.buildx.imagetools.models import ImageVariantManifest
 from pywhales.components.manifest.models import ManifestListInspectResult
 from pywhales.utils import custom_parse_object_as, run, to_list, validate_timeout
+
+
+def _inspect_command(
+    client_config: ClientConfig, reference: str, insecure: bool
+) -> Command:
+    """Build the one-reference `manifest inspect` argv, keeping `--insecure`."""
+    cmd = Command([*client_config.docker_cmd, "manifest", "inspect", reference])
+    cmd.add_flag("--insecure", insecure)
+    return cmd
 
 
 class ManifestList(ReloadableObjectFromJson[ManifestListInspectResult]):
@@ -51,9 +61,7 @@ class ManifestList(ReloadableObjectFromJson[ManifestListInspectResult]):
 
     @override
     def _fetch_inspect_result_json(self, reference: str) -> dict[str, JsonValue]:
-        cmd = Command([*self.docker_cmd, "manifest", "inspect", reference])
-        cmd.add_flag("--insecure", self.insecure)
-        json_str = run(cmd)
+        json_str = run(_inspect_command(self.client_config, reference, self.insecure))
         return custom_parse_object_as(dict[str, JsonValue], {**loads_compat(json_str)})
 
     @override
@@ -92,6 +100,49 @@ class ManifestList(ReloadableObjectFromJson[ManifestListInspectResult]):
 
 
 ValidManifestList = ManifestList | str
+
+
+def _inspect_manifest_list_snapshot(
+    client_config: ClientConfig, reference: str, *, insecure: bool = False
+) -> ManifestListInspectResult:
+    """Run one strict `manifest inspect` and bind the reference as its name.
+
+    `docker manifest inspect` takes one list per launch and doesn't echo the
+    reference, so the name is bound here. The response is validated completely
+    before a snapshot is returned. Safe mode withholds the response and doesn't
+    chain input-bearing errors; the public lenient `inspect()` is unaffected.
+
+    Args:
+        client_config: Originating config used for the launch.
+        reference: Nonempty manifest-list reference; it is the only argument.
+        insecure: Keep `--insecure` on the launch.
+
+    Returns:
+        A snapshot whose `name` equals `reference`.
+
+    Raises:
+        ParsingError: If the reference is empty, or the output is empty, invalid
+            JSON, not an object, invalid for the model, or names another list.
+    """
+    if not isinstance(reference, str) or not reference:
+        raise ParsingError("Missing manifest-list reference")
+    output = run(_inspect_command(client_config, reference, insecure))
+    try:
+        data = TypeAdapter(dict[str, JsonValue]).validate_json(output, strict=True)
+        for wire, field in (
+            ("schemaVersion", "schema_version"),
+            ("mediaType", "media_type"),
+        ):
+            if wire in data:
+                data[field] = data.pop(wire)
+        snapshot = ManifestListInspectResult.model_validate(data, strict=True)
+    except ValueError as err:
+        if client_config.raw_diagnostics:
+            raise ParsingError("Invalid manifest-list inspect response") from err
+        raise ParsingError("Invalid manifest-list inspect response") from None
+    if snapshot.name not in (None, reference):
+        raise ParsingError("Manifest-list inspect response names another list")
+    return snapshot.model_copy(update={"name": reference})
 
 
 class ManifestCLI(DockerCLICaller):

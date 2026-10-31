@@ -26,7 +26,50 @@ from pywhales.client_config import (
     ReloadableObjectFromJson,
     bulk_reload,
 )
+from pywhales.components.manifest.cli_wrapper import ManifestList
+from pywhales.components.manifest.models import ManifestListInspectResult
 from pywhales.exceptions import DockerException
+
+
+def test_manifest_bulk_reload_launches_per_handle_and_publishes_once() -> None:
+    config = ClientConfig(_client_call_with_path=["docker-test"])
+    first = ManifestList(config, "same", is_immutable_id=True, insecure=True)
+    second = ManifestList(config, "same", is_immutable_id=True)
+    output = CompletedProcess([], 0, b'{"schemaVersion":2}', b"")
+    with (
+        patch("subprocess.run", return_value=output) as run,
+        patch.object(
+            first, "_set_inspect_result", wraps=first._set_inspect_result
+        ) as publish,
+    ):
+        bulk_reload([first, second, first])
+    assert [call.args[0][1:] for call in run.call_args_list] == [
+        ["manifest", "inspect", "same", "--insecure"],
+        ["manifest", "inspect", "same"],
+    ]
+    publish.assert_called_once()
+    assert first._inspect_result == second._inspect_result
+    assert first._inspect_result is not second._inspect_result
+
+
+def test_manifest_bulk_late_failure_preserves_caches() -> None:
+    config = ClientConfig(_client_call_with_path=["docker-test"])
+    other = ClientConfig(_client_call_with_path=["docker-test"])
+    first = ManifestList(config, "first", is_immutable_id=True)
+    second = ManifestList(other, "second", is_immutable_id=True)
+    for handle in (first, second):
+        handle._set_inspect_result(ManifestListInspectResult(name=handle.reference))
+    before = [(h._inspect_result, h._last_refreshed_time) for h in (first, second)]
+    responses = [
+        CompletedProcess([], 0, b"{}", b""),
+        CompletedProcess([], 0, b"[]", b""),
+    ]
+    with patch("subprocess.run", side_effect=responses), pytest.raises(ParsingError):
+        bulk_reload([first, second])
+    assert [
+        (h._inspect_result, h._last_refreshed_time) for h in (first, second)
+    ] == before
+
 
 RESOURCE_TYPES = [
     Builder,

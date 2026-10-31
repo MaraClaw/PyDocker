@@ -2,109 +2,76 @@
 
 ## Configuration And Policy
 
-- Resources keep the originating `ClientConfig`; equality is immutable ID plus config equality. `add_simple_arg()` omits only
-  `None` (keeping `0`, `False`); `add_flag()` emits truthy values; optional Docker globals use `is True`. Compose globals sit
-  between `compose` and the subcommand (`get_compose_command()`; explicit `progress` wins per call); keep `compose_env_files` order.
-- Executable lookup is lazy: `get_client_call_with_path()` caches the `shutil.which()` result plus prefix arguments, not the
-  global options `docker_cmd` rebuilds. `docker_cmd` starts with `PolicyExecutable`, a `str` carrier of the originating config
-  that survives `Command`/list composition, `copy()`, and `deepcopy()`; call `get_execution_policy()` before stringifying argv.
-- Each launch snapshots buffer budget, diagnostics flag, telemetry observer (by reference), environment, and `default_timeout`
-  or the innermost `execution_timeout()` scope for the identical config. Later mutations affect new launches only.
-- `ReloadableObject` stores an immutable ID (`is_immutable_id=True` skips the first inspect); snapshots expire after
-  `CACHE_VALIDITY_PERIOD = 0.01` seconds and `reload()` forces a fetch. `DockerCamelModel` accepts Python names and aliases;
-  keep the acronym exceptions in `to_docker_camel()` (`ExecIDs`, `IPAddress`, `OOMKilled`, `RootFS`, `DefaultAPIVersion`).
-- `exceptions.py` selects a kind from an ordered table of line-start stderr patterns; add a kind there, not as a substring
-  test. Names and context paths can't pick one. Application stderr forwarded by `run`/`exec` can be misclassified, by design.
+- Resources retain the originating `ClientConfig`; equality is immutable ID plus config equality. `add_simple_arg()` omits only `None` (keeps `0`, `False`); `add_flag()` uses truthiness; optional Docker globals use `is True`.
+  Compose globals sit between `compose` and the subcommand (`get_compose_command()`); explicit per-call `progress` wins and `compose_env_files` order matters.
+- Lookup is lazy: `get_client_call_with_path()` caches `shutil.which()` plus prefix arguments, not globals rebuilt by `docker_cmd`.
+  Its leading `PolicyExecutable` carries config through `Command`/list composition, `copy()` and `deepcopy()`; get execution policy before stringifying argv.
+- Each launch snapshots buffer budget, diagnostics, observer by reference, environment, and default or innermost `execution_timeout()` for the identical config; later mutations affect new launches only.
+- `ReloadableObject` stores immutable identity; `is_immutable_id=True` skips initial inspect, `CACHE_VALIDITY_PERIOD = 0.01` seconds expires snapshots, and `reload()` forces inspection.
+- `DockerCamelModel` accepts names and aliases; preserve `to_docker_camel()` exceptions (`ExecIDs`, `IPAddress`, `OOMKilled`, `RootFS`, `DefaultAPIVersion`).
+- `exceptions.py` uses ordered line-start stderr patterns, not substrings, names, or context paths. Forwarded application stderr from `run`/`exec` can still be misclassified.
+
+## Container Environment Transport
+
+- `_environment.py::container_environment` is shared by container `create`/`run`/`execute`, Compose `run`/`execute`, and service `create`.
+- Safe noncolliding names become `--env KEY`; values move to per-launch overrides bound to the effective child-environment snapshot, never to process-global `os.environ`.
+- Reserved CLI/runtime names or prefixes, invalid names/values, non-string keys, and ambient/client collisions retain ordered literal `KEY=value` arguments rather than new rejection or env-file behavior.
+- A matching frozen scope supplies collision checks without consuming its one-use snapshot. Windows checks names case-insensitively; all equivalent mapping entries stay literal.
+- Existing stringification (including non-string values) and empty values survive. `_ContainerEnvironment` binds the collision snapshot so later ambient/client changes cannot change the launch decision.
+- This reduces argv exposure, not universal redaction: literal fallbacks, child environments, returned data, raw exception attributes, and caller logging can still carry values; see confidentiality below.
+- Compose receives the same child overrides for config interpolation; these are not a container-only secret channel. Tests: `tests/pywhales/components/test_env_forwarding.py` and `test_env_branch_transport.py`.
 
 ## Bulk Reload And Inventory
 
-- `bulk_reload()` covers 12 kinds: Container, Image, Network, Volume, Node, Service, Config, Secret, Task, Plugin, Context,
-  Builder. Reject unsupported kinds and missing identities across all input before any CLI lookup; empty input is a no-op.
-  Group by exact `ClientConfig` object identity plus kind, never config equality; inspect each distinct handle once.
-- Builders have no batch inspect: each group runs one strict `buildx ls --format "{{json . }}"` (`parse_builder_listing`).
-  Names match exactly, reach no argv, and yield one handle per request in order. Only byte-identical lines collapse (node rows
-  repeat them); a non-builder line, null or empty name, or conflicting entry rejects the listing. Safe mode withholds names.
-- Stage and validate every group before touching original caches or timestamps; staged identity must equal stored identity
-  exactly, without freshness-triggering accessors. Publish once per distinct handle (separate handles for one identity each
-  publish). Any group failure leaves every cache unchanged. It's no daemon transaction and isn't atomic for concurrent
-  readers: groups inspect separately and handles publish sequentially.
-- `capture_inventory()` reuses that staging but never publishes: it returns ordered, detached `InventoryRecord`s (deep copies,
-  duplicates kept), leaving inputs untouched. Reference totals are checked before any launch, chunks respect `max_references` and launch
-  limits, and each group's measured environment is frozen for its inspect launches. Alias drift, inconsistent snapshots, or
-  Swarm ambiguity across chunks reject it. `bulk_reload()` stages under `observation()` only with a `policy` or an active scope.
+- Both support 13 kinds: Container, Image, Network, Volume, Node, Service, Config, Secret, Task, Plugin, Context, Builder, and ManifestList (`manifest_list` in `InventoryKind`).
+- Bulk reload rejects unsupported kinds and missing identities before CLI lookup; empty input is inert. Group by exact config object identity plus kind, not config equality; inspect each distinct handle once.
+- Builders use one strict `buildx ls --format "{{json . }}"` per group (`parse_builder_listing`): exact names never reach argv, with ordered handles per request.
+  Only byte-identical lines collapse; non-builder data, null/empty names, and conflicting entries reject. Safe mode withholds names.
+- Manifest lists require per-reference inspection, never generic batching; each handle's `insecure` flag follows its launch. Strict helper and lenient public inspection differ: [manifest guide](components/manifest/AGENTS.md).
+- Stage all groups before any cache/timestamp publication; staged identity equals stored identity exactly without freshness accessors. Any group failure leaves all originals unchanged; each distinct handle publishes once.
+- This is neither a daemon transaction nor atomic for concurrent readers: groups inspect separately and successful handles publish sequentially.
+- `capture_inventory()` never publishes: ordered detached deep-copied records retain duplicates and leave inputs untouched.
+- Check reference totals before launching; chunks obey `max_references` and launch limits, with each group's measured environment frozen. Alias drift, inconsistent snapshots, or cross-chunk Swarm ambiguity reject capture.
+- Bulk reload uses bounded staging only with an explicit `policy` or active `observation()`; tests: `tests/pywhales/test_bulk_reload*.py` and `test_inventory*.py`.
 
 ## Observation And Subprocesses
 
-- `observation(policy, deadline=, cancel=)` nests by minimum: per-command limits take the smaller value, optional totals the
-  smaller non-`None`, the earliest finite monotonic deadline wins, and every enclosing token stays effective. Entry and exit
-  check cancellation, then the deadline. A scope with `max_total_response_bytes` adds a shared `_ResponseAccount`; captured
-  bytes charge every enclosing account under its lock before the first overflow is reported. `max_total_stream_bytes` adds a
-  separate `_StreamAccount` the same way (`ObservationState.stream_accounts`, default `()`): captured output never charges it
-  and streams never charge a response account. `binds_launches` (deadline, token, or stream account) decides whether a stream or
-  archive keeps the snapshot; a budget alone adds no timer to a wait.
-- `run()` consults `get_observation()` before its timeout/input branches: an observed call always takes `bounded_capture`, even
-  with no timeout or input, and rejects `tty`, uncaptured output, or `input` with `ValueError`. Only unobserved calls use
-  `subprocess.run()` (no timeout, no input) or `Popen.communicate()` (timeout or input, owned stdin-writer cleanup).
-- `check_scoped_launch()` runs before `Popen` and telemetry; `E2BIG` maps to `ObservationLimitError("native_argv")`. Capture
-  precedence: cancel token, then a command deadline strictly earlier than the scope's (only while the child runs), then the
-  scope; tokens add only the bounded `CANCEL_CHECK` (50 ms) wait. Streams and archives snapshot the scope once at launch (lazy
-  `save` at first iteration), and the watchdog or `ArchiveDeadline` keeps applying it after the `with` exits.
-- Stream budget: a `ProcessStream` reader charges stdout and stderr at the raw pipe read under the queue lock, cutting each read
-  to the smallest remaining allowance plus one byte (`stream_allowance`) so overflow measures limit + 1. An overflow records
-  `ObservationLimitError("total_stream")` as the scope error, stops, kills and reaps the child, and is delivered once; no reader
-  thread raises. `ArchiveDeadline` charges only `read()` on the caller's thread and takes the same expiry path (`_Stop`
-  `"limit"`); its watchdog drain and the post-exit stderr `record_read` never charge, so `NoSuchImage` still wins.
-- A timeout is `None` or positive finite seconds, never `bool`, validated before launch. Deadlines are monotonic from launch and
-  advance while consumption is paused; natural exit leaves post-exit draining unchanged. Expiry kills and reaps the local CLI
-  before `DockerTimeout` keeps captured output; natural nonzero exits keep stderr-selected `DockerException` types.
-- A bare loop `break` doesn't close an owned stream; use its context manager or `close()`, even before the first iteration.
-  Closing cancels only the local CLI. `close()` is idempotent, waits for cleanup, delivers a recorded error once, and never
-  replaces an active body exception.
-- POSIX pipe workers wait on readiness (pipe plus `WakeLatch`; a reaper thread publishes child exit); only a real deadline, a
-  cancel token, or Windows pipe slices may time a wait. Every stop path `set()`s the latch; `close()` it after waiters are
-  joined. `ArchiveDeadline` waits under its pipe lock, so expiry never closes a pipe beneath a wait.
+- `observation(policy, deadline=, cancel=)` intersects per-command limits, non-`None` totals and finite monotonic deadlines; all enclosing tokens remain effective. Entry/exit check cancellation before deadline.
+- Captured bytes charge every enclosing locked `_ResponseAccount` before reporting overflow; streams charge separate `_StreamAccount`s (`ObservationState.stream_accounts`, default `()`), never each other's accounts.
+- `binds_launches` (deadline, token, or stream account) retains stream/archive scope snapshots; a budget alone adds no wait timer.
+- `run()` checks observation before timeout/input branches: observed calls always use `bounded_capture` and reject TTY, uncaptured output, or input with `ValueError`.
+- Only unobserved calls use `subprocess.run()` (no timeout/input) or `Popen.communicate()` (timeout/input, with owned stdin-writer cleanup).
+- `check_scoped_launch()` precedes `Popen` and telemetry; `E2BIG` becomes `ObservationLimitError("native_argv")`.
+- Capture precedence is cancellation, then a command deadline strictly earlier than the scope's while the child runs, then scope expiry. Tokens add only `CANCEL_CHECK` (50 ms) waits.
+- Streams/archives snapshot once at launch (lazy `save` at first iteration); watchdog or `ArchiveDeadline` keeps enforcing it after scope exit.
+- `ProcessStream` charges raw stdout/stderr reads under the queue lock, limiting reads to smallest `stream_allowance` + 1. Overflow records `ObservationLimitError("total_stream")`, kills/reaps, and delivers once; readers never raise it.
+- `ArchiveDeadline` charges only caller-thread `read()` and expires via `_Stop("limit")`; watchdog drains and post-exit stderr `record_read` do not charge, preserving `NoSuchImage` precedence.
+- Timeouts are `None` or positive finite seconds, never bool, validated before launch. Monotonic launch deadlines advance while paused; expiry kills/reaps then raises `DockerTimeout` with output. Natural nonzero exits keep stderr-selected types and post-exit draining.
+- Bare `break` does not close an owned stream: use a context manager or `close()`, even before iteration. Closing cancels only the local CLI and waits for cleanup; it is idempotent.
+- Recorded errors remain deliverable once after close or at clean context exit; cleanup must not replace an active body exception.
+- POSIX workers wait on pipe readiness plus `WakeLatch`; a reaper publishes exit. Only deadlines, tokens, or Windows pipe slices time waits.
+- Every stop path sets the latch; close it after joining waiters. `ArchiveDeadline` holds its pipe lock while waiting, so expiry cannot close a pipe beneath a wait.
 
 ## Buffers, Errors, And Confidentiality
 
-- `stream_buffer_bytes=None` is unbounded; a budget is a positive integer, not `bool`. Omitted `buffer_bytes` (`DEFAULT_BUFFER`)
-  inherits it at the shared stream boundary; explicit `None` stays unbounded. `image_stream_buffer_bytes` is a separate override
-  (non-`None` wins) never folded into the config; the image guide covers operation snapshots.
-- Queued payload shares one budget across stdout/stderr; each pipe's unfinished record and the stderr history have own bounds, so
-  it isn't a total-memory cap. Oversized records raise `BufferError`; pressure blocks producers rather than dropping output.
-  Closing or failing wakes blocked parties; keep terminal errors outside the payload queue and never erase a recorded one.
-- Automatic diagnostics omit argv, environment values, and captured payloads by default; `raw_diagnostics=True` is a per-client
-  opt-in. Raw `docker_command`/`stdout`/`stderr` attributes stay intact and confidential; explicit output, uncaptured terminal
-  output, and caller logging are outside the policy. Safe inspect failures dump no response and chain no input-bearing errors.
+- `stream_buffer_bytes=None` is unbounded; budgets are positive integers, not bool. Omitted `DEFAULT_BUFFER` inherits at the shared boundary; explicit `None` stays unbounded. The separate non-`None` image override wins without config normalization; see the image guide.
+- Stdout/stderr queued payload shares one budget; unfinished pipe records and stderr history have separate bounds, not a total-memory cap.
+- Oversized records raise `BufferError`; pressure blocks rather than drops. Close/failure wakes waiters; terminal errors stay outside the payload queue and must not be erased.
+- Automatic diagnostics omit argv, environment values and captured payloads unless that client enables `raw_diagnostics=True`. Safe inspect failures dump no response and chain no input-bearing errors.
+- Raw `docker_command`/`stdout`/`stderr` attributes remain confidential and intact; explicit output, uncaptured terminal output and caller logging are outside this policy.
 
 ## JSON Utility
 
-- `_json.py` offers explicit native `dumps`/`loads` using orjson and compatible
-  `dumps_compat`/`loads_compat` using the standard library; neither falls back.
-  Native dumps returns compact bytes, writes non-finite floats as null, and rejects
-  oversized integers and lone surrogates; native loads rejects non-finite tokens
-  and can decode oversized integers as floats. Compat dumps returns ASCII-escaped
-  text and supports `sort_keys`, `indent`, `separators`, and `allow_nan`, preserving
-  standard-library number handling and errors.
-- Existing CLI decoders, canonical hashes, raw diagnostic files, delivery REST
-  serialization, and the benchmark use compat to preserve accepted inputs,
-  exact JSON bytes, error types, and JSON-mode Pydantic validation. Fleet contract and harness stay on the
-  standard library to avoid SDK imports; the isolated distribution smoke child
-  stays independent of the checkout. Test fixture oracles and Pydantic JSON
-  methods also remain unchanged.
+- `_json.py` native `dumps`/`loads` use orjson; compat uses stdlib, never fallback. Native dumps compact bytes, maps nonfinite floats to null, rejects oversized integers/lone surrogates; loads rejects nonfinite tokens and may decode oversized integers as floats.
+- `dumps_compat`/`loads_compat` retain stdlib numbers/errors; dumps ASCII-escaped text with `sort_keys`, `indent`, `separators`, `allow_nan`. CLI decoders, canonical hashes, raw diagnostic files, delivery REST and benchmark retain compat bytes and JSON-mode Pydantic validation.
+- Fleet contract/harness stay stdlib-only; isolated distribution smoke stays checkout-independent. Fixture oracles and Pydantic JSON methods remain unchanged.
 
 ## Telemetry
 
-- `telemetry/_records.py`: schema-4 `LaunchRecord`/`CompletionRecord` and `TelemetryObserver`; `_lifecycle.py`:
-  `ExecutionTelemetry` and `deliver()`; `_exporter.py`: `BoundedExporter`. This section is the package's only guide.
-- Records hold only a fixed family (`captured`, `stream`, `archive_load`, `archive_save`), opaque attempt ID, closed outcome,
-  duration, byte counts, and return code. Never add argv, endpoints, environment, output, or exception text, even with raw diagnostics.
-- The observer is snapshotted at launch; none means no clock, ID, or callback. `start()` runs at the launch seam after preflight
-  (observation rejections emit nothing); `finish()` publishes the first completion once, and observer exceptions are swallowed.
-- Outcomes are `success`, `failure`, `timeout`, `closed`, `cancelled`, `limit`. `outcome_of()` in `_lifecycle.py` is the one
-  exception-to-outcome map for captured runs, archives, the stream launcher (so a `native_argv` refusal after `start()` is
-  `limit`), and the error a stream delivers: `DockerTimeout`/`ObservationTimeout` timeout, `ObservationCancelled` cancelled,
-  `ObservationLimitError` limit, `GeneratorExit` closed, anything else (`KeyboardInterrupt`, `BufferError`) failure.
-  `ProcessStream._stop_outcome()` picks the stream's by delivery order (expired, scope error, reader error) at terminal delivery
-  and in `close()`; with no recorded stop `close()` is `closed`, and one it finds itself (a set token) keeps its outcome.
-- `BoundedExporter` is application-owned and creates no worker, timer, or network: calls enqueue or drop newest, and
-  `flush()`/`shutdown()` run the sink on the caller's thread over a finite snapshot, counting failures without retry.
+- This is telemetry's only guide: `telemetry/_records.py` defines schema-4 `LaunchRecord`/`CompletionRecord`/`TelemetryObserver`; `_lifecycle.py` owns `ExecutionTelemetry`/`deliver()`; `_exporter.py` owns `BoundedExporter`.
+- Records contain only fixed family (`captured`, `stream`, `archive_load`, `archive_save`), opaque attempt ID, closed outcome, duration, byte counts and return code. Never add argv, endpoints, environment, output or exception text, even in raw mode.
+- Snapshot observer at launch; none means no clock, ID or callback. `start()` follows preflight (observation refusals emit nothing); `finish()` publishes only the first completion. Ordinary observer exceptions are swallowed.
+- Outcomes: `success`, `failure`, `timeout`, `closed`, `cancelled`, `limit`. Shared `outcome_of()` maps Docker/observation timeout, observation cancellation/limit, and `GeneratorExit` respectively; all others, including `KeyboardInterrupt`/`BufferError`, are failure.
+- Captured runs, archives, stream launch and delivered stream errors share that map; `native_argv` refusal after `start()` is `limit`.
+- `ProcessStream._stop_outcome()` follows delivery order: expired, scope error, reader error. Terminal delivery and close agree; close without a stop is `closed`, while a token discovered during close retains its outcome.
+- `BoundedExporter` creates no worker/timer/network: enqueue or drop newest; caller-thread `flush()`/`shutdown()` export a finite snapshot, counting sink failures without retry.

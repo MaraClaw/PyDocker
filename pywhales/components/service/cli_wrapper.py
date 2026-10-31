@@ -17,6 +17,7 @@ from typing import (
 from pydantic import JsonValue
 
 import pywhales.components.task.cli_wrapper
+from pywhales._environment import container_environment
 from pywhales._json import loads_compat
 from pywhales.client_config import (
     ClientConfig,
@@ -43,6 +44,7 @@ from pywhales.enums import (
 )
 from pywhales.exceptions import NoSuchService
 from pywhales.utils import (
+    ProcessStream,
     ValidPath,
     custom_parse_object_as,
     format_mapping_for_cli,
@@ -330,7 +332,8 @@ class ServiceCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--endpoint-mode", endpoint_mode)
         full_cmd.add_simple_arg("--entrypoint", entrypoint)
 
-        full_cmd.add_args_iterable_or_single("--env", format_mapping_for_cli(envs))
+        env_arguments, child_env = container_environment(envs, self.client_config)
+        full_cmd.add_args_iterable("--env", env_arguments)
         full_cmd.add_args_iterable_or_single("--env-file", env_files)
 
         full_cmd.add_args_iterable_or_single("--generic-resource", generic_resources)
@@ -371,7 +374,7 @@ class ServiceCLI(DockerCLICaller):
             for string in to_list(command):
                 full_cmd.append(string)
 
-        service_id = run(full_cmd, timeout=timeout)
+        service_id = run(full_cmd, env=child_env, timeout=timeout)
         return Service(self.client_config, service_id, is_immutable_id=True)
 
     @overload
@@ -468,7 +471,7 @@ class ServiceCLI(DockerCLICaller):
         *,
         stream: Literal[True],
         timeout: float | None = None,
-    ) -> Iterable[tuple[str, bytes]]: ...
+    ) -> ProcessStream: ...
 
     @overload
     def logs(
@@ -486,7 +489,7 @@ class ServiceCLI(DockerCLICaller):
         stream: bool = False,
         *,
         timeout: float | None = None,
-    ) -> str | Iterable[tuple[str, bytes]]: ...
+    ) -> str | ProcessStream: ...
 
     def logs(
         self,
@@ -503,7 +506,7 @@ class ServiceCLI(DockerCLICaller):
         stream: bool = False,
         *,
         timeout: float | None = None,
-    ) -> str | Iterable[tuple[str, bytes]]:
+    ) -> str | ProcessStream:
         """Return collected service logs or an owned byte stream.
 
         Service inspection runs first, outside the logs deadline. The logs CLI

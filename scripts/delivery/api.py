@@ -1,6 +1,5 @@
 """Bounded curl transport and paginated typed REST access."""
 
-import json
 import os
 import selectors
 import subprocess
@@ -10,6 +9,8 @@ from dataclasses import dataclass
 from typing import Protocol, override
 
 from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
+
+from pywhales._json import dumps_compat
 
 from . import limits
 from .models import Artifact, Job, PullNumber, Release, Repository
@@ -182,7 +183,7 @@ def page_items(body: bytes, envelope: str | None) -> tuple[list[JsonValue], int 
 def parse_item[T: BaseModel](model: type[T], item: JsonValue) -> T:
     """Validate one listed item; the typed error would echo the rejected input."""
     try:
-        return model.model_validate_json(json.dumps(item))
+        return model.model_validate_json(dumps_compat(item))
     except ValidationError:
         raise Rejected("pagination item malformed") from None
 
@@ -264,4 +265,4 @@ class GitHub:
 
 def json_body(value: JsonValue) -> bytes:
     """Serialize a REST request without executing supplied content."""
-    return json.dumps(value).encode()
+    return dumps_compat(value).encode()

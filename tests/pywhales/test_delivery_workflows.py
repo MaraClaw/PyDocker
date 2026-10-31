@@ -2580,3 +2580,194 @@ def test_job_and_artifact_callers_reject_unreliable_total_count(
         reason = "total_count missing" if fault == "missing" else "total_count mismatch"
         with pytest.raises(Rejected, match=reason):
             call(service.api, run)
+
+
+JSON_BODY_EDGES: dict[str, tuple[JsonValue, bytes]] = {
+    "unicode": (
+        {"text": "caf\u00e9 \u2014 \u65e5\u672c \U0001f600"},
+        b'{"text": "caf\\u00e9 \\u2014 \\u65e5\\u672c \\ud83d\\ude00"}',
+    ),
+    "unpaired-surrogates": ({"text": "\ud800x\udc00"}, b'{"text": "\\ud800x\\udc00"}'),
+    "control-characters": (
+        '\x00\x1f\x7f/"\\',
+        b'"\\u0000\\u001f\\u007f/\\"\\\\"',
+    ),
+    "non-finite": (
+        [float("nan"), float("inf"), float("-inf")],
+        b"[NaN, Infinity, -Infinity]",
+    ),
+    "oversized-integers": (
+        {"n": 2**70, "m": -(2**64)},
+        b'{"n": 1180591620717411303424, "m": -18446744073709551616}',
+    ),
+}
+JSON_NOTES = "### Added\n\n- Caf\u00e9 \u2014 \u65e5\u672c\u8a9e \U0001f600 a\u2028b"
+JSON_NOTES_WIRE = b'"### Added\\n\\n- Caf\\u00e9 \\u2014 \\u65e5\\u672c\\u8a9e \\ud83d\\ude00 a\\u2028b"'
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ({}, b"{}"),
+        ([], b"[]"),
+        (None, b"null"),
+        ("plain", b'"plain"'),
+        (
+            {"ref": "refs/tags/v1", "sha": "a" * 40},
+            b'{"ref": "refs/tags/v1", "sha": "' + b"a" * 40 + b'"}',
+        ),
+        (
+            {"body": "x", "draft": False, "n": [1, 2.5, None, True]},
+            b'{"body": "x", "draft": false, "n": [1, 2.5, null, true]}',
+        ),
+    ],
+)
+def test_json_body_uses_stdlib_default_separators(
+    value: JsonValue, expected: bytes
+) -> None:
+    body = http.json_body(value)
+    assert type(body) is bytes
+    assert body == expected
+
+
+@pytest.mark.parametrize("case", JSON_BODY_EDGES)
+def test_json_body_serializes_arbitrary_json_values_exactly(case: str) -> None:
+    value, expected = JSON_BODY_EDGES[case]
+    body = http.json_body(value)
+    assert body == expected and body.isascii()
+    assert json.dumps(json.loads(body)).encode() == expected
+
+
+def test_parse_item_validates_in_json_mode_for_strict_models() -> None:
+    item = job_item(7)
+    with pytest.raises(ValidationError):
+        Job.model_validate(item)
+
+    parsed = http.parse_item(Job, item)
+
+    assert parsed.id == 7
+    assert parsed.started_at == datetime(2026, 1, 1, tzinfo=UTC)
+    assert parsed.completed_at == datetime(2026, 1, 2, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("body", float("nan")),
+        ("body", float("inf")),
+        ("body", float("-inf")),
+        ("id", float("nan")),
+        ("tag_name", "\ud800"),
+    ],
+    ids=["nan-body", "inf-body", "negative-inf-body", "nan-id", "unpaired-surrogate"],
+)
+def test_parse_item_rejects_non_finite_and_unpaired_surrogate_values(
+    field_name: str, value: JsonValue
+) -> None:
+    item = {**LISTINGS["releases"].item(1), field_name: value}
+
+    with pytest.raises(Rejected) as rejected:
+        http.parse_item(Release, item)
+
+    assert str(rejected.value) == "pagination item malformed"
+
+
+def test_parse_item_keeps_integers_beyond_64_bits_and_unicode_exact() -> None:
+    oversized = 2**70
+    tag = "v\u00e9\u65e5\U0001f600"
+    item = {
+        **LISTINGS["releases"].item(1),
+        "id": oversized,
+        "tag_name": tag,
+        "body": "a\u2028b",
+    }
+
+    release = http.parse_item(Release, item)
+
+    assert type(release.id) is int and release.id == oversized
+    assert release.tag_name == tag and release.body == "a\u2028b"
+    assert http.parse_item(PullNumber, {"number": oversized}).number == oversized
+
+
+def test_pages_keep_distinct_integers_beyond_double_precision() -> None:
+    first, second = 2**70, 2**70 + 1
+    assert float(first) == float(second)
+    listing = LISTINGS["releases"]
+    distinct: list[JsonValue] = [
+        {**listing.item(1), "id": first},
+        {**listing.item(2), "id": second},
+    ]
+    server = Pager(lambda _page: listing.page(distinct))
+
+    found = server.api().pages(listing.path, Release)
+
+    assert [release.id for release in found] == [first, second]
+    assert server.urls == [listing.url(1)]
+
+    repeated: list[JsonValue] = [
+        {**listing.item(1), "id": first},
+        {**listing.item(2), "id": first},
+    ]
+    server = Pager(lambda _page: listing.page(repeated))
+    with pytest.raises(Rejected, match="repeated item"):
+        server.api().pages(listing.path, Release)
+
+
+@pytest.mark.parametrize("token", [b"NaN", b"Infinity", b"-Infinity"])
+def test_pages_reject_non_finite_tokens_inside_items(token: bytes) -> None:
+    body = (
+        b'[{"id": 1, "tag_name": "v1", "draft": false, "prerelease": false, '
+        b'"body": ' + token + b"}]"
+    )
+    server = Pager(lambda _page: Response(200, body))
+
+    with pytest.raises(Rejected, match="pagination item malformed"):
+        server.api().pages("releases", Release)
+
+    assert server.urls == [LISTINGS["releases"].url(1)]
+
+
+@dataclass
+class Recorder(Transport):
+    """Wrap a transport and keep every request body exactly as sent."""
+
+    inner: Transport
+    writes: list[tuple[str, str, bytes]] = field(default_factory=list)
+
+    @override
+    def request(self, method: str, url: str, body: bytes | None = None) -> Response:
+        if body is not None:
+            self.writes.append((method, url.removeprefix(BASE_URL), body))
+        return self.inner.request(method, url, body)
+
+
+def test_release_requests_send_unicode_notes_as_ascii_json_bytes(
+    service: Service,
+) -> None:
+    sealed = sealed_release(service)
+    document = sealed.model_copy(
+        update={"seal": sealed.seal.model_copy(update={"notes": JSON_NOTES})}
+    )
+    fake = ReleaseAPI(service)
+    recorder = Recorder(fake)
+
+    release(GitHub(recorder, "owner/repo", 1), document)
+
+    assert [(method, path) for method, path, _body in recorder.writes] == [
+        ("POST", "releases"),
+        ("PATCH", "releases/1"),
+    ]
+    created, published = (body for _method, _path, body in recorder.writes)
+    assert type(created) is bytes and created.isascii()
+    assert type(published) is bytes and published.isascii()
+    assert created == (
+        b'{"tag_name": "v0.6.1", "name": "v0.6.1", "target_commitish": "'
+        + b"a" * 40
+        + b'", "body": '
+        + JSON_NOTES_WIRE
+        + b', "draft": true, "prerelease": false}'
+    )
+    assert published == b'{"body": ' + JSON_NOTES_WIRE + b', "draft": false}'
+    assert fake.current == Release(
+        id=1, tag_name="v0.6.1", draft=False, prerelease=False, body=JSON_NOTES
+    )

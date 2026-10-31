@@ -67,6 +67,7 @@ class ContainerState(BaseModel):
     status: str = Field(alias="Status", min_length=1)
     restarting: bool = Field(alias="Restarting")
     paused: bool = Field(alias="Paused")
+    exit_code: int = Field(alias="ExitCode")
     health: ContainerHealth | None = Field(default=None, alias="Health")
 
 

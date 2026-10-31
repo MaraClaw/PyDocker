@@ -53,11 +53,15 @@ class StackTarget:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ComposeService:
-    """One selected Compose service, its config hash and its full container IDs."""
+    """One selected Compose service, its config hash and its full container IDs.
+
+    A completion service is expected to exit 0 rather than keep running.
+    """
 
     name: str
     config_hash: str
     container_ids: tuple[str, ...]
+    completion: bool = False
 
     def __post_init__(self) -> None:
         """Reject empty names or hashes and empty, blank or duplicate IDs."""
@@ -67,6 +71,7 @@ class ComposeService:
             or not self.name
             or type(self.config_hash) is not str
             or not self.config_hash
+            or type(self.completion) is not bool
             or type(ids) is not tuple
             or not ids
             or any(type(identity) is not str or not identity for identity in ids)
@@ -115,7 +120,12 @@ class Failure:
     """Terminal outcome; the optional cause may contain confidential details."""
 
     reason: Literal[
-        "unsupported", "malformed", "superseded", "update_failed", "observation"
+        "unsupported",
+        "malformed",
+        "superseded",
+        "update_failed",
+        "completion_failed",
+        "observation",
     ]
     service_id: str | None = None
     state: str | None = None
@@ -135,6 +145,10 @@ class DeadlineDetail:
     of its containers has a status other than ``running`` (so a restarting, paused
     or exited-0 container is also a non-running one), is restarting, is paused, or
     has a healthcheck whose status is not ``healthy``, including ``starting``.
+    Those four apply only to long-running services. A completion service is counted
+    as unfinished when any of its containers isn't ``exited`` with code 0 and not
+    restarting; a nonzero exit that isn't restarting ends the wait as a failure
+    instead of being counted.
     """
 
     captured_services: int
@@ -152,6 +166,7 @@ class DeadlineDetail:
     restarting_containers: int = 0
     paused_containers: int = 0
     unhealthy_containers: int = 0
+    unfinished_completion_containers: int = 0
 
     def __post_init__(self) -> None:
         """Reject non-integer counts or counts outside captured membership."""
@@ -172,6 +187,7 @@ class DeadlineDetail:
             self.restarting_containers,
             self.paused_containers,
             self.unhealthy_containers,
+            self.unfinished_completion_containers,
         )
         if any(
             type(count) is not int or not 0 <= count <= self.captured_services

@@ -1,12 +1,13 @@
 """Docker daemon information, rounded disk summaries, and owned event streams."""
 
 import datetime
-import json
 from collections.abc import Iterable, Mapping
 from types import MappingProxyType
 from typing import Literal
 
+from pywhales._json import loads_compat
 from pywhales.client_config import Command, DockerCLICaller
+from pywhales.components._json_output import JsonOutputParser
 from pywhales.components.system.models import (
     DockerEvent,
     DockerItemsSummary,
@@ -28,6 +29,14 @@ type SystemPruneFilter = (
 )
 
 
+def _parse_event(record: bytes) -> DockerEvent:
+    return DockerEvent(**loads_compat(record))
+
+
+def _parse_info(output: str) -> SystemInfo:
+    return SystemInfo(**loads_compat(output))
+
+
 class DiskFreeResult:
     """Docker-reported disk usage grouped by resource kind.
 
@@ -43,7 +52,7 @@ class DiskFreeResult:
     def __init__(self, cli_stdout: str) -> None:
         docker_items = {}
         for line in cli_stdout.splitlines():
-            docker_items_dict = json.loads(line)
+            docker_items_dict = loads_compat(line)
             reclamable = docker_items_dict["Reclaimable"]
             docker_items_dict["Reclaimable"] = reclamable.split(" ")[0]
             if "%" in reclamable:
@@ -72,10 +81,18 @@ class SystemCLI(DockerCLICaller):
         Returns:
             Usage for images, containers, local volumes, and build cache. Byte
             values reflect the CLI's rounding rather than exact daemon totals.
+
+        Raises:
+            ParsingError: If the output is malformed or has an unexpected shape.
+                Safe mode withholds the payload and chains no cause; a client
+                with `raw_diagnostics=True` chains the original error.
         """
 
         full_cmd = Command([*self.docker_cmd, "system", "df", "--format", "{{json .}}"])
-        return DiskFreeResult(run(full_cmd))
+        parser = JsonOutputParser(
+            "system disk usage", self.client_config.raw_diagnostics
+        )
+        return parser.parse(DiskFreeResult, run(full_cmd))
 
     def events(
         self,
@@ -123,6 +140,11 @@ class SystemCLI(DockerCLICaller):
                 iteration or clean context exit.
             BufferError: If a record or retained stderr history exceeds the
                 configured stream buffer budget.
+            ParsingError: Raised once, during iteration, by the first malformed
+                or unexpected stdout record, after the CLI is closed and reaped.
+                The client's `raw_diagnostics` flag is read at launch: safe mode
+                withholds the payload and chains no cause, raw mode chains the
+                original error.
         """
         filter_args = format_filters_for_cli(filters)
         full_cmd = Command(
@@ -137,11 +159,12 @@ class SystemCLI(DockerCLICaller):
         full_cmd.add_simple_arg("--since", format_time_arg(since))
         full_cmd.add_simple_arg("--until", format_time_arg(until))
         full_cmd.add_args_iterable_or_single("--filter", filter_args)
+        parser = JsonOutputParser("system event", self.client_config.raw_diagnostics)
         stream = stream_stdout_and_stderr(full_cmd, timeout=timeout)
         return MappedProcessStream(
             stream,
             (
-                DockerEvent(**json.loads(content))
+                parser.parse(_parse_event, content)
                 for origin, content in stream
                 if origin == "stdout"
             ),
@@ -152,11 +175,17 @@ class SystemCLI(DockerCLICaller):
 
         Returns:
             Parsed system information. Fields omitted by Docker remain None.
+
+        Raises:
+            ParsingError: If the output is malformed or has an unexpected shape.
+                Safe mode withholds the payload and chains no cause; a client
+                with `raw_diagnostics=True` chains the original error.
         """
         full_cmd = Command(
             [*self.docker_cmd, "system", "info", "--format", "{{json .}}"]
         )
-        return SystemInfo(**json.loads(run(full_cmd)))
+        parser = JsonOutputParser("system info", self.client_config.raw_diagnostics)
+        return parser.parse(_parse_info, run(full_cmd))
 
     def prune(
         self,

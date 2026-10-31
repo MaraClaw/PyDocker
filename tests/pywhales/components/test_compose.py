@@ -25,10 +25,10 @@ from unittest.mock import Mock, patch
 
 import pytest
 import pytz
-from pydantic import ValidationError
 
 import pywhales
 from pywhales import Container, DockerClient, DockerException
+from pywhales.client_config import ParsingError
 from pywhales.components.compose.models import ComposeConfig, ComposeEvent
 from pywhales.components.container.models import ContainerState
 from pywhales.components.top import ComposeTopResult, TopParseError
@@ -2180,7 +2180,7 @@ def test_owned_compose_events_release_child_on_parse_error(payload: str) -> None
     ):
         stream = docker.compose.events()
 
-        with pytest.raises((json.JSONDecodeError, ValidationError)):
+        with pytest.raises(ParsingError):
             next(stream)
 
         assert raw._process.poll() is not None

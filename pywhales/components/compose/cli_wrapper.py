@@ -6,7 +6,6 @@ originating configuration; returned output is not diagnostic redaction output.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import timedelta
 from pathlib import Path
@@ -18,7 +17,9 @@ from typing_extensions import TypedDict
 
 import pywhales.components.container.cli_wrapper
 import pywhales.components.volume.cli_wrapper
+from pywhales._json import loads_compat
 from pywhales.client_config import Command, DockerCLICaller
+from pywhales.components._json_output import JsonOutputParser
 from pywhales.components.compose.models import (
     ComposeConfig,
     ComposeEvent,
@@ -45,6 +46,39 @@ from pywhales.utils import (
 )
 
 type ComposeLsFilter = tuple[Literal["name"], str]
+
+
+def _parse_config(output: str) -> ComposeConfig:
+    return ComposeConfig(**loads_compat(output))
+
+
+def _parse_config_json(output: str) -> dict[str, JsonValue]:
+    return custom_parse_object_as(dict[str, JsonValue], loads_compat(output))
+
+
+def _parse_projects(output: str) -> list[ComposeProject]:
+    return [
+        ComposeProject(
+            name=proj["Name"],
+            created=parse_ls_status_count(proj["Status"], "created"),
+            running=parse_ls_status_count(proj["Status"], "running"),
+            restarting=parse_ls_status_count(proj["Status"], "restarting"),
+            exited=parse_ls_status_count(proj["Status"], "exited"),
+            paused=parse_ls_status_count(proj["Status"], "paused"),
+            dead=parse_ls_status_count(proj["Status"], "dead"),
+            config_files=[
+                Path(path)
+                for path in proj.get("ConfigFiles", "").split(",")
+                if "ConfigFiles" in proj
+            ]
+            or None,
+        )
+        for proj in loads_compat(output)
+    ]
+
+
+def _parse_event(record: bytes) -> ComposeEvent:
+    return ComposeEvent(**loads_compat(record))
 
 
 class ComposeRunArgs(TypedDict, total=False, closed=True):
@@ -262,13 +296,19 @@ class ComposeCLI(DockerCLICaller):
         Returns:
             The typed configuration by default, or the complete decoded JSON
             dictionary when `return_json=True`.
+
+        Raises:
+            ParsingError: If the output is malformed or has an unexpected shape.
+                Safe mode withholds the payload and chains no cause; a client
+                with `raw_diagnostics=True` chains the original error.
         """
         full_cmd = Command([*self.docker_compose_cmd, "config", "--format", "json"])
         result = run(full_cmd, capture_stdout=True)
+        parser = JsonOutputParser("compose config", self.client_config.raw_diagnostics)
         if return_json:
-            return custom_parse_object_as(dict[str, JsonValue], json.loads(result))
+            return parser.parse(_parse_config_json, result)
         else:
-            return ComposeConfig(**json.loads(result))
+            return parser.parse(_parse_config, result)
 
     @overload
     def create(
@@ -752,30 +792,19 @@ class ComposeCLI(DockerCLICaller):
             TypeError: If filters is a string, bytes, or an iterable containing
                 anything but ``(key, value)`` tuples of strings. Raised before
                 the Docker executable is looked up.
+            ParsingError: If the output is malformed or has an unexpected shape.
+                Safe mode withholds the payload and chains no cause; a client
+                with `raw_diagnostics=True` chains the original error.
         """
         filter_args = format_filters_for_cli(filters)
         full_cmd = Command([*self.docker_compose_cmd, "ls", "--format", "json"])
         full_cmd.add_flag("--all", all)
         full_cmd.add_args_iterable_or_single("--filter", filter_args)
 
-        return [
-            ComposeProject(
-                name=proj["Name"],
-                created=parse_ls_status_count(proj["Status"], "created"),
-                running=parse_ls_status_count(proj["Status"], "running"),
-                restarting=parse_ls_status_count(proj["Status"], "restarting"),
-                exited=parse_ls_status_count(proj["Status"], "exited"),
-                paused=parse_ls_status_count(proj["Status"], "paused"),
-                dead=parse_ls_status_count(proj["Status"], "dead"),
-                config_files=[
-                    Path(path)
-                    for path in proj.get("ConfigFiles", "").split(",")
-                    if "ConfigFiles" in proj
-                ]
-                or None,
-            )
-            for proj in json.loads(run(full_cmd))
-        ]
+        parser = JsonOutputParser(
+            "compose project list", self.client_config.raw_diagnostics
+        )
+        return parser.parse(_parse_projects, run(full_cmd))
 
     def publish(
         self,
@@ -1363,14 +1392,20 @@ class ComposeCLI(DockerCLICaller):
             DockerTimeout: The local events CLI exceeds its deadline and is
                 killed and reaped.
             DockerException: The local events CLI exits unsuccessfully.
+            ParsingError: Raised once, during iteration, by the first malformed
+                or unexpected stdout record, after the CLI is closed and reaped.
+                The client's `raw_diagnostics` flag is read at launch: safe mode
+                withholds the payload and chains no cause, raw mode chains the
+                original error.
         """
         full_cmd = [*self.docker_compose_cmd, "events", "--json", *services]
 
+        parser = JsonOutputParser("compose event", self.client_config.raw_diagnostics)
         stream = stream_stdout_and_stderr(full_cmd, timeout=timeout)
         return MappedProcessStream(
             stream,
             (
-                ComposeEvent(**json.loads(content))
+                parser.parse(_parse_event, content)
                 for origin, content in stream
                 if origin == "stdout"
             ),

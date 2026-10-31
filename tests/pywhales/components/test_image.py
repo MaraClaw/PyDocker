@@ -9,7 +9,7 @@ import contextlib
 import json
 import sys
 import time
-from collections.abc import Callable, Generator, Iterable
+from collections.abc import Callable, Generator, Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextvars import ContextVar
 from pathlib import Path
@@ -2274,9 +2274,9 @@ def test_pull_nothing(ctr_client: DockerClient) -> None:
     assert len(result) == 0
 
 
-def test_pull_nothing_stream_logs(ctr_client: DockerClient) -> None:
-    result = ctr_client.image.pull([], stream_logs=True)
-    assert isinstance(result, Generator)
+def test_pull_nothing_stream_logs() -> None:
+    result = DockerClient().image.pull([], stream_logs=True)
+    assert isinstance(result, Iterator)
     assert len(list(result)) == 0
 
 

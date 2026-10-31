@@ -9,19 +9,17 @@ The 18 groups are `buildx`, `compose`, `config`, `container`, `context`, `image`
 - Each group's `cli_wrapper.py` holds its CLI class and resource wrappers where present.
   Its `models.py`, when present, defines typed Docker wire data.
 - Empty `__init__.py` files aren't public API entry points.
-- For group-specific instructions, continue in `buildx/AGENTS.md`, `compose/AGENTS.md`,
-  `container/AGENTS.md`, or `image/AGENTS.md` when working in those directories.
+- Child guides: `buildx/AGENTS.md` (also imagetools), `compose/AGENTS.md`, `container/AGENTS.md`,
+  `image/AGENTS.md`, `manifest/AGENTS.md`, and `service/AGENTS.md`.
 
 ## Wrapper Changes
 
-- Extend the group's existing `Command` and configured command prefix; reuse shared
-  argument helpers instead of adding a separate command-building path.
-- Keep resource-or-string inputs in the existing `Valid*` aliases and shared CLI
-  conversion path. Don't replace resource conversion with ad hoc name/ID extraction.
-- Forward modern options directly to the CLI. Don't add version probes or fallback
-  invocations that silently drop options or change behavior.
-- Model changes need representative wire JSON fixtures and static type contracts.
-  Preserve existing wire aliases when adding fields or changing their types.
+- Extend existing `Command` and configured prefixes; reuse shared argument helpers.
+- Preserve resource-or-string `Valid*` aliases and shared conversion, not ad hoc name/ID extraction.
+- Forward modern options directly; no version probes or fallbacks that silently drop options.
+- Model changes need wire fixtures and static contracts; preserve existing wire aliases.
+- Container, Compose and service `envs` forwarding follows the
+  [runtime environment transport contract](../AGENTS.md#container-environment-transport); keep it centralized.
 
 ## Shared Contracts
 
@@ -42,8 +40,7 @@ The 18 groups are `buildx`, `compose`, `config`, `container`, `context`, `image`
   identities, and duplicate consistency for the whole response before hydrating any returned handle.
 - Context names must match exactly. Full plugin IDs (64 lowercase hex characters) and task IDs
   (25 lowercase alphanumeric characters) must match exactly; other aliases retain positional association.
-  Preserve request order and duplicates
-  as distinct handles; `[]` returns without executable lookup. Scalar inspect and current-context
+  Preserve request order and duplicate handles; `[]` returns without executable lookup. Scalar and current-context
   `context.inspect()` behavior stay unchanged; don't apply these positional rules to Swarm reordering.
 - `top.py` shares table parsing, but Docker top takes `ps_args` and Compose top selects
   services with grouped-container or flat-service output. Keep those grammars separate.
@@ -55,9 +52,8 @@ The 18 groups are `buildx`, `compose`, `config`, `container`, `context`, `image`
 - A keyword-only `timeout` is positive finite seconds for the selected local CLI launch, or `None` to
   inherit `ClientConfig.default_timeout`; wrappers call `utils.validate_timeout` first. Expiry, reaping,
   and stream timing follow [the runtime guide](../AGENTS.md). No deadline undoes daemon or registry work.
-- Container (`run`, `execute`, `start`, `copy`, `export`, `logs`) and Compose (`run`, `pull`, `push`,
-  `watch`, `logs`, `events`) rules live in their child guides. Image transfers and archives and Buildx
-  `build`/`bake`/`prune` also take `timeout`; start from their wrapper signatures.
+- Container and Compose launch/transfer/subscription rules live in their child guides.
+  Image transfers/archives and Buildx `build`/`bake`/`prune` also take `timeout`; read wrapper signatures.
 - `service.logs()` and `system.events()` take keyword-only `timeout`. Service inspect preflight is outside
   the deadline; logs keep collected text or owned byte streams. Events keep `MappedProcessStream[DockerEvent]`
   (stdout-only JSON mapping, transport ownership). There's no `Service.logs()` handle API.
@@ -74,10 +70,8 @@ The 18 groups are `buildx`, `compose`, `config`, `container`, `context`, `image`
 
 ## Test Navigation
 
-- Group behavior: `tests/pywhales/components/test_<group>.py`; Buildx has its own subtree.
-- Shared top parsing is covered through `tests/pywhales/components/test_container.py`
-  and `tests/pywhales/components/test_compose.py`; root-alias coverage is in
-  `tests/pywhales/test_docker_client.py`.
+- Group behavior: `tests/pywhales/components/test_<group>.py`; Buildx has its own subtree. Read [test selection hazards](../../tests/AGENTS.md) before collecting mixed modules.
+- Shared top parsing: container/Compose component tests; root aliases: `tests/pywhales/test_docker_client.py`.
 - Wire fixtures live in `tests/pywhales/components/jsons/`; static resource and top
   contracts live in `tests/pywhales/test_type_contracts.py`, with group-specific contracts
   alongside it for Buildx and Compose.
